@@ -56,7 +56,28 @@ static void I_CheckNativeMouse ();
 bool GUICapture;
 static bool NativeMouse = true;
 
+// Diagnostic: dump every input event, plus a periodic snapshot of the gamepad
+// axes, to the console (logcat on Android). Off by default; set i_debuginput 1.
+// Axes are polled rather than delivered as events (see i_joystick.cpp), so stick
+// drift is invisible in the event stream and needs the snapshot to be seen.
+CVAR (Bool, i_debuginput, false, 0)
+
+#ifdef __ANDROID__
+// Raise the on-screen keyboard when the game takes GUI capture.
+//
+// Off by default: GUICapture is true for EVERY menu, not just text fields, so
+// enabling this pops the soft keyboard over the game whenever a menu opens. On a
+// handheld with a physical gamepad that is pure nuisance - and it covers a third
+// of the screen. Turn it on only if you need to type in the console or name a
+// save, since touch input is the only way to press its keys.
+CVAR (Bool, android_softkeyboard, false, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
+#endif
+
+#ifdef __ANDROID__
+CVAR (Bool,  use_mouse,				false, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
+#else
 CVAR (Bool,  use_mouse,				true, CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
+#endif
 
 
 extern int WaitingForKey;
@@ -176,6 +197,23 @@ static void I_CheckGUICapture ()
 		{
 			buttonMap.ResetButtonStates();
 		}
+#ifdef __ANDROID__
+		// Nothing else raises the soft keyboard, so this is the only way the console
+		// and save-name entry can receive text - but it triggers on every menu, so
+		// it is opt-in. See the android_softkeyboard comment above.
+		if (android_softkeyboard)
+		{
+			if (wantCapt)
+				SDL_StartTextInput();
+			else
+				SDL_StopTextInput();
+		}
+		else if (SDL_IsTextInputActive())
+		{
+			// Make sure it is down even if something else raised it.
+			SDL_StopTextInput();
+		}
+#endif
 	}
 }
 
@@ -208,6 +246,11 @@ void I_UnlockMouseFromWindow() {
 
 static void MouseRead ()
 {
+#ifdef __ANDROID__
+	// There is no mouse, and relative mouse mode is pointer capture with nothing
+	// to capture. Reading it would only feed noise into the camera.
+	return;
+#else
 	int x, y;
 
 	if (NativeMouse)
@@ -217,10 +260,14 @@ static void MouseRead ()
 
 	SDL_GetRelativeMouseState (&x, &y);
 	PostMouseMove (x, y);
+#endif
 }
 
 static void I_CheckNativeMouse ()
 {
+#ifdef __ANDROID__
+	return;
+#else
 	bool focus = SDL_GetKeyboardFocus() != NULL;
 
 	bool captureModeInGame = sysCallbacks.CaptureModeInGame && sysCallbacks.CaptureModeInGame();
@@ -242,6 +289,138 @@ static void I_CheckNativeMouse ()
 			SDL_GetRelativeMouseState(&dx, &dy);
 			SDL_SetRelativeMouseMode(SDL_TRUE);
 		}
+	}
+#endif
+}
+
+static const char *SDLInputEventName(uint32_t type)
+{
+	switch (type)
+	{
+	case SDL_KEYDOWN:                return "KEYDOWN";
+	case SDL_KEYUP:                  return "KEYUP";
+	case SDL_TEXTINPUT:              return "TEXTINPUT";
+	case SDL_JOYBUTTONDOWN:          return "JOYBUTTONDOWN";
+	case SDL_JOYBUTTONUP:            return "JOYBUTTONUP";
+	case SDL_JOYAXISMOTION:          return "JOYAXISMOTION";
+	case SDL_JOYHATMOTION:           return "JOYHATMOTION";
+	case SDL_CONTROLLERBUTTONDOWN:   return "PADBUTTONDOWN";
+	case SDL_CONTROLLERBUTTONUP:     return "PADBUTTONUP";
+	case SDL_CONTROLLERAXISMOTION:   return "PADAXISMOTION";
+	case SDL_MOUSEMOTION:            return "MOUSEMOTION";
+	case SDL_MOUSEBUTTONDOWN:        return "MOUSEBUTTONDOWN";
+	case SDL_MOUSEBUTTONUP:          return "MOUSEBUTTONUP";
+	case SDL_FINGERDOWN:             return "FINGERDOWN";
+	case SDL_FINGERUP:               return "FINGERUP";
+	case SDL_FINGERMOTION:           return "FINGERMOTION";
+	default:                         return nullptr;
+	}
+}
+
+// Reports how the two guards in the JOY/PAD button cases below will resolve. If
+// GetDeviceFromID returns null, NEITHER guard fires and the same physical button
+// is posted twice - once as a joystick button and once as a gamepad button.
+static void LogDeviceResolution(SDL_JoystickID which)
+{
+	IJoystickConfig *joy = JoystickManager ? JoystickManager->GetDeviceFromID(which) : nullptr;
+	if (joy == nullptr)
+		Printf(TEXTCOLOR_RED "  device %d did not resolve - both JOY and PAD paths will post!\n", (int)which);
+	else
+		Printf("  device %d resolved, IsGamepad=%d\n", (int)which, (int)joy->IsGamepad());
+}
+
+static void LogSDLInputEvent(const SDL_Event &sev)
+{
+	const char *name = SDLInputEventName(sev.type);
+	if (name == nullptr)
+		return;
+
+	switch (sev.type)
+	{
+	case SDL_KEYDOWN:
+	case SDL_KEYUP:
+		// A gamepad that also enumerates as a keyboard - which the Ayn Thor does
+		// (Classes: KEYBOARD | GAMEPAD | JOYSTICK) - delivers its buttons here as
+		// well as through the pad paths. Watch for a key event paired with a pad
+		// event at the same timestamp.
+		Printf("%s sym=%d(%s) scan=%d repeat=%d\n", name, (int)sev.key.keysym.sym,
+			SDL_GetKeyName(sev.key.keysym.sym), (int)sev.key.keysym.scancode, (int)sev.key.repeat);
+		break;
+
+	case SDL_JOYBUTTONDOWN:
+	case SDL_JOYBUTTONUP:
+		Printf("%s which=%d button=%d\n", name, (int)sev.jbutton.which, (int)sev.jbutton.button);
+		LogDeviceResolution(sev.jbutton.which);
+		break;
+
+	case SDL_CONTROLLERBUTTONDOWN:
+	case SDL_CONTROLLERBUTTONUP:
+		Printf("%s which=%d button=%d(%s)\n", name, (int)sev.cbutton.which, (int)sev.cbutton.button,
+			SDL_GameControllerGetStringForButton((SDL_GameControllerButton)sev.cbutton.button));
+		LogDeviceResolution(sev.cbutton.which);
+		break;
+
+	case SDL_JOYHATMOTION:
+		Printf("%s which=%d hat=%d value=0x%02x\n", name, (int)sev.jhat.which,
+			(int)sev.jhat.hat, (unsigned)sev.jhat.value);
+		break;
+
+	case SDL_JOYAXISMOTION:
+		if (abs((int)sev.jaxis.value) > 2000)
+			Printf("%s which=%d axis=%d value=%d\n", name, (int)sev.jaxis.which,
+				(int)sev.jaxis.axis, (int)sev.jaxis.value);
+		break;
+
+	case SDL_CONTROLLERAXISMOTION:
+		if (abs((int)sev.caxis.value) > 2000)
+			Printf("%s which=%d axis=%d(%s) value=%d\n", name, (int)sev.caxis.which,
+				(int)sev.caxis.axis,
+				SDL_GameControllerGetStringForAxis((SDL_GameControllerAxis)sev.caxis.axis),
+				(int)sev.caxis.value);
+		break;
+
+	case SDL_FINGERDOWN:
+	case SDL_FINGERUP:
+	case SDL_FINGERMOTION:
+		Printf("%s finger=%d x=%.3f y=%.3f\n", name, (int)sev.tfinger.fingerId,
+			sev.tfinger.x, sev.tfinger.y);
+		break;
+
+	default:
+		Printf("%s\n", name);
+		break;
+	}
+}
+
+// Axes are polled, not evented, so a stick resting off-centre never appears in the
+// event stream - it just reads as permanently held in menus. Snapshot every second.
+static void LogGamepadAxisSnapshot()
+{
+	static uint64_t nextReport = 0;
+	uint64_t now = SDL_GetTicks64();
+	if (now < nextReport)
+		return;
+	nextReport = now + 1000;
+
+	for (int i = 0; i < SDL_NumJoysticks(); i++)
+	{
+		if (!SDL_IsGameController(i))
+			continue;
+		SDL_GameController *pad = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
+		if (pad == nullptr)
+			continue;
+
+		Printf("axes[%d] LX=%6d LY=%6d RX=%6d RY=%6d LT=%6d RT=%6d  dpad=%d%d%d%d\n", i,
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX),
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY),
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX),
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY),
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT),
+			SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT),
+			SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP),
+			SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN),
+			SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT),
+			SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT));
 	}
 }
 
@@ -275,6 +454,9 @@ void MessagePump (const SDL_Event &sev)
 	static int lastx = 0, lasty = 0;
 	int x, y;
 	event_t event = { 0,0,0,0,0,0,0 };
+
+	if (i_debuginput)
+		LogSDLInputEvent(sev);
 
 	switch (sev.type)
 	{
@@ -545,7 +727,12 @@ void MessagePump (const SDL_Event &sev)
 			event.type = sev.type == SDL_JOYBUTTONDOWN ? EV_KeyDown : EV_KeyUp;
 			event.data1 = KEY_FIRSTJOYBUTTON + sev.jbutton.button;
 			if(event.data1 != 0)
+			{
+				if (i_debuginput)
+					Printf("  -> POST %s data1=%d (joy)\n",
+						event.type == EV_KeyDown ? "EV_KeyDown" : "EV_KeyUp", (int)event.data1);
 				D_PostEvent(&event);
+			}
 			break;
 		}
 	case SDL_CONTROLLERBUTTONDOWN:
@@ -558,7 +745,12 @@ void MessagePump (const SDL_Event &sev)
 			event.type = sev.type == SDL_CONTROLLERBUTTONDOWN ? EV_KeyDown : EV_KeyUp;
 			event.data1 = sev.cbutton.button < 21 ? controller_translation[sev.cbutton.button] : 0;
 			if(event.data1 != 0)
+			{
+				if (i_debuginput)
+					Printf("  -> POST %s data1=%d (pad)\n",
+						event.type == EV_KeyDown ? "EV_KeyDown" : "EV_KeyUp", (int)event.data1);
 				D_PostEvent(&event);
+			}
 			break;
 		}
 	case SDL_JOYDEVICEREMOVED:
@@ -582,6 +774,9 @@ void MessagePump (const SDL_Event &sev)
 
 void I_GetEvent ()
 {
+	if (i_debuginput)
+		LogGamepadAxisSnapshot();
+
 	SDL_Event sev;
 
 	while (SDL_PollEvent (&sev))

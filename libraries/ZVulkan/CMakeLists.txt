@@ -4,6 +4,15 @@ project(zvulkan)
 option( VULKAN_USE_XLIB "Use Vulkan xlib (X11) WSI integration" ON )
 option( VULKAN_USE_WAYLAND "Use Vulkan Wayland WSI integration" OFF )
 
+if ( ANDROID )
+	# There is no X11 or Wayland, and no Android WSI define is needed either:
+	# the VkSurfaceKHR is created by SDL_Vulkan_CreateSurface and handed to
+	# VulkanSurface's raw-handle constructor, so vulkan.h never has to know
+	# about the platform.
+	set( VULKAN_USE_XLIB OFF )
+	set( VULKAN_USE_WAYLAND OFF )
+endif()
+
 if ( VULKAN_USE_XLIB )
 	add_definitions( -DVULKAN_USE_XLIB=1 )
 else()

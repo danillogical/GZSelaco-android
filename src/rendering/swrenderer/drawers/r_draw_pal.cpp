@@ -112,7 +112,10 @@ namespace swrenderer
 			float Lz = lights[i].z - viewpos_z;
 			float dist2 = Lxy2 + Lz * Lz;
 #ifdef NO_SSE
-			float rcp_dist = 1.0f / (dist2 * 0.01f);
+			// Must match the _mm_rsqrt_ss below: an actual reciprocal square root.
+			// The old 1.0f/(dist2*0.01f) was a plain reciprocal, which made dynamic
+			// light attenuation visibly wrong on every non-SSE target.
+			float rcp_dist = 1.0f / sqrtf(dist2);
 #else
 			float rcp_dist = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(dist2)));
 #endif
@@ -1780,7 +1783,10 @@ namespace swrenderer
 			float Lx = lights[i].x - viewpos_x;
 			float dist2 = Lyz2 + Lx * Lx;
 #ifdef NO_SSE
-			float rcp_dist = 1.0f / (dist2 * 0.01f);
+			// Must match the _mm_rsqrt_ss below: an actual reciprocal square root.
+			// The old 1.0f/(dist2*0.01f) was a plain reciprocal, which made dynamic
+			// light attenuation visibly wrong on every non-SSE target.
+			float rcp_dist = 1.0f / sqrtf(dist2);
 #else
 			float rcp_dist = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_load_ss(&dist2)));
 #endif
@@ -1839,7 +1845,10 @@ namespace swrenderer
 			float Lz = lights[i].z - viewpos_z;
 			float dist2 = Lx * Lx + Ly * Ly + Lz * Lz;
 #ifdef NO_SSE
-			float rcp_dist = 1.0f / (dist2 * 0.01f);
+			// Must match the _mm_rsqrt_ss below: an actual reciprocal square root.
+			// The old 1.0f/(dist2*0.01f) was a plain reciprocal, which made dynamic
+			// light attenuation visibly wrong on every non-SSE target.
+			float rcp_dist = 1.0f / sqrtf(dist2);
 #else
 			float rcp_dist = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_load_ss(&dist2)));
 #endif

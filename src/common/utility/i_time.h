@@ -3,7 +3,11 @@
 #include <stdint.h>
 
 extern int GameTicRate;
-extern double TimeScale;
+
+// Deliberately not an extern variable: Apple's MacTypes.h declares a TimeScale
+// type, and the collision breaks every macOS translation unit that pulls in a
+// system header after this one.
+void I_SetTimeScale(double scale);
 
 void I_InitTime();
 

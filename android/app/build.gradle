@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.selaco.game'
+    compileSdk 34
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'com.selaco.game'
+        // 26 is the floor for the NDK APIs used. The Ayn Thor is API 33.
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+
+        ndk {
+            // The only target that matters here; building 32-bit would double
+            // build time for a device that cannot use it.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // The native side is built by android/build-android.sh, not by Gradle, so
+    // that the two-stage host-tools/cross-compile flow stays scriptable and
+    // reproducible outside the IDE. Gradle just packages the results.
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/java', 'src/main/java-sdl']
+            jniLibs.srcDirs = ['src/main/jniLibs']
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    buildTypes {
+        release {
+            // The engine .so is ~118 MB unstripped; stripping is what makes the
+            // APK a sane size.
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

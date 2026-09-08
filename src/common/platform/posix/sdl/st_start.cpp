@@ -38,6 +38,10 @@
 #include <sys/time.h>
 #include <termios.h>
 
+#ifdef __ANDROID__
+#include <SDL.h>
+#endif
+
 #include "st_start.h"
 #include "i_system.h"
 #include "c_cvars.h"
@@ -276,6 +280,17 @@ bool FTTYStartupScreen::NetLoop(bool (*timer_callback)(void *), void *userdata)
 		if (retval == -1)
 		{
 			// Error
+#ifdef __ANDROID__
+			// fd 0 is typically closed in an app process, so select() fails with
+			// EBADF immediately and forever. Without this the loop would spin at
+			// 100% CPU instead of waiting. Fall back to a plain timed poll.
+			stdin_eof = true;
+			SDL_Delay (500);
+			if (timer_callback (userdata))
+			{
+				return true;
+			}
+#endif
 		}
 		else if (retval == 0)
 		{

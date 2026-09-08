@@ -82,6 +82,12 @@ VkResult volkInitialize(void)
 		module = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!module)
 		module = dlopen("libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
+	// A bare leafname is resolved against DYLD_LIBRARY_PATH and the system
+	// directories only - dlopen does not search the caller's LC_RPATH. So an
+	// app bundle shipping its own MoltenVK has to ask for it by an
+	// @executable_path-relative path, which dlopen does expand.
+	if (!module)
+		module = dlopen("@executable_path/../Frameworks/libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!module)
 		return VK_ERROR_INITIALIZATION_FAILED;
 

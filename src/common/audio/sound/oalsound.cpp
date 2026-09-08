@@ -66,13 +66,23 @@ CVAR (String, snd_alresampler, "Default", CVAR_ARCHIVE|CVAR_GLOBALCONFIG)
 #define OPENALLIB "openal32.dll"
 #elif defined(__OpenBSD__)
 #define OPENALLIB "libopenal.so"
+#elif defined(__ANDROID__)
+// Unversioned: an APK can only carry lib*.so, so "libopenal.so.1" is a name that
+// can never exist on Android and sound init fails with "Using nosound".
+#define OPENALLIB "libopenal.so"
 #else
 #define OPENALLIB "libopenal.so.1"
 #endif
 
 #ifdef __APPLE__
-// User's library (like OpenAL Soft installed manually or via Homebrew) has precedence
-// over Apple's OpenAL framework which lacks several important features
+// A copy bundled inside the .app wins, so a distributed build is self-contained.
+// dlopen resolves a bare leafname against DYLD_LIBRARY_PATH and the system
+// directories only - it does not search LC_RPATH - so this has to be spelled out
+// as an @executable_path-relative path, which dlopen does expand.
+// Failing that, the user's library (OpenAL Soft installed manually or via
+// Homebrew) has precedence over Apple's OpenAL framework, which lacks several
+// important features.
+#define OPENALLIB0 "@executable_path/../Frameworks/libopenal.1.dylib"
 #define OPENALLIB1 "libopenal.1.dylib"
 #define OPENALLIB2 "OpenAL.framework/OpenAL"
 #else // !__APPLE__
@@ -93,7 +103,11 @@ bool IsOpenALPresent()
 	if (!done)
 	{
 		done = true;
+#ifdef __APPLE__
+		cached_result = OpenALModule.Load({OPENALLIB0, OPENALLIB1, OPENALLIB2});
+#else
 		cached_result = OpenALModule.Load({OPENALLIB1, OPENALLIB2});
+#endif
 	}
 	return cached_result;
 #endif

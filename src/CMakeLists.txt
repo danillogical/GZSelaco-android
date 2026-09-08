@@ -86,6 +86,12 @@ else()
 		#  - redefinition of 'FixedToFloat' and 'FloatToFixed' macros
 		#  - redefinition of 'pi' as different kind of symbol
 		add_definitions( -D__FP__ -D__FIXMATH__ )
+	elseif( ANDROID )
+		# No GTK on Android. This must be forced rather than left to the
+		# pkg_check_modules below, which would otherwise happily find the build
+		# host's GTK and put its headers on the cross-compile include path.
+		set( NO_GTK ON )
+		set( DYN_GTK OFF )
 	else()
 		option( NO_GTK "Disable GTK+ dialogs (Not applicable to Windows)" )
 		option( DYN_GTK "Load GTK+ at runtime instead of compile time" ON )
@@ -248,7 +254,11 @@ if( DEM_CMAKE_COMPILER_IS_GNUCXX_COMPATIBLE )
 	set( CMAKE_C_FLAGS "-Wall -Wextra -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -ffp-contract=off ${CMAKE_C_FLAGS}" )
 	set( CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -ffp-contract=off ${CMAKE_CXX_FLAGS}" )
 
-	if( NOT X64 AND NOT CAN_DO_MFPMATH )
+	# CAN_DO_MFPMATH is never set anywhere in the tree, so this reads as
+	# "not x86_64". Spelled out, because on arm64 the SSE intrinsics in the
+	# software renderer's drawers only compile out because NO_SSE is defined, and
+	# relying on a dead variable to get there is a trap.
+	if( NOT X64 )
 		set( CMAKE_C_FLAGS "-DNO_SSE ${CMAKE_C_FLAGS}" )
 		set( CMAKE_CXX_FLAGS "-DNO_SSE ${CMAKE_CXX_FLAGS}" )
 	endif()
@@ -324,8 +334,18 @@ if (HAVE_VULKAN)
 	list( APPEND PROJECT_LIBRARIES "zvulkan" )
 endif()
 
-list( APPEND PROJECT_LIBRARIES "zwidget" )
+if( NOT NO_ZWIDGET )
+	list( APPEND PROJECT_LIBRARIES "zwidget" )
+endif()
 list( APPEND PROJECT_LIBRARIES "webp" )
+
+if( ANDROID )
+	# log      -> __android_log_write, used by I_PrintStr and the fatal error path
+	# android  -> AAssetManager, for extracting the pk3s out of the APK
+	# Vulkan is NOT linked: volk dlopen()s libvulkan.so at runtime.
+	# OpenAL is NOT linked: DYN_OPENAL dlopen()s libopenal.so by name.
+	list( APPEND PROJECT_LIBRARIES log android )
+endif()
 
 # ZMUSIC
 
@@ -383,7 +403,10 @@ else()
 	message( SEND_ERROR "Could not find libvpx" )
 endif()
 
-include_directories( SYSTEM "${BZIP2_INCLUDE_DIR}" "${LZMA_INCLUDE_DIR}" "${ZMUSIC_INCLUDE_DIR}" "${DRPC_INCLUDE_DIR}")
+include_directories( SYSTEM "${BZIP2_INCLUDE_DIR}" "${LZMA_INCLUDE_DIR}" "${ZMUSIC_INCLUDE_DIR}")
+if( DRPC_INCLUDE_DIR )
+	include_directories( SYSTEM "${DRPC_INCLUDE_DIR}" )
+endif()
 
 if( ${HAVE_VM_JIT} )
 	add_definitions( -DHAVE_VM_JIT )
@@ -442,10 +465,12 @@ set( PLAT_SDL_SOURCES
 set( PLAT_UNIX_SOURCES
 	common/platform/posix/unix/i_specialpaths.cpp
 	common/platform/posix/unix/gtk_dialogs.cpp )
+set( PLAT_ANDROID_SOURCES
+	common/platform/posix/android/i_specialpaths.cpp )
 set( PLAT_OSX_SOURCES
 	common/platform/posix/osx/iwadpicker_cocoa.mm
 	common/platform/posix/osx/i_specialpaths.mm
-	posix/osx/zdoom.icns )
+	posix/osx/selaco.icns )
 set( PLAT_COCOA_SOURCES
 	common/platform/posix/cocoa/i_input.mm
 	common/platform/posix/cocoa/i_joystick.cpp
@@ -475,14 +500,27 @@ elseif( APPLE )
 
 	set( SYSTEM_SOURCES ${SYSTEM_SOURCES} ${PLAT_POSIX_SOURCES} ${PLAT_OSX_SOURCES} )
 
-	set_source_files_properties( posix/osx/zdoom.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources )
+	set_source_files_properties( posix/osx/selaco.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources )
 	set_source_files_properties( common/platform/posix/osx/iwadpicker_cocoa.mm PROPERTIES COMPILE_FLAGS -fobjc-exceptions )
 else()
 	option (SYSTEMINSTALL "Set global progdir based on CMake Install Dir" OFF)
 
 	set( SYSTEM_SOURCES_DIR common/platform/posix common/platform/posix/sdl )
-	set( SYSTEM_SOURCES ${PLAT_POSIX_SOURCES} ${PLAT_SDL_SOURCES} ${PLAT_UNIX_SOURCES} )
-	set( OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_OSX_SOURCES} ${PLAT_COCOA_SOURCES} )
+	if( ANDROID )
+		# Same SDL backend as Linux, but:
+		#  - crashcatcher re-execs argv[0] to symbolicate, and there is no
+		#    executable to re-exec; bionic's debuggerd does the job instead.
+		#  - the unix sources are $HOME-based paths and GTK dialogs, replaced
+		#    wholesale by common/platform/posix/android.
+		set( SYSTEM_SOURCES_DIR common/platform/posix common/platform/posix/sdl common/platform/posix/android )
+		set( PLAT_SDL_ANDROID_SOURCES ${PLAT_SDL_SOURCES} )
+		list( REMOVE_ITEM PLAT_SDL_ANDROID_SOURCES common/platform/posix/sdl/crashcatcher.c )
+		set( SYSTEM_SOURCES ${PLAT_POSIX_SOURCES} ${PLAT_SDL_ANDROID_SOURCES} ${PLAT_ANDROID_SOURCES} )
+		set( OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_OSX_SOURCES} ${PLAT_COCOA_SOURCES} ${PLAT_UNIX_SOURCES} )
+	else()
+		set( SYSTEM_SOURCES ${PLAT_POSIX_SOURCES} ${PLAT_SDL_SOURCES} ${PLAT_UNIX_SOURCES} )
+		set( OTHER_SYSTEM_SOURCES ${PLAT_WIN32_SOURCES} ${PLAT_OSX_SOURCES} ${PLAT_COCOA_SOURCES} )
+	endif()
 
 	if ( SYSTEMINSTALL )
 		add_definitions( -DPROGDIR="${CMAKE_INSTALL_PREFIX}/${INSTALL_PK3_PATH}" )
@@ -1095,6 +1133,7 @@ set (PCH_SOURCES
 	common/thirdparty/libsmackerdec/src/HuffmanVLC.cpp
 	common/thirdparty/libsmackerdec/src/LogError.cpp
 	common/thirdparty/libsmackerdec/src/SmackerDecoder.cpp
+	common/engine/i_benchmark.cpp
 	common/engine/cycler.cpp
 	common/engine/d_event.cpp
 	common/engine/date.cpp
@@ -1244,10 +1283,33 @@ set( GAME_SOURCES
 
 )
 
+if( NO_ZWIDGET )
+	# These are the only consumers of ZWidget. The launcher is bypassed on Android
+	# (I_PickIWad returns the default), and errorwindow/netstartwindow are only
+	# ever called from the Win32 main window.
+	list( REMOVE_ITEM GAME_SOURCES
+		launcher/launcherwindow.cpp
+		launcher/launcherbanner.cpp
+		launcher/launcherbuttonbar.cpp
+		launcher/playgamepage.cpp
+		launcher/settingspage.cpp
+		common/widgets/errorwindow.cpp
+		common/widgets/netstartwindow.cpp
+		common/widgets/widgetresourcedata.cpp )
+endif()
+
 set( GAME_NONPCH_SOURCES ${GAME_SOURCES} )
 list( REMOVE_ITEM GAME_NONPCH_SOURCES ${PCH_SOURCES} )
 
-add_executable( zdoom WIN32 MACOSX_BUNDLE ${GAME_SOURCES} )
+if( ANDROID )
+	# SDLActivity dlopen()s the game and calls SDL_main, so the artifact must be a
+	# shared library. The name here is what getLibraries() in the Java activity
+	# loads, and must match android/app's SelacoActivity.
+	add_library( zdoom SHARED ${GAME_SOURCES} )
+	set_target_properties( zdoom PROPERTIES OUTPUT_NAME "Selaco" )
+else()
+	add_executable( zdoom WIN32 MACOSX_BUNDLE ${GAME_SOURCES} )
+endif()
 
 target_precompile_headers( zdoom PRIVATE g_pch.h )
 

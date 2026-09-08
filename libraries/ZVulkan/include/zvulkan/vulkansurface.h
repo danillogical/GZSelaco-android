@@ -8,6 +8,10 @@ public:
 	VulkanSurface(std::shared_ptr<VulkanInstance> instance, VkSurfaceKHR surface);
 	~VulkanSurface();
 
+	// Destroy the current surface and adopt a new one. Only safe once nothing
+	// references the old handle - notably the swapchain must already be gone.
+	void ReplaceHandle(VkSurfaceKHR newSurface);
+
 	std::shared_ptr<VulkanInstance> Instance;
 	VkSurfaceKHR Surface = VK_NULL_HANDLE;
 

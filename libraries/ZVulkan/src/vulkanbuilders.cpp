@@ -1829,10 +1829,12 @@ std::vector<VulkanCompatibleDevice> VulkanDeviceBuilder::FindDevices(const std::
 		if (!requiredExtensionSearch.empty())
 			continue;
 
-		// Check if all required features are there
+		// Check if all required features are there.
+		// multiDrawIndirect is deliberately not required: nothing in the renderer ever
+		// calls vkCmdDrawIndirect, and requiring it rejects every Adreno GPU (which
+		// report it as false), making Vulkan unavailable on Android.
 		if (info.Features.Features.samplerAnisotropy != VK_TRUE ||
 			info.Features.Features.fragmentStoresAndAtomics != VK_TRUE ||
-			info.Features.Features.multiDrawIndirect != VK_TRUE ||
 			info.Features.Features.independentBlend != VK_TRUE)
 			continue;
 

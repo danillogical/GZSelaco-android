@@ -227,6 +227,38 @@ endif()
 option (HAVE_VULKAN "Enable Vulkan support" ON)
 option (HAVE_GLES2 "Enable GLES2 support" ON)
 
+if( ANDROID )
+	# bionic folds pthread into libc, so there is no libpthread to link. CMake's
+	# FindThreads does not detect that reliably here and falls back to guessing
+	# -lpthread, which then fails to link. Pre-seed its results instead.
+	set( THREADS_PREFER_PTHREAD_FLAG ON )
+	set( CMAKE_THREAD_LIBS_INIT "" )
+	set( CMAKE_HAVE_THREADS_LIBRARY 1 )
+	set( CMAKE_USE_WIN32_THREADS_INIT 0 )
+	set( CMAKE_USE_PTHREADS_INIT 1 )
+
+	# discord-rpc link-depends on -lpthread (which bionic does not ship) and talks
+	# to a Discord client over an AF_UNIX socket that cannot exist in an app
+	# sandbox. richpresence.cpp keeps a no-op entry point under NO_DISCORD.
+	set( NO_DISCORD ON )
+
+	# CRITICAL: the NDK links with --gc-sections, and lld >= 14 defaults to
+	# -z start-stop-gc, which lets it collect the areg/creg/freg/greg/yreg/vreg
+	# sections. Those hold every ZScript class, CVar and action-function
+	# registration, gathered via linker-generated __start_/__stop_ symbols
+	# (src/common/objects/autosegs.cpp:61-71). Losing them produces NO link error
+	# and NO warning - the game simply comes up with nothing registered.
+	set( CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,nostart-stop-gc" )
+
+	# The launcher/IWAD-picker is the only consumer of ZWidget, and it is bypassed
+	# on Android (I_PickIWad returns the default), so the whole toolkit and its
+	# desktop-only SDL2 backend are left out of the build.
+	set( NO_ZWIDGET ON )
+	# There is no GTK, and no PATH for pkg-config to find a host copy on.
+	set( NO_GTK ON )
+	set( DYN_GTK OFF )
+endif()
+
 # no, we're not using external asmjit for now, we made too many modifications to our's.
 # if the asmjit author uses our changes then we'll update this.
 
@@ -309,6 +341,15 @@ else()
 			# If we're compiling with a custom GCC on the Mac (which we know since g++-4.2 doesn't support C++11) statically link libgcc.
 			set( ALL_C_FLAGS "-static-libgcc" )
 		endif()
+	elseif( ANDROID )
+		# The game is built as a shared library loaded by SDLActivity, so it must
+		# not get the -fPIE/-pie treatment below (the NDK toolchain already
+		# compiles everything -fPIC).
+		#
+		# The NDK also turns on -Werror=format-security by default, which the
+		# engine's Printf-style call sites trip in a number of places. Demote it
+		# to a warning rather than patching call sites the other platforms accept.
+		set( ALL_C_FLAGS "${ALL_C_FLAGS} -Wno-error=format-security" )
 	elseif( NOT MINGW )
 		# Generic GCC/Clang requires position independent executable to be enabled explicitly
 		set( ALL_C_FLAGS "${ALL_C_FLAGS} -fPIE" )
@@ -340,13 +381,24 @@ if (HAVE_VULKAN)
 	add_subdirectory( libraries/ZVulkan )
 endif()
 
-add_subdirectory( libraries/ZWidget )
+if( NOT NO_ZWIDGET )
+	add_subdirectory( libraries/ZWidget )
+else()
+	add_definitions( -DNO_ZWIDGET )
+endif()
 add_subdirectory( libraries/webp )
 
-add_subdirectory( libraries/discordrpc EXCLUDE_FROM_ALL )
-set( DRPC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libraries/discordrpc/include" )
-set( DRPC_LIBRARIES discord-rpc )
-set( DRPC_LIBRARY discord-rpc )
+if( NO_DISCORD )
+	add_definitions( -DNO_DISCORD )
+	set( DRPC_INCLUDE_DIR "" )
+	set( DRPC_LIBRARIES "" )
+	set( DRPC_LIBRARY "" )
+else()
+	add_subdirectory( libraries/discordrpc EXCLUDE_FROM_ALL )
+	set( DRPC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libraries/discordrpc/include" )
+	set( DRPC_LIBRARIES discord-rpc )
+	set( DRPC_LIBRARY discord-rpc )
+endif()
 
 if( HAVE_VM_JIT AND UNIX )
 	check_symbol_exists( "backtrace" "execinfo.h" HAVE_BACKTRACE )

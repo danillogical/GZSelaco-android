@@ -529,7 +529,7 @@ bool StatDatabase::readRPC(void* data, size_t size) {
 
 
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -543,6 +543,12 @@ bool StatDatabase::readRPC(void* data, size_t size) {
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <sys/un.h>
+
+#ifdef __APPLE__
+// Darwin has no SOCK_NONBLOCK socket type flag; the equivalent is set on the
+// descriptor instead, and the value is compatible with how it is used here.
+#define SOCK_NONBLOCK O_NONBLOCK
+#endif
 
 const std::string IN_FILENAME = "selacoStat1";
 std::string IN_PIPE =  "/tmp/" + IN_FILENAME;

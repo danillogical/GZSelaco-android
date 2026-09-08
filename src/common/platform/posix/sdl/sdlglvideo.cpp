@@ -160,11 +160,20 @@ namespace Priv
 		// TODO control better when updateDisplayInfo fails
 		SDL_Rect* bounds = &displayBounds[vid_adapter % numberOfDisplays];
 
+#ifdef __ANDROID__
+		// The surface is always the whole screen, so the desktop default of 80% of
+		// the display is not just pointless here - it leaves the engine believing
+		// its window is 1536x864 while the real surface is 1920x1080, which skews
+		// the letterbox and crops the image.
+		win_w = bounds->w;
+		win_h = bounds->h;
+#else
 		if (win_w <= 0 || win_h <= 0)
 		{
 			win_w = bounds->w * 8 / 10;
 			win_h = bounds->h * 8 / 10;
 		}
+#endif
 
 		int xWindowPos = (win_x <= 0) ? SDL_WINDOWPOS_CENTERED_DISPLAY(vid_adapter) : win_x;
 		int yWindowPos = (win_y <= 0) ? SDL_WINDOWPOS_CENTERED_DISPLAY(vid_adapter) : win_y;
@@ -180,8 +189,10 @@ namespace Priv
 
 		if (Priv::window != nullptr)
 		{
+#ifndef __ANDROID__
 			// Enforce minimum size limit
 			SDL_SetWindowMinimumSize(Priv::window, VID_MIN_WIDTH, VID_MIN_HEIGHT);
+#endif
 			// Tell SDL to start sending text input on Wayland.
 			if (strncasecmp(SDL_GetCurrentVideoDriver(), "wayland", 7) == 0) SDL_StartTextInput();
 		}

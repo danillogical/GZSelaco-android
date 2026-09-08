@@ -25,7 +25,10 @@ public:
     }
 
 	virtual FString GetIdentifier() {
-		return "JS:" + DeviceIndex;
+		// FString(...) is required: "JS:" + DeviceIndex is pointer arithmetic on
+		// the string literal, not concatenation, so index 1 gave "S:" and
+		// anything past 3 read out of bounds.
+		return FString("JS:") + DeviceIndex;
 	}
 
 	virtual void AddAxes(float axes[NUM_JOYAXIS]) = 0;

@@ -142,6 +142,19 @@ void HWDrawInfo::WorkerThread()
 			_mm_pause();
 			_mm_pause();
 			_mm_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+			// Same idea on ARM. Without this the loop is a bare spin, which on a
+			// battery-powered handheld pins a core for as long as the queue is empty.
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
+			__asm__ __volatile__("yield");
 #endif // ARCH_IA32
 		}
 		// Note that the main thread MUST have prepared the fake sectors that get used below!

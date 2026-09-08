@@ -1,0 +1,14 @@
+# Selaco game data is commercial and large (the demo ipk3 alone is 235 MB).
+# Keep the directory structure and the README, exclude everything else.
+*
+!.gitignore
+!README.txt
+!demo/
+!full/
+demo/*
+full/*
+!demo/.gitkeep
+!full/.gitkeep
+
+# Small text configs belong in the repo; only the game data itself is excluded.
+!*.cfg

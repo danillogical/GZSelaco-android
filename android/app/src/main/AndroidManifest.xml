@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Vulkan 1.1 is the floor the renderer needs; the Adreno 740 reports 1.3.
+         Declared as required so the Play Store would filter out devices that
+         cannot run it. -->
+    <uses-feature android:name="android.hardware.vulkan.version"
+                  android:version="0x00401000"
+                  android:required="true" />
+
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <!-- All-files access, so the game can read Selaco.ipk3 from a folder the user can
+         actually reach. The app's own external files dir needs no permission, but since
+         Android 11 it is unreachable by the user: the Files app and MTP both refuse to
+         enter Android/data, and it is mode 770 owned by the app - so it only works via
+         adb. Public storage also survives uninstalling the app, which Android/data does
+         not (it is deleted along with a 1.1 GB game file).
+         MANAGE_EXTERNAL_STORAGE rather than READ_EXTERNAL_STORAGE because .ipk3 is not
+         a media type, so the Android 13 READ_MEDIA_* permissions cannot see it. This
+         permission needs a Play Store declaration; it is unrestricted for sideloaded
+         and GitHub-release builds. SelacoActivity requests it on startup, and the game
+         still runs from $PROGDIR if it is declined. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:label="Selaco"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:isGame="true"
+        android:theme="@style/GameTheme"
+        android:extractNativeLibs="true">
+
+        <!-- configChanges: handle these ourselves rather than letting Android
+             recreate the activity. A restart would tear down the Vulkan surface
+             and the whole engine with it. -->
+        <activity
+            android:name=".SelacoActivity"
+            android:exported="true"
+            android:label="Selaco"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask"
+            android:preferMinimalPostProcessing="true"
+            android:resizeableActivity="false"
+            android:alwaysRetainTaskState="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density">
+
+            <meta-data android:name="android.app.lib_name" android:value="Selaco" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

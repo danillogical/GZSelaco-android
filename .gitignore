@@ -36,3 +36,20 @@ gzdoom-crash.log
 .vscode/settings.json
 .vscode/launch.json
 .vscode/c_cpp_properties.json
+# Android port build artifacts (see plan-android-port.md)
+/build-host
+/build-android-*
+/android/deps/src
+/android/deps/build
+/android/deps/prefix
+/android/build
+/android/.gradle
+/android/app/build
+/android/app/src/main/jniLibs
+/android/app/src/main/assets/*.pk3
+/android/app/src/main/java-sdl
+/build-macos-*
+/macos/deps/src
+/macos/deps/build
+/macos/deps/prefix
+/macos/deps/prefix

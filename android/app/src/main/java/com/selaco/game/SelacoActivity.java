@@ -1,0 +1,269 @@
+package com.selaco.game;
+
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.widget.Toast;
+
+import org.libsdl.app.SDLActivity;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+
+/**
+ * Entry point for the Android build.
+ *
+ * SDLActivity dlopen()s the libraries named by getLibraries() and then calls
+ * SDL_main in the last one, which is the engine's main() in
+ * common/platform/posix/sdl/i_main.cpp.
+ */
+public class SelacoActivity extends SDLActivity {
+    private static final String TAG = "Selaco";
+
+    @Override
+    protected String[] getLibraries() {
+        // Order matters: dependencies first. libSelaco.so has DT_NEEDED entries
+        // for SDL2, zmusic and omp, and libzmusic in turn needs sndfile (which
+        // carries ogg/vorbis/FLAC/opus statically). openal is not linked at all
+        // but is dlopen()d by name at runtime (DYN_OPENAL), so it has to be
+        // loaded from here for the packaged copy to be the one that gets found.
+        return new String[] {
+            "omp",
+            "SDL2",
+            "sndfile",
+            "zmusic",
+            "openal",
+            "Selaco"
+        };
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        // The engine looks for its resources next to "progdir", which on Android
+        // is the external files dir. Unpack the build's pk3s there before any
+        // native code runs.
+        try {
+            extractAssets();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to extract game resources", e);
+        }
+
+        // Ask for all-files access before the engine starts looking for Selaco.ipk3,
+        // otherwise the first launch cannot see the public folders and fails even when
+        // the file is sitting in /sdcard/Selaco.
+        //
+        // Only ask when there is no game data in our own dir. Anyone who pushed the
+        // ipk3 with adb is already working and must not be nagged, and a user who
+        // declines is not trapped - they just get the engine's "cannot find a game
+        // IWAD" dialog, which names the folders to use.
+        if (!hasGameData() && !hasAllFilesAccess()) {
+            requestAllFilesAccess();
+            finish();
+            return;
+        }
+
+        super.onCreate(savedInstanceState);
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    /** True if Selaco.ipk3 is already in our own external files dir (the adb route). */
+    private boolean hasGameData() {
+        File dir = getExternalFilesDir(null);
+        return dir != null && new File(dir, "Selaco.ipk3").isFile();
+    }
+
+    private boolean hasAllFilesAccess() {
+        // isExternalStorageManager() is API 30+. Below that the legacy storage
+        // permissions apply and public folders are readable without this dance.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true;
+        return Environment.isExternalStorageManager();
+    }
+
+    /**
+     * Send the user to Settings to grant all-files access.
+     *
+     * MANAGE_EXTERNAL_STORAGE cannot be granted by a runtime permission dialog - it is
+     * a special access toggle in Settings - so there is no callback to wait on. The
+     * activity finishes and the user relaunches once the toggle is on.
+     */
+    private void requestAllFilesAccess() {
+        Toast.makeText(this,
+                "Selaco needs file access to find Selaco.ipk3.\n"
+                        + "Turn on \"Allow access to manage all files\", then reopen Selaco.\n"
+                        + "Copy Selaco.ipk3 into Internal storage/Selaco/",
+                Toast.LENGTH_LONG).show();
+
+        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            // Some vendor images ship no per-app screen for this; fall back to the
+            // global list rather than dying.
+            Log.w(TAG, "Per-app all-files-access screen unavailable", e);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            } catch (Exception e2) {
+                Log.e(TAG, "Cannot open storage permission settings", e2);
+            }
+        }
+    }
+
+    /**
+     * Pin the display to landscape.
+     *
+     * SDLActivity recomputes the requested orientation when the window is created
+     * and calls setRequestedOrientation itself, which overrides whatever the
+     * manifest asked for. The engine creates its window with
+     * SDL_WINDOW_RESIZABLE (sdlglvideo.cpp), and for a resizable window SDL can
+     * settle on SCREEN_ORIENTATION_FULL_USER - which follows the system rotation
+     * lock and lets the game come up in portrait.
+     *
+     * Overriding this hook drops SDL's decision entirely. The Thor is a
+     * landscape handheld, so there is nothing to negotiate. Use
+     * SCREEN_ORIENTATION_SENSOR_LANDSCAPE instead if you want the 180-degree flip.
+     */
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            goImmersive();
+            disableFocusHighlight();
+        }
+    }
+
+    /**
+     * Suppress Android's default focus highlight.
+     *
+     * SDLSurface calls setFocusable(true) + requestFocus() (SDLSurface.java:48-50).
+     * The Thor's built-in controller enumerates with a KEYBOARD class, and a
+     * physical keyboard takes Android out of touch mode - which turns on focus
+     * highlights for focusable Views. The result is an olive-green ring composited
+     * over the game on the top, left and right edges (the navigation bar clips the
+     * bottom one).
+     *
+     * It is not a rendering bug: the colour is identical across wildly different
+     * scenes and survives a magenta windowBackground, so it is drawn above the
+     * surface rather than showing through it.
+     *
+     * setDefaultFocusHighlightEnabled is the purpose-built API for this and landed
+     * in API 26, which is exactly our minSdk.
+     */
+    private void disableFocusHighlight() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        View decor = getWindow().getDecorView();
+        decor.setDefaultFocusHighlightEnabled(false);
+        clearFocusHighlight(decor);
+    }
+
+    private void clearFocusHighlight(View view) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            view.setDefaultFocusHighlightEnabled(false);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                clearFocusHighlight(group.getChildAt(i));
+            }
+        }
+    }
+
+    /** Hide the status and navigation bars; they steal touches at the screen edges. */
+    private void goImmersive() {
+        // Draw into the display cutout as well, so a notch does not letterbox the
+        // game. Set here rather than in the theme because the attribute needs API
+        // 27 and minSdk is 26.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    /**
+     * Copy the engine .pk3s out of the APK into external storage.
+     *
+     * They go to the external files dir rather than internal storage because
+     * that is what i_main.cpp sets progdir to, and it is also where the user
+     * drops the Selaco game data - so the engine finds everything in one place.
+     *
+     * Files are only rewritten when the size differs, which keeps warm starts
+     * fast while still picking up a new build.
+     */
+    private void extractAssets() throws IOException {
+        File targetDir = getExternalFilesDir(null);
+        if (targetDir == null) {
+            throw new IOException("External storage is not available");
+        }
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            throw new IOException("Could not create " + targetDir);
+        }
+
+        String[] assets = getAssets().list("");
+        if (assets == null) {
+            return;
+        }
+
+        for (String name : assets) {
+            boolean isPk3 = name.endsWith(".pk3");
+            boolean isConfig = name.equals("autoexec.cfg");
+            if (!isPk3 && !isConfig) {
+                continue;
+            }
+
+            File target = new File(targetDir, name);
+
+            // autoexec.cfg is our shipped Android default config. Write it once and
+            // never again, so the player's own edits survive a reinstall - delete
+            // the file on the device to get the defaults back. The pk3s are engine
+            // resources and must track the build, so those are refreshed whenever
+            // the size differs.
+            if (isConfig && target.exists()) {
+                continue;
+            }
+
+            try (InputStream in = getAssets().open(name)) {
+                if (target.exists() && target.length() == in.available()) {
+                    continue;
+                }
+            }
+
+            Log.i(TAG, "Extracting " + name + " to " + target);
+            try (InputStream in = getAssets().open(name);
+                 OutputStream out = new FileOutputStream(target)) {
+                byte[] buffer = new byte[64 * 1024];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+            }
+        }
+    }
+}

@@ -273,6 +273,14 @@ void DFrameBuffer::FPSLimit()
 		return;
 	}
 
+	// Target the exact period even with vsync on. vid_vsync selects
+	// VK_PRESENT_MODE_FIFO_RELAXED_KHR wherever it is supported
+	// (ZVulkan/src/vulkanswapchain.cpp:134), and relaxed FIFO presents a late frame
+	// immediately instead of holding it for the next vblank. So the classic hazard -
+	// waking a hair late, missing the vblank, and halving the rate again (a 30 fps cap
+	// on a 60 Hz panel collapsing to 20) - does not arise, and shaving the target to
+	// avoid it would just cap slightly fast: aiming 2 ms short measured 31.9 fps
+	// instead of 30 on an Ayn Thor, because nothing rounded the present back up.
 	uint64_t targetWakeTime = fpsLimitTime + 1'000'000 / maxfps;
 
 	while (true)

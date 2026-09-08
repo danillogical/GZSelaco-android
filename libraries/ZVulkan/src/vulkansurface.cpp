@@ -8,7 +8,15 @@ VulkanSurface::VulkanSurface(std::shared_ptr<VulkanInstance> instance, VkSurface
 
 VulkanSurface::~VulkanSurface()
 {
-	vkDestroySurfaceKHR(Instance->Instance, Surface, nullptr);
+	if (Surface)
+		vkDestroySurfaceKHR(Instance->Instance, Surface, nullptr);
+}
+
+void VulkanSurface::ReplaceHandle(VkSurfaceKHR newSurface)
+{
+	if (Surface)
+		vkDestroySurfaceKHR(Instance->Instance, Surface, nullptr);
+	Surface = newSurface;
 }
 
 #ifdef VK_USE_PLATFORM_WIN32_KHR

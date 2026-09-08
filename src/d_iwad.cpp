@@ -724,6 +724,15 @@ int FIWadManager::IdentifyVersion (std::vector<std::string>&wadfiles, const char
 					  "1. Place one or more of these wads in ~/Library/Application Support/" GAMENAMELOWERCASE "/\n"
 					  "2. Edit your ~/Library/Preferences/" GAMENAMELOWERCASE ".ini and add the directories\n"
 					  "of your iwads to the list beneath [IWADSearch.Directories]");
+#elif defined(__ANDROID__)
+					  // Android needs its own text. It used to fall through to the Unix
+					  // branch below and tell users to use ~/.config/, which does not
+					  // exist here - and the app's own Android/data dir cannot be named
+					  // either, because the Files app and MTP have both refused to enter
+					  // it since Android 11. Name a folder the user can actually reach.
+					  "1. Copy Selaco.ipk3 into \"Internal storage/Selaco/\" with the Files app,\n"
+					  "then grant Selaco \"all files access\" when it asks.\n"
+					  "2. Or, with adb: adb push Selaco.ipk3 /sdcard/Selaco/");
 #else
 					  "1. Place one or more of these wads in ~/.config/" GAMENAMELOWERCASE "/.\n"
 					  "2. Edit your ~/.config/" GAMENAMELOWERCASE "/" GAMENAMELOWERCASE ".ini and add the directories of your\n"

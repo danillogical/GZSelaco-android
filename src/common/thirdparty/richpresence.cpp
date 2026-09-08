@@ -39,6 +39,19 @@
 #include <string.h>
 
 #include "common/engine/printf.h"
+
+#ifdef NO_DISCORD
+
+// discord-rpc talks to a local Discord client over an AF_UNIX socket in
+// $XDG_RUNTIME_DIR and registers itself by writing a .desktop file into $HOME.
+// Neither exists in an Android app sandbox, and the library also link-depends on
+// -lpthread, which bionic does not ship. Keep the entry point, drop the rest.
+void I_UpdateDiscordPresence(bool SendPresence, const char* curstatus, const char* appid, const char* steamappid)
+{
+}
+
+#else
+
 #include "discord_rpc.h"
 #include "version.h"
 
@@ -127,3 +140,5 @@ void I_UpdateDiscordPresence(bool SendPresence, const char* curstatus, const cha
 	}
 }
 
+
+#endif // NO_DISCORD

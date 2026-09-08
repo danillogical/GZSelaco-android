@@ -83,9 +83,15 @@ CUSTOM_CVAR(Int, gl_pipeline_depth, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_N
 
 CUSTOM_CVAR(Int, vid_maxfps, 500, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 {
-	if (self < GameTicRate && self != 0)
+	// Floor is deliberately below GameTicRate (35). Rendering slower than the
+	// simulation is legitimate - the game still tics at 35 Hz, we just do not
+	// present every tic - and on a 60 Hz panel a 30 fps cap is smoother than 35,
+	// because 30 is an exact divisor of the refresh rate and 35 is not: at 35 the
+	// frames land alternately on one and two vblanks, which reads as judder.
+	// Handhelds want this; it also halves GPU power at a steady rate.
+	if (self < 20 && self != 0)
 	{
-		self = GameTicRate;
+		self = 20;
 	}
 	else if (self > 1000)
 	{

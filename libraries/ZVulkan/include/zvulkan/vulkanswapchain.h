@@ -29,6 +29,10 @@ public:
 	bool Lost() const { return lost; }
 	void SetLost() { lost = true; }
 
+	// Swap in a freshly created VkSurfaceKHR, tearing down the swapchain first.
+	// Needed on Android, where the surface dies with the window.
+	void RecreateSurface(VkSurfaceKHR newSurface);
+
 	int Width() const { return actualExtent.width; }
 	int Height() const { return actualExtent.height; }
 	VkSurfaceFormatKHR Format() const { return format; }

@@ -4,6 +4,14 @@
 #include "vulkansurface.h"
 #include "vulkanbuilders.h"
 
+// ZVulkan is a standalone library and has no access to the engine's printf.h.
+#ifdef __ANDROID__
+#include <android/log.h>
+#define ZVK_LOG(...) __android_log_print(ANDROID_LOG_INFO, "selaco-ea", __VA_ARGS__)
+#else
+#define ZVK_LOG(...) ((void)0)
+#endif
+
 VulkanSwapChain::VulkanSwapChain(VulkanDevice* device) : device(device)
 {
 }
@@ -102,8 +110,18 @@ bool VulkanSwapChain::CreateSwapchain(int width, int height, int imageCount, boo
 		caps = GetSurfaceCapabilities(exclusivefullscreen);
 	}
 
-	if (caps.PresentModes.empty())
-		VulkanError("No surface present modes supported");
+	// Empty caps means the surface query failed - on Android that happens as soon
+	// as the ANativeWindow behind the surface is destroyed. Recoverable: flag the
+	// swapchain lost so it is rebuilt (see VkFramebufferManager::AcquireImage,
+	// which recreates the surface itself on Android before retrying).
+	if (caps.PresentModes.empty() || caps.Formats.empty())
+	{
+		if (swapchain)
+			vkDestroySwapchainKHR(device->device, swapchain, nullptr);
+		swapchain = VK_NULL_HANDLE;
+		lost = true;
+		return false;
+	}
 
 	bool supportsFifoRelaxed = std::find(caps.PresentModes.begin(), caps.PresentModes.end(), VK_PRESENT_MODE_FIFO_RELAXED_KHR) != caps.PresentModes.end();
 	bool supportsMailbox = std::find(caps.PresentModes.begin(), caps.PresentModes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != caps.PresentModes.end();
@@ -179,7 +197,24 @@ bool VulkanSwapChain::CreateSwapchain(int width, int height, int imageCount, boo
 		swapChainCreateInfo.pQueueFamilyIndices = nullptr;
 	}
 
-	swapChainCreateInfo.preTransform = caps.Capabilites.currentTransform;
+	// Passing currentTransform through is a contract that the application will
+	// pre-rotate its own rendering. Handheld Android panels are frequently
+	// portrait-native and mounted rotated, so currentTransform comes back as
+	// ROTATE_90 and the engine - which knows nothing about pre-rotation - draws
+	// sideways and stretched. Ask for IDENTITY where the surface allows it and let
+	// the compositor do the rotation instead.
+	ZVK_LOG("swapchain: req %dx%d cur %ux%u min %ux%u max %ux%u curXform 0x%x supXform 0x%x\n",
+		width, height,
+		caps.Capabilites.currentExtent.width, caps.Capabilites.currentExtent.height,
+		caps.Capabilites.minImageExtent.width, caps.Capabilites.minImageExtent.height,
+		caps.Capabilites.maxImageExtent.width, caps.Capabilites.maxImageExtent.height,
+		(unsigned)caps.Capabilites.currentTransform,
+		(unsigned)caps.Capabilites.supportedTransforms);
+
+	if (caps.Capabilites.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+		swapChainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	else
+		swapChainCreateInfo.preTransform = caps.Capabilites.currentTransform;
 	swapChainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; // If alpha channel is passed on to the DWM or not
 	swapChainCreateInfo.presentMode = presentMode;
 	swapChainCreateInfo.clipped = VK_TRUE; // Applications SHOULD set this value to VK_TRUE if they do not expect to read back the content of presentable images before presenting them or after reacquiring them, and if their fragment shaders do not have any side effects that require them to run for all pixels in the presentable image
@@ -232,8 +267,14 @@ int VulkanSwapChain::AcquireImage(VulkanSemaphore* semaphore, VulkanFence* fence
 	{
 		return imageIndex;
 	}
-	else if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
+	else if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
 	{
+		// VK_ERROR_SURFACE_LOST_KHR is what Android returns once the
+		// ANativeWindow behind the surface has been destroyed and recreated,
+		// which happens on every pause/resume. QueuePresent below already
+		// treats it as recoverable; without it here the first app switch is
+		// fatal ("Failed to acquire next image!"). Flagging the swapchain lost
+		// makes VkFramebufferManager::AcquireImage rebuild it on the next frame.
 		lost = true;
 		return -1;
 	}
@@ -335,7 +376,7 @@ VulkanSurfaceCapabilities VulkanSwapChain::GetSurfaceCapabilities(bool exclusive
 
 		VkResult result = vkGetPhysicalDeviceSurfaceCapabilities2KHR(device->PhysicalDevice.Device, &surfaceInfo, &caps2);
 		if (result != VK_SUCCESS)
-			VulkanError("vkGetPhysicalDeviceSurfaceCapabilities2KHR failed");
+			return caps;
 
 		caps.Capabilites = caps2.surfaceCapabilities;
 	}
@@ -343,7 +384,7 @@ VulkanSurfaceCapabilities VulkanSwapChain::GetSurfaceCapabilities(bool exclusive
 	{
 		VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->PhysicalDevice.Device, device->Surface->Surface, &caps.Capabilites);
 		if (result != VK_SUCCESS)
-			VulkanError("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed");
+			return caps;	// surface is gone; caller treats empty caps as "lost"
 	}
 
 #ifdef WIN32
@@ -370,14 +411,17 @@ VulkanSurfaceCapabilities VulkanSwapChain::GetSurfaceCapabilities(bool exclusive
 		uint32_t presentModeCount = 0;
 		VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(device->PhysicalDevice.Device, device->Surface->Surface, &presentModeCount, nullptr);
 		if (result != VK_SUCCESS)
-			VulkanError("vkGetPhysicalDeviceSurfacePresentModesKHR failed");
+			return caps;
 
 		if (presentModeCount > 0)
 		{
 			caps.PresentModes.resize(presentModeCount);
 			result = vkGetPhysicalDeviceSurfacePresentModesKHR(device->PhysicalDevice.Device, device->Surface->Surface, &presentModeCount, caps.PresentModes.data());
 			if (result != VK_SUCCESS)
-				VulkanError("vkGetPhysicalDeviceSurfacePresentModesKHR failed");
+			{
+				caps.PresentModes.clear();
+				return caps;
+			}
 		}
 	}
 
@@ -404,18 +448,38 @@ VulkanSurfaceCapabilities VulkanSwapChain::GetSurfaceCapabilities(bool exclusive
 		uint32_t surfaceFormatCount = 0;
 		VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(device->PhysicalDevice.Device, device->Surface->Surface, &surfaceFormatCount, nullptr);
 		if (result != VK_SUCCESS)
-			VulkanError("vkGetPhysicalDeviceSurfaceFormatsKHR failed");
+			return caps;
 		
 		if (surfaceFormatCount > 0)
 		{
 			caps.Formats.resize(surfaceFormatCount);
 			result = vkGetPhysicalDeviceSurfaceFormatsKHR(device->PhysicalDevice.Device, device->Surface->Surface, &surfaceFormatCount, caps.Formats.data());
 			if (result != VK_SUCCESS)
-				VulkanError("vkGetPhysicalDeviceSurfaceFormatsKHR failed");
+			{
+				caps.Formats.clear();
+				return caps;
+			}
 		}
 	}
 
 	caps.FullScreenExclusive.pNext = nullptr;
 
 	return caps;
+}
+
+void VulkanSwapChain::RecreateSurface(VkSurfaceKHR newSurface)
+{
+	// Android destroys the ANativeWindow on pause, which invalidates the
+	// VkSurfaceKHR built from it - every surface query then fails and the
+	// swapchain can never be rebuilt from it. The swapchain must be destroyed
+	// before the surface it was created from, so do it in that order here.
+	views.clear();
+	images.clear();
+	if (swapchain)
+	{
+		vkDestroySwapchainKHR(device->device, swapchain, nullptr);
+		swapchain = VK_NULL_HANDLE;
+	}
+	device->Surface->ReplaceHandle(newSurface);
+	lost = true;
 }

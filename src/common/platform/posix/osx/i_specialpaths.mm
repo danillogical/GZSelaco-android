@@ -226,6 +226,22 @@ FString M_GetSavegamesPath()
 
 //===========================================================================
 //
+// M_GetSavegamesPaths												macOS
+//
+// Returns all paths where savegames might be located.
+//
+//===========================================================================
+
+int M_GetSavegamesPaths(TArray<FString>& outputAr)
+{
+	// macOS has always saved to a single location, so there is no legacy
+	// directory to also search the way Windows and Unix have.
+	outputAr.Push(M_GetSavegamesPath());
+	return 1;
+}
+
+//===========================================================================
+//
 // M_GetDocumentsPath												macOS
 //
 // Returns the path to the default documents directory.

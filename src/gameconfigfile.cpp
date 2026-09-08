@@ -113,6 +113,25 @@ FGameConfigFile::FGameConfigFile ()
 		SetValueForKey ("Path", user_app_support.GetChars(), true);
 		SetValueForKey ("Path", "$PROGDIR", true);
 		SetValueForKey ("Path", local_app_support.GetChars(), true);
+#elif defined(__ANDROID__)
+		// $PROGDIR is the app's own external files dir (see i_main.cpp). It needs no
+		// permission, but since Android 11 it is NOT reachable by the user: the Files
+		// app and MTP both refuse to enter Android/data, and the directory is mode 770
+		// owned by the app. So it works for `adb push` and nothing else.
+		//
+		// The public paths below are what a user can actually drop a file into, and
+		// they survive uninstalling the app - unlike $PROGDIR, which is deleted with
+		// it, taking a 1.1 GB Selaco.ipk3 along. Reading them requires the
+		// MANAGE_EXTERNAL_STORAGE permission that SelacoActivity requests on startup;
+		// if it is declined these entries simply find nothing.
+		//
+		// /sdcard is a symlink to /storage/emulated/0 on every current Android, but
+		// both are listed because the symlink has been absent on some vendor images.
+		SetValueForKey ("Path", "$PROGDIR", true);
+		SetValueForKey ("Path", "/sdcard/Selaco", true);
+		SetValueForKey ("Path", "/sdcard/Download", true);
+		SetValueForKey ("Path", "/storage/emulated/0/Selaco", true);
+		SetValueForKey ("Path", "/storage/emulated/0/Download", true);
 #elif !defined(__unix__)
 		SetValueForKey ("Path", "$HOME", true);
 		SetValueForKey ("Path", "$PROGDIR", true);
@@ -138,6 +157,14 @@ FGameConfigFile::FGameConfigFile ()
 		SetValueForKey ("Path", user_app_support.GetChars(), true);
 		SetValueForKey ("Path", "$PROGDIR", true);
 		SetValueForKey ("Path", local_app_support.GetChars(), true);
+#elif defined(__ANDROID__)
+		// Same reasoning as [IWADSearch.Directories] above: $PROGDIR is adb-only, the
+		// public paths are what a user can reach and what survives an uninstall.
+		SetValueForKey ("Path", "$PROGDIR", true);
+		SetValueForKey ("Path", "/sdcard/Selaco", true);
+		SetValueForKey ("Path", "/sdcard/Download", true);
+		SetValueForKey ("Path", "/storage/emulated/0/Selaco", true);
+		SetValueForKey ("Path", "/storage/emulated/0/Download", true);
 #elif !defined(__unix__)
 		SetValueForKey ("Path", "$PROGDIR", true);
 #else
@@ -165,6 +192,9 @@ FGameConfigFile::FGameConfigFile ()
 		SetValueForKey("Path", "$PROGDIR/fm_banks", true);
 		SetValueForKey("Path", (local_app_support + "/soundfonts").GetChars(), true);
 		SetValueForKey("Path", (local_app_support + "/fm_banks").GetChars(), true);
+#elif defined(__ANDROID__)
+		SetValueForKey("Path", "$PROGDIR/soundfonts", true);
+		SetValueForKey("Path", "$PROGDIR/fm_banks", true);
 #elif !defined(__unix__)
 		SetValueForKey("Path", "$PROGDIR/soundfonts", true);
 		SetValueForKey("Path", "$PROGDIR/fm_banks", true);

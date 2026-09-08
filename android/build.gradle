@@ -1,0 +1,6 @@
+plugins {
+    // AGP 8.9 pairs with Gradle 8.13 (see gradle/wrapper/gradle-wrapper.properties)
+    // and supports NDK 28 + JDK 17. Do not move to Gradle 9 without also moving
+    // AGP - see report-android-port.md D7.
+    id 'com.android.application' version '8.9.1' apply false
+}

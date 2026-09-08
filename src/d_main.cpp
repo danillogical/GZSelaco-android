@@ -235,7 +235,7 @@ CUSTOM_CVAR(Float, i_timescale, 1.0f, CVAR_NOINITCALL | CVAR_VIRTUAL | CVAR_CHEA
 	else if (self >= 0.05f)
 	{
 		I_FreezeTime(true);
-		TimeScale = self;
+		I_SetTimeScale(self);
 		I_FreezeTime(false);
 	}
 	else
@@ -1033,6 +1033,20 @@ void D_Display ()
 	}
 	
 	screen->FrameTime = I_msTimeFS();
+
+	// Feed the frame interval to the benchmark logger (off unless i_benchmark is
+	// set). Measured here, at the top of frame N, the delta is the wall time the
+	// previous whole frame took - present included - which is what the player
+	// actually perceives.
+	{
+		extern void I_BenchmarkFrame(double frameMs);
+		static uint64_t lastFrameStart = 0;
+		uint64_t nowMs = (uint64_t)screen->FrameTime;
+		if (lastFrameStart != 0 && nowMs > lastFrameStart)
+			I_BenchmarkFrame((double)(nowMs - lastFrameStart));
+		lastFrameStart = nowMs;
+	}
+
 	TexAnim.UpdateAnimations(screen->FrameTime);
 	R_UpdateSky(screen->FrameTime);
 	screen->BeginFrame();
@@ -3436,6 +3450,29 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<std::string>& allw
 	// Now that wads are loaded, define mod-specific cvars.
 	ParseCVarInfo();
 
+#ifdef __ANDROID__
+	// Default g_steamdeck on for Android. Selaco keys its whole handheld profile off
+	// this one cvar, and its automatic detection (UI/helper.zs:675) cannot ever fire
+	// here: it requires a 1280x800 screen, and this is a 1920x1080 handheld. So the
+	// device would be treated as a desktop and miss all of it -
+	// SetSteamdeckPresets() (ui_scaling 1.2, hud_scaling 1.2, large subtitles), the
+	// Deck-tuned menu items such as the lower minimum FOV, and the engine's own
+	// texture-quality and transfer-thread tweaks just below.
+	//
+	// Set here rather than in the shipped autoexec so it survives a user editing or
+	// deleting that file, and deliberately BEFORE ExecCommands() below so an
+	// autoexec can still turn it back off.
+	//
+	// The cvar is `nosave noarchive` (Selaco CVARINFO:6), so there is no stored user
+	// preference to trample - it starts false on every launch by design.
+	if (FBaseCVar *steamdeck = FindCVar("g_steamdeck", nullptr))
+	{
+		UCVarValue val;
+		val.Bool = true;
+		steamdeck->SetGenericRep(val, CVAR_Bool);
+	}
+#endif
+
 	// Actually exec command line commands and exec files.
 	if (exec != NULL)
 	{
@@ -3911,7 +3948,9 @@ static int D_DoomMain_Internal (void)
 		I_FatalError("Cannot find " BASEWAD);
 	}
 	LoadHexFont(wad);	// load hex font early so we have it during startup.
+#ifndef NO_ZWIDGET
 	InitWidgetResources(wad);
+#endif
 
 	C_InitConsole(80*8, 25*8, false);
 	I_DetectOS();

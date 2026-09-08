@@ -405,7 +405,9 @@ public:
 	}
 
 	FString GetIdentifier() override {
-		return "GM:" + DeviceIndex;
+		// See SDLInputJoystickBase::GetIdentifier - this needs the explicit
+		// FString or it is pointer arithmetic on the literal, not concatenation.
+		return FString("GM:") + DeviceIndex;
 	}
 	
 	int GetNumAxes() override

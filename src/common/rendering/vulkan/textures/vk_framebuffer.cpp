@@ -24,6 +24,7 @@
 #include <zvulkan/vulkandevice.h>
 #include <zvulkan/vulkanbuilders.h>
 #include <zvulkan/vulkanswapchain.h>
+#include <zvulkan/vulkansurface.h>
 #include "vulkan/system/vk_renderdevice.h"
 #include "vulkan/renderer/vk_postprocess.h"
 #include "vk_framebuffer.h"
@@ -49,8 +50,33 @@ VkFramebufferManager::~VkFramebufferManager()
 {
 }
 
+#ifdef __ANDROID__
+bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface);
+#endif
+
 void VkFramebufferManager::AcquireImage()
 {
+#ifdef __ANDROID__
+	// Android destroys the ANativeWindow whenever the activity is paused, which
+	// invalidates the VkSurfaceKHR derived from it. Every surface query then
+	// fails, so the swapchain can never be rebuilt from the old handle - the
+	// surface itself has to be recreated first. SDL has already made a fresh
+	// ANativeWindow by the time we get here.
+	if (SwapChain->Lost())
+	{
+		vkDeviceWaitIdle(fb->device->device);
+
+		VkSurfaceKHR newSurface = VK_NULL_HANDLE;
+		if (I_CreateVulkanSurface(fb->device->Surface->Instance->Instance, &newSurface))
+		{
+			SwapChain->RecreateSurface(newSurface);
+			Framebuffers.clear();
+			// Force the size comparison below to re-evaluate against the new surface.
+			CurrentWidth = CurrentHeight = 0;
+		}
+	}
+#endif
+
 	bool exclusiveFullscreen = fb->IsFullscreen() && vk_exclusivefullscreen;
 	if (SwapChain->Lost() || fb->GetClientWidth() != CurrentWidth || fb->GetClientHeight() != CurrentHeight || fb->GetVSync() != CurrentVSync || CurrentHdr != vk_hdr || CurrentExclusiveFullscreen != exclusiveFullscreen)
 	{

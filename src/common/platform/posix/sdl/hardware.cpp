@@ -69,6 +69,18 @@ void I_InitGraphics ()
 #ifdef __APPLE__
 	SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
 #endif // __APPLE__
+#ifdef __ANDROID__
+	// SDL synthesizes mouse events from touch by default. The engine reads
+	// relative mouse motion straight into the camera, so every finger drag would
+	// fling the view. Touch is handled as touch or not at all.
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+	// SDL exposes the Android accelerometer as an extra virtual joystick, and this
+	// defaults to ON. The engine then reads device tilt as stick input: gravity
+	// holds one axis at roughly +6000 forever, which reads as "down" held down and
+	// makes menus scroll on their own with nothing touched.
+	SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+#endif // __ANDROID__
 	SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 
 	if (SDL_InitSubSystem (SDL_INIT_VIDEO) < 0)

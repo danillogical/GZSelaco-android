@@ -187,12 +187,15 @@ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
 
 	if (finish)
 	{
-		if (!fb->GetVSync()) {
-			FPSWait.Reset();
-			FPSWait.Clock();
-			fb->FPSLimit();
-			FPSWait.Unclock();
-		}
+		// Run the limiter regardless of vsync. The GL and GLES backends already call
+		// FPSLimit() unconditionally before SwapBuffers; only Vulkan skipped it when
+		// vsync was on, which made vid_maxfps silently inert in the one configuration
+		// a handheld actually ships with. FPSLimit() compensates for vsync itself.
+		FPSWait.Reset();
+		FPSWait.Clock();
+		fb->FPSLimit();
+		FPSWait.Unclock();
+
 		fb->GetFramebufferManager()->QueuePresent();
 	}
 

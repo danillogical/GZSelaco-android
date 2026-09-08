@@ -148,12 +148,15 @@ void I_StartupJoysticks();
 
 int main (int argc, char **argv)
 {
-#if !defined (__APPLE__)
+#if !defined (__APPLE__) && !defined (__ANDROID__)
+	// Not on Android: this would replace bionic's debuggerd handler (losing the
+	// tombstone and the logcat crash dump), and the handler cannot work anyway -
+	// it re-execs argv[0], but the game is a .so with no executable to re-run.
 	{
 		int s[4] = { SIGSEGV, SIGILL, SIGFPE, SIGBUS };
 		cc_install_handlers(argc, argv, 4, s, GAMENAMELOWERCASE "-crash.log", GetCrashInfo);
 	}
-#endif // !__APPLE__
+#endif // !__APPLE__ && !__ANDROID__
 
 	printf(GAMENAME" %s - %s - SDL version\nCompiled on %s\n",
 		GetVersionString(), GetGitTime(), __DATE__);
@@ -178,6 +181,17 @@ int main (int argc, char **argv)
 
 #ifdef PROGDIR
 	progdir = PROGDIR;
+#elif defined(__ANDROID__)
+	// SDL's Android entry point passes argv[0] = "app_process", so the realpath
+	// dance below would leave progdir as "/" and every $progdir lookup would
+	// resolve against the filesystem root. The external files dir is where the
+	// game data is expected to be, and needs no runtime permission to read.
+	{
+		const char *externalPath = SDL_AndroidGetExternalStoragePath();
+		progdir = externalPath != nullptr ? externalPath : ".";
+		if (progdir.Len() == 0 || progdir[progdir.Len() - 1] != '/')
+			progdir += "/";
+	}
 #else
 	char program[PATH_MAX];
 	if (realpath (argv[0], program) == NULL)
@@ -192,6 +206,23 @@ int main (int argc, char **argv)
 	{
 		progdir = "./";
 	}
+
+#ifdef __APPLE__
+	// Inside an .app the executable lives in Contents/MacOS, but codesign treats
+	// everything in that directory as nested code and refuses to seal the game's
+	// .pk3 files there. Non-code belongs in Contents/Resources, so point progdir
+	// at it when we are running from a bundle.
+	{
+		const char *macosSuffix = ".app/Contents/MacOS/";
+		const ptrdiff_t suffixLen = (ptrdiff_t)strlen(macosSuffix);
+		if (progdir.Len() >= (size_t)suffixLen &&
+			strcmp(progdir.GetChars() + progdir.Len() - suffixLen, macosSuffix) == 0)
+		{
+			progdir.Truncate(progdir.Len() - strlen("MacOS/"));
+			progdir += "Resources/";
+		}
+	}
+#endif
 #endif
 
 	//I_StartupJoysticks(); @Cockatrice - Moved this to hardware.cpp, because it requires the config file to be created
@@ -199,6 +230,24 @@ int main (int argc, char **argv)
 	const int result = GameMain();
 
 	SDL_Quit();
+
+#ifdef __ANDROID__
+	// Terminate the process, do not just return.
+	//
+	// SDLActivity only calls mSingleton.finish(), which ends the activity but
+	// leaves the process alive for Android to reuse. Returning from here therefore
+	// leaves every C++ global in its torn-down post-shutdown state; the next
+	// launch re-enters SDL_main in that same process and M_LoadDefaults() reads
+	// the config back into cvars that no longer hold valid storage, segfaulting in
+	// FBaseCVar::SetGenericRep. That is why "Quit Game" followed by reopening
+	// crashed, while the launch after the crash worked - the crash was what
+	// finally gave us a fresh process.
+	//
+	// _exit rather than exit: the engine has already run its own shutdown and
+	// saved the config, and running atexit handlers over half-destroyed globals is
+	// exactly what we are trying to avoid.
+	_exit(result);
+#endif
 
 	return result;
 }

@@ -53,6 +53,10 @@
 #include <sys/mman.h>
 #endif
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include <SDL.h>
 
 #include "version.h"
@@ -87,6 +91,11 @@ void I_SetIWADInfo()
 
 extern "C" int I_FileAvailable(const char* filename)
 {
+#ifdef __ANDROID__
+	// An app has no PATH worth searching and none of the desktop helpers this
+	// is ever asked about (kdialog, xdg-open, gdb) exist.
+	return 0;
+#else
 	FString cmd = "which {0} >/dev/null 2>&1";
 	cmd.Substitute("{0}", filename);
 
@@ -97,6 +106,7 @@ extern "C" int I_FileAvailable(const char* filename)
 	}
 
 	return 0;
+#endif
 }
 
 //
@@ -110,6 +120,16 @@ void Mac_I_FatalError(const char* errortext);
 #ifdef __unix__
 void Unix_I_FatalError(const char* errortext)
 {
+#ifdef __ANDROID__
+	// Keep the video subsystem alive: tearing it down here would destroy the
+	// window the message box needs. Log first, since the box may not survive
+	// whatever is going wrong.
+	__android_log_write(ANDROID_LOG_FATAL, GAMENAMELOWERCASE, errortext);
+
+	FString title;
+	title << GAMENAME " " << GetVersionString();
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title.GetChars(), errortext, NULL);
+#else
 	// Close window or exit fullscreen and release mouse capture
 	SDL_QuitSubSystem(SDL_INIT_VIDEO);
 
@@ -136,6 +156,7 @@ void Unix_I_FatalError(const char* errortext)
 			printf("\n%s\n", errortext);
 		}
 	}
+#endif
 }
 #endif
 
@@ -160,11 +181,29 @@ void CalculateCPUSpeed()
 #ifdef __aarch64__
 	// [MK] on aarch64 rather than having to calculate cpu speed, there is
 	// already an independent frequency for the perf timer
-	uint64_t frq;
+	uint64_t frq = 0;
 	asm volatile("mrs %0, cntfrq_el0":"=r"(frq));
-	PerfAvailable = true;
-	PerfToSec = 1./frq;
-	PerfToMillisec = PerfToSec*1000.;
+
+	// cntfrq_el0 is supposed to be programmed by firmware, but on some Android
+	// devices it reads 0. Dividing by it then makes PerfToSec infinite and every
+	// cycle_t reading garbage - which showed up as "Starting a sound cost
+	// 1.8e28!!!", "Full startup in NaNms", and VM stat times larger than the wall
+	// clock they were measured against.
+	//
+	// The ARM architected timer is at least 1 MHz in every real implementation, so
+	// anything below that is bogus; leave PerfAvailable false and let the
+	// clock_gettime path below handle timing instead.
+	if (frq >= 1000000)
+	{
+		PerfAvailable = true;
+		PerfToSec = 1./frq;
+		PerfToMillisec = PerfToSec*1000.;
+	}
+	else
+	{
+		Printf(TEXTCOLOR_YELLOW "cntfrq_el0 reads %llu - implausible, using clock_gettime for timing\n",
+			(unsigned long long)frq);
+	}
 #elif defined(__linux__)
 	// [MK] read from perf values if we can
 	struct perf_event_attr pe;
@@ -293,8 +332,14 @@ void I_PrintStr(const char *cp)
 	}
 
 	if (StartWindow) CleanProgressBar();
+#ifdef __ANDROID__
+	// stdout goes to /dev/null in an app process, so everything would be lost.
+	// The colour escapes above are already suppressed because isatty() is false.
+	__android_log_write(ANDROID_LOG_INFO, GAMENAMELOWERCASE, printData.GetChars());
+#else
 	fputs(printData.GetChars(),stdout);
 	if (terminal) fputs("\033[0m",stdout);
+#endif
 	if (StartWindow) RedrawProgressBar(ProgressBarCurPos,ProgressBarMaxPos);
 }
 
@@ -305,7 +350,12 @@ int I_PickIWad (WadStuff *wads, int numwads, bool showwin, int defaultiwad, int&
 		return defaultiwad;
 	}
 
-#ifdef __APPLE__
+#if defined(__ANDROID__)
+	// No launcher on Android: there is nowhere sensible to put a desktop-style
+	// dialog, and showing one before the game window exists risks an ANR. This
+	// also keeps ZWidget out of the Android build entirely.
+	return defaultiwad;
+#elif defined(__APPLE__)
 	return I_PickIWad_Cocoa (wads, numwads, showwin, defaultiwad);
 #else
 	return LauncherWindow::ExecModal(wads, numwads, defaultiwad, &autoloadflags, &extraArgs);
