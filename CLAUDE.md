@@ -204,8 +204,25 @@ GZDoom has not done it either, so there is nothing to cherry-pick.
 ## Replacement Vulkan drivers (Mesa/Turnip)
 
 `vk_driver` loads a Mesa/Turnip build in place of Qualcomm's driver, through
-libadrenotools. Verified on an Ayn Thor: `PurpleVK-public Adreno (TM) 740`,
-Vulkan 1.4.359, Mesa 26.2.99, versus the stock 1.3.128 / 512.676.53.
+libadrenotools. **The loader works; the driver build tested does not survive a level
+load**, so this is off by default.
+
+On an Ayn Thor with turnip_mrpurple T30 (Mesa 26.2.99, Vulkan 1.4.359, versus the
+stock 1.3.128 / 512.676.53) menus render correctly and then a level load segfaults
+inside the driver:
+
+```
+SIGSEGV, SEGV_MAPERR, fault addr 0x1b0, tid SDLThread
+#00 kgsl_syncobj_merge(kgsl_syncobj const**, unsigned int)+512   vulkan.purple.so
+```
+
+A null-plus-offset deref in Turnip's own KGSL sync-object merging, immediately after
+the engine's background texture upload. `vk_max_transfer_threads 0` does not avoid it,
+and the same level loads fine on Qualcomm's driver - so it is neither our threading nor
+an engine bug. A different Turnip build may work; the loader is unchanged either way.
+
+Note the fallback only covers init-time failure. A driver that initialises and then
+crashes mid-frame cannot be recovered from, so treat `vk_driver` as experimental.
 
 Switch with `./android/set-config.sh thor-turnip` after putting a driver at
 `/sdcard/Selaco/vulkan.purple.so`.
