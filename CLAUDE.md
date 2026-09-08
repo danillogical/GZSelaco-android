@@ -219,7 +219,15 @@ SIGSEGV, SEGV_MAPERR, fault addr 0x1b0, tid SDLThread
 A null-plus-offset deref in Turnip's own KGSL sync-object merging, immediately after
 the engine's background texture upload. `vk_max_transfer_threads 0` does not avoid it,
 and the same level loads fine on Qualcomm's driver - so it is neither our threading nor
-an engine bug. A different Turnip build may work; the loader is unchanged either way.
+an engine bug.
+
+**Two independent builds fail identically, so do not bother hunting for a better one.**
+Tested MrPurple T30 (Mesa 26.2.99, a dev snapshot) and stevenmx v26.2.0-R6 (a stable
+release, "A7xx main"): different maintainers, different BuildIds, one stripped and one
+not - and both fault at the *same address* `0x1b0` on the same thread, after the same
+`Flushing [0 + 109 + 109] texture load ops`. Same code path, same null pointer. This is
+systematic in Turnip's KGSL sync handling against this engine's upload pattern, not a
+version regression.
 
 Note the fallback only covers init-time failure. A driver that initialises and then
 crashes mid-frame cannot be recovered from, so treat `vk_driver` as experimental.
