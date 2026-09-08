@@ -34,6 +34,8 @@ VORBIS_TAG="v1.3.7"
 FLAC_TAG="1.4.3"
 OPUS_TAG="v1.5.2"
 SNDFILE_TAG="1.2.2"
+# Pinned to the commit Eden uses; its CMake hard-requires arm64-v8a.
+ADRENOTOOLS_TAG="8ba23b42d742545b709064d6e2523cdb86de68f5"
 
 SRC="$HERE/src"
 BUILD="$HERE/build/$ANDROID_ABI"
@@ -314,6 +316,44 @@ build_openal() {
 		-DALSOFT_BACKEND_WAVE=OFF
 }
 
+# libadrenotools: lets the Android Vulkan loader load a replacement GPU driver
+# (Mesa/Turnip) while keeping libvulkan.so in place, so window-system integration still
+# comes from the loader. Loading a driver HAL directly does NOT work - it advertises no
+# VK_KHR_surface, only VK_EXT_headless_surface - see CLAUDE.md.
+#
+# It has no install target unless GEN_INSTALL_TARGET is on, and its hooks must end up in
+# the app's nativeLibraryDir, so copy them out by hand rather than via --install.
+build_adrenotools() {
+	fetch libadrenotools https://github.com/eden-emulator/libadrenotools.git "$ADRENOTOOLS_TAG"
+
+	# Its CMake hard-requires arm64-v8a and errors out on anything else.
+	cmake_build_noinstall libadrenotools -DBUILD_SHARED_LIBS=OFF
+
+	install -d "$PREFIX/lib" "$PREFIX/include"
+	local h
+	for h in libhook_impl.so libmain_hook.so libfile_redirect_hook.so libgsl_alloc_hook.so; do
+		install -m 644 "$BUILD/libadrenotools/src/hook/$h" "$PREFIX/lib/$h"
+	done
+	install -m 644 "$BUILD/libadrenotools/libadrenotools.a" "$PREFIX/lib/libadrenotools.a"
+	install -m 644 "$BUILD/libadrenotools/lib/linkernsbypass/liblinkernsbypass.a" \
+		"$PREFIX/lib/liblinkernsbypass.a"
+	cp -R "$SRC/libadrenotools/include/adrenotools" "$PREFIX/include/"
+}
+
+# Like cmake_build but skips --install, for projects with no install target.
+cmake_build_noinstall() {
+	local name="$1"; shift
+	say "Building $name for $ANDROID_ABI (API $ANDROID_API)"
+	"$CMAKE_BIN" -S "$SRC/$name" -B "$BUILD/$name" -G Ninja \
+		-DCMAKE_MAKE_PROGRAM="$NINJA_BIN" \
+		-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
+		-DANDROID_ABI="$ANDROID_ABI" \
+		-DANDROID_PLATFORM="android-$ANDROID_API" \
+		-DCMAKE_BUILD_TYPE=Release \
+		"$@"
+	"$CMAKE_BIN" --build "$BUILD/$name" --parallel
+}
+
 # libvpx has a hand-rolled configure, not CMake.
 build_vpx() {
 	fetch libvpx https://github.com/webmproject/libvpx.git "$VPX_TAG"
@@ -365,7 +405,7 @@ TARGETS=("$@")
 if [ ${#TARGETS[@]} -eq 0 ]; then
 	# Order matters: vorbis and flac need ogg, sndfile needs all three, and
 	# ZMusic links against sndfile.
-	TARGETS=(sdl2 ogg vorbis flac opus sndfile zmusic vpx openal)
+	TARGETS=(sdl2 ogg vorbis flac opus sndfile zmusic vpx openal adrenotools)
 fi
 
 for t in "${TARGETS[@]}"; do
@@ -379,6 +419,7 @@ for t in "${TARGETS[@]}"; do
 		zmusic)   build_zmusic ;;
 		vpx)      build_vpx ;;
 		openal)   build_openal ;;
+		adrenotools) build_adrenotools ;;
 		*) echo "unknown target: $t"; exit 1 ;;
 	esac
 done

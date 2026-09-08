@@ -212,6 +212,24 @@ endif()
 
 add_library(zvulkan STATIC ${ZVULKAN_SOURCES} ${ZVULKAN_INCLUDES} ${VULKAN_INCLUDES})
 target_link_libraries(zvulkan ${ZVULKAN_LIBS})
+
+if ( ANDROID )
+	# libadrenotools lets Android's Vulkan loader load a replacement GPU driver
+	# (Mesa/Turnip) while keeping libvulkan.so, so the loader still supplies WSI.
+	# Built by android/deps/build-deps.sh; ADRENOTOOLS_PREFIX comes from the top-level
+	# CMakeLists. Optional - without it the custom-driver path is compiled out.
+	if ( ADRENOTOOLS_PREFIX AND EXISTS "${ADRENOTOOLS_PREFIX}/lib/libadrenotools.a" )
+		target_include_directories( zvulkan PRIVATE "${ADRENOTOOLS_PREFIX}/include" )
+		target_link_libraries( zvulkan
+			"${ADRENOTOOLS_PREFIX}/lib/libadrenotools.a"
+			"${ADRENOTOOLS_PREFIX}/lib/liblinkernsbypass.a"
+			android log dl )
+		target_compile_definitions( zvulkan PRIVATE HAVE_ADRENOTOOLS=1 )
+		message( STATUS "ZVulkan: replacement Vulkan driver support via libadrenotools" )
+	else()
+		message( STATUS "ZVulkan: no libadrenotools, vk_driver will be inert" )
+	endif()
+endif()
 set_target_properties(zvulkan PROPERTIES CXX_STANDARD 17)
 
 if(MSVC)

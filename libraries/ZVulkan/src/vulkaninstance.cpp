@@ -5,8 +5,9 @@
 #include <set>
 #include <string>
 #include <cstring>
+#include <vector>
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && defined(HAVE_ADRENOTOOLS)
 // Defined further down, next to the custom-driver loader.
 static bool UsingCustomDriver();
 static void ForceSystemDriver();
@@ -23,7 +24,7 @@ VulkanInstance::VulkanInstance(std::vector<uint32_t> apiVersionsToTry, std::set<
 	}
 	catch (...)
 	{
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && defined(HAVE_ADRENOTOOLS)
 		// A replacement driver can load cleanly and still be unusable. A bare HAL
 		// provides no window-system integration - VK_KHR_surface and
 		// VK_KHR_android_surface come from Android's Vulkan loader, not the driver - so
@@ -68,76 +69,35 @@ void VulkanInstance::ReleaseResources()
 	Instance = nullptr;
 }
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && defined(HAVE_ADRENOTOOLS)
 
 #include <dlfcn.h>
 #include <cstddef>
 #include <android/log.h>
+#include <adrenotools/driver.h>
 
-// Load a replacement Vulkan driver, e.g. a Mesa/Turnip build, from the path in
-// $ZVULKAN_DRIVER. Returns nullptr to mean "use the system driver".
+// Load a replacement Vulkan driver (e.g. Mesa/Turnip) via libadrenotools.
 //
-// Android ships Vulkan drivers as HAL modules, not as loadable ICDs. A Turnip .so
-// exports exactly one symbol - HMI, a hw_module_t - and no vkGetInstanceProcAddr or
-// vk_icdGetInstanceProcAddr, so it cannot simply be dlopen'd and dlsym'd. Installing
-// it the supported way means writing to /vendor/lib64/hw, which needs root. What is
-// left, and what Android emulator front-ends do, is to walk the HAL protocol by hand:
-// dlopen, read HMI, call its open(), and take GetInstanceProcAddr off the device.
+// $ZVULKAN_DRIVER holds the driver's soname, $ZVULKAN_DRIVER_DIR the directory holding
+// it (which must be internal storage - see below), and $ZVULKAN_HOOK_DIR the app's
+// nativeLibraryDir. All three are set by the engine before Vulkan init.
 //
-// The HAL structs live in AOSP's hardware/hwvulkan.h, which is a platform header and
-// is NOT in the NDK, so the layouts below are reproduced rather than included. The
-// offsets that matter were verified against a real driver binary (HMI is 248 bytes,
-// tag reads 'HWMT', methods sits at offset 32). Because a wrong guess here would be
-// silent memory corruption, every step is checked and any failure falls back to the
-// system driver instead of proceeding.
+// Why adrenotools rather than loading the HAL ourselves: Android ships Vulkan drivers as
+// HAL modules, and a bare HAL cannot present to a window. Walking the HAL protocol by
+// hand does work - dlopen, read HMI, validate its 'HWMT' tag, call open(), validate the
+// device's 'HWDT' tag, take GetInstanceProcAddr - and it was tried here, but the driver
+// then advertises only eight instance extensions and among the surface types only
+// VK_EXT_headless_surface. VK_KHR_surface, VK_KHR_android_surface and VK_KHR_swapchain
+// are implemented by Android's Vulkan *loader* on top of the driver's
+// VK_ANDROID_native_buffer, so CreateInstance fails with "extension not present".
+//
+// adrenotools keeps libvulkan.so in place and hooks only the loader's driver lookup, so
+// WSI still comes from the loader. Its constraints, from include/adrenotools/driver.h:
+//   - the APK must use legacy packaging, or nativeLibraryDir is not populated
+//   - hookLibDir must be exactly nativeLibraryDir
+//   - the driver must NOT live on /sdcard: dlopen refuses world-writable paths
 namespace
 {
-	constexpr uint32_t kHardwareModuleTag = 0x48574d54; // 'HWMT'
-	constexpr uint32_t kHardwareDeviceTag = 0x48574454; // 'HWDT'
-
-	struct hw_module_t;
-	struct hw_device_t;
-
-	struct hw_module_methods_t
-	{
-		int (*open)(const hw_module_t *module, const char *id, hw_device_t **device);
-	};
-
-	struct hw_module_t
-	{
-		uint32_t tag;
-		uint16_t module_api_version;
-		uint16_t hal_api_version;
-		const char *id;
-		const char *name;
-		const char *author;
-		hw_module_methods_t *methods;
-		void *dso;
-		uint32_t reserved[32 - 7];
-	};
-
-	struct hw_device_t
-	{
-		uint32_t tag;
-		uint32_t version;
-		hw_module_t *module;
-		// reserved is 24 words, not the 12 that older copies of hardware.h show. Found
-		// by probing a real device struct with dladdr: module lands at +8 and the four
-		// function pointers (close, then the three Vulkan entry points below) at +112,
-		// +120, +128 and +136, which only works if reserved spans 16..111.
-		uint32_t reserved[24];
-		int (*close)(hw_device_t *device);
-	};
-
-	// hwvulkan_device_t: hw_device_t followed by three entry points.
-	struct hwvulkan_device_t
-	{
-		hw_device_t common;
-		PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
-		PFN_vkCreateInstance CreateInstance;
-		PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
-	};
-
 	void DriverLog(const char *fmt, ...)
 	{
 		va_list args;
@@ -156,108 +116,50 @@ namespace
 		if (sSystemDriverForced)
 			return nullptr;
 
-		const char *path = getenv("ZVULKAN_DRIVER");
-		if (path == nullptr || *path == '\0')
+		const char *name = getenv("ZVULKAN_DRIVER");
+		const char *dir = getenv("ZVULKAN_DRIVER_DIR");
+		const char *hooks = getenv("ZVULKAN_HOOK_DIR");
+		if (name == nullptr || *name == '\0')
 		{
-			DriverLog("vk_driver: ZVULKAN_DRIVER unset, using system driver");
+			DriverLog("vk_driver: unset, using system driver");
+			return nullptr;
+		}
+		if (dir == nullptr || hooks == nullptr)
+		{
+			DriverLog("vk_driver: driver dir or hook dir unknown, using system driver");
 			return nullptr;
 		}
 
-		void *module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-		if (module == nullptr)
+		DriverLog("vk_driver: adrenotools loading %s from %s (hooks %s)", name, dir, hooks);
+
+		void *handle = adrenotools_open_libvulkan(
+			RTLD_NOW | RTLD_LOCAL,
+			ADRENOTOOLS_DRIVER_CUSTOM,
+			nullptr,   // tmpLibDir, only needed below API 29
+			hooks,
+			dir,
+			name,
+			nullptr,   // fileRedirectDir
+			nullptr);  // userMappingHandle
+		if (handle == nullptr)
 		{
-			DriverLog("vk_driver: dlopen failed for %s: %s", path, dlerror());
+			DriverLog("vk_driver: adrenotools_open_libvulkan failed, using system driver");
 			return nullptr;
 		}
 
-		auto hmi = (hw_module_t *)dlsym(module, "HMI");
-		if (hmi == nullptr)
-		{
-			DriverLog("vk_driver: %s has no HMI symbol - not an Android Vulkan HAL", path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		// If the tag is wrong our idea of the layout does not match the driver's, so
-		// stop before dereferencing anything else.
-		if (hmi->tag != kHardwareModuleTag)
-		{
-			DriverLog("vk_driver: HMI tag 0x%08x, expected 'HWMT' - layout mismatch, ignoring %s",
-				hmi->tag, path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		if (hmi->methods == nullptr || hmi->methods->open == nullptr)
-		{
-			DriverLog("vk_driver: %s HMI has no open() method", path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		hw_device_t *dev = nullptr;
-		int err = hmi->methods->open(hmi, "vk0", &dev); // HWVULKAN_DEVICE_0
-		if (err != 0 || dev == nullptr)
-		{
-			DriverLog("vk_driver: open() failed (%d) for %s", err, path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		if (dev->tag != kHardwareDeviceTag)
-		{
-			DriverLog("vk_driver: device tag 0x%08x, expected 'HWDT' - layout mismatch, ignoring %s",
-				dev->tag, path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		auto vkdev = (hwvulkan_device_t *)dev;
-		PFN_vkGetInstanceProcAddr gipa = vkdev->GetInstanceProcAddr;
-
-		// The hw_device_t layout is reproduced from a platform header we cannot include,
-		// so if our guessed offset is wrong, find the real one instead of giving up:
-		// walk the struct and ask dladdr what each pointer-sized slot points at. dladdr
-		// only inspects, it never calls, so a wrong guess here is harmless.
+		auto gipa = (PFN_vkGetInstanceProcAddr)dlsym(handle, "vkGetInstanceProcAddr");
 		if (gipa == nullptr)
 		{
-			DriverLog("vk_driver: GetInstanceProcAddr null at assumed offset %zu; probing",
-				offsetof(hwvulkan_device_t, GetInstanceProcAddr));
-
-			auto words = (void **)dev;
-			for (size_t i = 0; i < 24; i++)
-			{
-				void *p = words[i];
-				if (p == nullptr) continue;
-				Dl_info info{};
-				if (dladdr(p, &info) != 0 && info.dli_fname != nullptr)
-				{
-					DriverLog("vk_driver:   +%3zu %p  %s  %s", i * sizeof(void *), p,
-						info.dli_sname ? info.dli_sname : "(no symbol)", info.dli_fname);
-				}
-			}
-		}
-
-		if (gipa == nullptr)
-		{
-			DriverLog("vk_driver: %s device has no GetInstanceProcAddr", path);
-			dlclose(module);
+			DriverLog("vk_driver: no vkGetInstanceProcAddr in the returned handle");
 			return nullptr;
 		}
 
-		// Final check that we really are holding a Vulkan entry point and not whatever
-		// happens to sit at that offset: a valid loader resolves vkCreateInstance from
-		// a null instance.
-		if (gipa(VK_NULL_HANDLE, "vkCreateInstance") == nullptr)
-		{
-			DriverLog("vk_driver: GetInstanceProcAddr from %s cannot resolve vkCreateInstance", path);
-			dlclose(module);
-			return nullptr;
-		}
-
-		DriverLog("vk_driver: using %s", path);
+		// adrenotools can return a valid handle and still have fallen back to the
+		// system driver, so this does not prove the custom driver is in use - the
+		// device name logged later is what confirms it.
+		DriverLog("vk_driver: adrenotools handle acquired");
 		sUsingCustomDriver = true;
-		return gipa; // module intentionally left loaded for the process lifetime
+		return gipa;
 	}
 }
 
@@ -274,12 +176,35 @@ static void ForceSystemDriver()
 
 void VulkanInstance::InitVolk()
 {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && defined(HAVE_ADRENOTOOLS)
 	if (PFN_vkGetInstanceProcAddr custom = LoadCustomDriver())
 	{
 		volkInitializeCustom(custom);
 		if (volkGetInstanceVersion() != 0)
+		{
+			// Log what the driver actually advertises. The strings VK_KHR_surface and
+			// VK_KHR_android_surface appear in a Turnip binary, but that does not mean a
+			// HAL build exposes them at instance level - on Android the loader normally
+			// implements WSI on top of the driver's VK_ANDROID_native_buffer. This tells
+			// us which it is instead of assuming.
+			uint32_t count = 0;
+			if (vkEnumerateInstanceExtensionProperties != nullptr &&
+				vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) == VK_SUCCESS && count > 0)
+			{
+				std::vector<VkExtensionProperties> props(count);
+				if (vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data()) == VK_SUCCESS)
+				{
+					DriverLog("vk_driver: driver advertises %u instance extensions:", count);
+					for (const auto &p : props)
+						DriverLog("vk_driver:   %s", p.extensionName);
+				}
+			}
+			else
+			{
+				DriverLog("vk_driver: driver advertises NO instance extensions");
+			}
 			return;
+		}
 		// The driver loaded but reports no usable version; fall through to the system
 		// one rather than leaving volk pointed at something broken.
 		DriverLog("vk_driver: custom driver reports no instance version, using system driver");

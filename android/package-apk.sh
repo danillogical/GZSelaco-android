@@ -46,7 +46,12 @@ install -m 644 "$ENGINE_BUILD/src/libSelaco.so" "$JNILIBS/libSelaco.so"
 # libsndfile carries static ogg/vorbis/FLAC/opus inside it and is a DT_NEEDED of
 # libzmusic.so. Without it there is no decoder for any compressed audio and the
 # game is completely silent - see report-android-port.md D5.
-for lib in libSDL2.so libzmusic.so libopenal.so libsndfile.so; do
+# The four *_hook libs are libadrenotools'. They are never linked or dlopen'd by us -
+# adrenotools loads them itself out of nativeLibraryDir, which is why they only need to
+# be packaged. That also requires useLegacyPackaging = true in app/build.gradle, or
+# Android reads .so straight from the APK and nativeLibraryDir stays empty.
+for lib in libSDL2.so libzmusic.so libopenal.so libsndfile.so \
+           libhook_impl.so libmain_hook.so libfile_redirect_hook.so libgsl_alloc_hook.so; do
 	install -m 644 "$PREFIX/lib/$lib" "$JNILIBS/$lib"
 	"$STRIP" "$JNILIBS/$lib"
 done

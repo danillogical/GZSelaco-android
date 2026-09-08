@@ -68,6 +68,7 @@ say "Stage 2: cross-compiling the engine for $ANDROID_ABI (API $ANDROID_API)"
 	-DCMAKE_FIND_ROOT_PATH="$PREFIX" \
 	-DSDL2_INCLUDE_DIR="$PREFIX/include/SDL2" \
 	-DSDL2_LIBRARY="$PREFIX/lib/libSDL2.so" \
+	-DADRENOTOOLS_PREFIX="$PREFIX" \
 	-DZMUSIC_INCLUDE_DIR="$PREFIX/include" \
 	-DZMUSIC_LIBRARIES="$PREFIX/lib/libzmusic.so" \
 	-DVPX_INCLUDE_DIR="$PREFIX/include" \

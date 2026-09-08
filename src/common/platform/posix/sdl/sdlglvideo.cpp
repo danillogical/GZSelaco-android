@@ -35,6 +35,7 @@
 
 #ifdef __ANDROID__
 #include <sys/stat.h>
+#include <dlfcn.h>
 #include <SDL.h>
 #endif
 
@@ -122,8 +123,16 @@ static FString I_StageVulkanDriver(const char *sourcePath)
 		return FString();
 	}
 
+	// Stage under the source's own basename, not a generic one. Android's linker keys
+	// libraries by DT_SONAME, and a Turnip build's soname is its filename
+	// (e.g. "vulkan.purple.so"), so renaming it makes the load fail.
+	FString base = sourcePath;
+	ptrdiff_t sl = base.LastIndexOf("/");
+	if (sl >= 0) base = base.Mid(sl + 1);
+	if (base.IsEmpty()) return FString();
+
 	FString dest;
-	dest.Format("%s/vkdriver.so", internal);
+	dest.Format("%s/%s", internal, base.GetChars());
 
 	// Already staged and the same size? Skip the copy; this runs on every launch.
 	struct stat ssrc, sdst;
@@ -169,6 +178,56 @@ static FString I_StageVulkanDriver(const char *sourcePath)
 	Printf("vk_driver: staged %s -> %s (%lld bytes)\n", sourcePath, dest.GetChars(),
 		(long long)ssrc.st_size);
 	return dest;
+}
+
+// Tell ZVulkan where to find a replacement driver and adrenotools' hooks.
+//
+// adrenotools needs the hooks to be in exactly nativeLibraryDir, and there is no NDK
+// call for that path. Rather than reach into Java for it, derive it from our own
+// library: dladdr on any symbol here gives the full path of libSelaco.so, whose
+// directory IS nativeLibraryDir.
+static void I_SetupVulkanDriverEnv(const char *cvarPath)
+{
+	unsetenv("ZVULKAN_DRIVER");
+	unsetenv("ZVULKAN_DRIVER_DIR");
+	unsetenv("ZVULKAN_HOOK_DIR");
+
+	if (cvarPath == nullptr || *cvarPath == '\0')
+		return;
+
+	Printf("vk_driver: requested %s\n", cvarPath);
+
+	FString staged = I_StageVulkanDriver(cvarPath);
+	if (staged.IsEmpty())
+		return;
+
+	// Split the staged path into directory and soname; adrenotools wants them apart.
+	ptrdiff_t slash = staged.LastIndexOf("/");
+	if (slash < 0)
+		return;
+	// Trailing slash is required: adrenotools concatenates dir + name with no
+	// separator (src/driver.cpp), so without it the stat() check silently fails and
+	// adrenotools_open_libvulkan returns null before logging anything.
+	FString dir = staged.Left(slash + 1);
+	FString name = staged.Mid(slash + 1);
+
+	Dl_info info{};
+	if (dladdr((const void *)&I_SetupVulkanDriverEnv, &info) == 0 || info.dli_fname == nullptr)
+	{
+		Printf(TEXTCOLOR_RED "vk_driver: cannot locate our own library for the hook dir\n");
+		return;
+	}
+	FString hookDir = info.dli_fname;
+	ptrdiff_t hslash = hookDir.LastIndexOf("/");
+	if (hslash < 0)
+		return;
+	hookDir.Truncate(hslash);
+
+	setenv("ZVULKAN_DRIVER", name.GetChars(), 1);
+	setenv("ZVULKAN_DRIVER_DIR", dir.GetChars(), 1);
+	setenv("ZVULKAN_HOOK_DIR", hookDir.GetChars(), 1);
+	Printf("vk_driver: driver %s in %s, hooks in %s\n", name.GetChars(), dir.GetChars(),
+		hookDir.GetChars());
 }
 #endif
 
@@ -520,15 +579,7 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
 			//
 			// Dereference with *cvar: the implicit const char* conversion lives on the
 			// EXTERN_CVAR reference wrapper, not on FStringCVar itself.
-			{
-				const char *driverPath = *vk_driver;
-				Printf("vk_driver: cvar is \"%s\"\n", driverPath ? driverPath : "(null)");
-				FString staged = I_StageVulkanDriver(driverPath);
-				if (staged.IsNotEmpty())
-					setenv("ZVULKAN_DRIVER", staged.GetChars(), 1);
-				else
-					unsetenv("ZVULKAN_DRIVER");
-			}
+			I_SetupVulkanDriverEnv(*vk_driver);
 #endif
 
 			VulkanInstanceBuilder builder;

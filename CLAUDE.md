@@ -201,43 +201,62 @@ GZDoom has not done it either, so there is nothing to cherry-pick.
 
 ---
 
-## Replacement Vulkan drivers (Mesa/Turnip): attempted, does not work
+## Replacement Vulkan drivers (Mesa/Turnip)
 
-`vk_driver` loads a Turnip build and then falls back to the system driver. Kept
-because the loader is sound and the failure is informative, but it cannot render.
+`vk_driver` loads a Mesa/Turnip build in place of Qualcomm's driver, through
+libadrenotools. Verified on an Ayn Thor: `PurpleVK-public Adreno (TM) 740`,
+Vulkan 1.4.359, Mesa 26.2.99, versus the stock 1.3.128 / 512.676.53.
 
-Android ships Vulkan drivers as HAL modules, not ICDs. A Turnip `.so` exports exactly
-one symbol - `HMI`, a `hw_module_t` - so it cannot be dlopen'd and dlsym'd for
-`vkGetInstanceProcAddr`. Installing it properly means `/vendor/lib64/hw`, i.e. root.
+Switch with `./android/set-config.sh thor-turnip` after putting a driver at
+`/sdcard/Selaco/vulkan.purple.so`.
 
-Three obstacles were solved along the way, all worth keeping:
+### Why adrenotools and not a direct load
 
-- **Linker namespace.** An app may only dlopen from its APK `lib/` or its internal
-  data dir; `/sdcard` is outside the namespace *and* noexec. The engine stages the
-  driver into internal storage first (`I_StageVulkanDriver`, sdlglvideo.cpp).
-- **`libhardware.so`.** Turnip imports `hw_get_module`, and libhardware is a private
-  platform library apps cannot link. `android/libhardware-stub/` builds a stub that
-  satisfies it, returning `-ENOENT`; the engine never uses AHardwareBuffer interop.
-- **Struct layout.** `hwvulkan.h` is a platform header not in the NDK. `hw_device_t`'s
-  `reserved` is **24 words, not the 12** older copies show - established by probing a
-  live device struct with `dladdr`, which found `module` at +8 and four function
-  pointers at +112/+120/+128/+136, putting `GetInstanceProcAddr` at 136.
+Android ships Vulkan drivers as HAL modules. Loading one directly *works* - dlopen,
+read `HMI`, validate its `'HWMT'` tag, call `open()`, validate the device's `'HWDT'`
+tag, take `GetInstanceProcAddr` - and that was built and tested here. But the driver
+then advertises only **8** instance extensions, and the only surface type among them
+is `VK_EXT_headless_surface`. `VK_KHR_surface`, `VK_KHR_android_surface` and
+`VK_KHR_swapchain` are implemented by Android's Vulkan **loader** on top of the
+driver's `VK_ANDROID_native_buffer`, so `CreateInstance` fails with "extension not
+present" and there is nothing to present to.
 
-**What kills it:** `VK_KHR_surface` and `VK_KHR_android_surface` are implemented by
-Android's Vulkan *loader*, not by the driver. Talking to the HAL directly loses
-window-system integration, so `CreateInstance` fails with "extension not present"
-even though volk initialised and reported a version. Before the retry was added this
-also fell through to OpenGL - not built for Android - and killed the process.
+adrenotools keeps `libvulkan.so` and hooks only the loader's driver lookup, so WSI
+still comes from the loader. Through it the same driver advertises **14** extensions
+including `VK_KHR_surface` and `VK_KHR_android_surface`.
 
-**The correct approach** is libadrenotools, which Eden and other emulators use
-(`adrenotools_open_libvulkan`, see `~/src/eden/src/android/app/src/main/jni/native.cpp`).
-It keeps `libvulkan.so` and hooks only the driver load, so WSI survives. That means
-vendoring libadrenotools + linkernsbypass.
+Static linking would not have helped: the driver genuinely has no surface support, so
+linking it in yields the same 8 extensions. The alternative would be implementing the
+loader's swapchain ourselves.
 
-**Whether it is worth finishing:** probably not. The bottleneck is translucent
-overdraw - ~36 ms of a 47 ms explosion frame - which is fill rate and bandwidth. A
-driver swap changes neither. The plausible win is different tiler load/store
-decisions, which is real but small.
+### Four things that each silently broke it
+
+- **Linker namespace.** An app may only dlopen from its APK `lib/` or internal data
+  dir; `/sdcard` is outside the namespace *and* noexec. `I_StageVulkanDriver`
+  (sdlglvideo.cpp) copies the driver into internal storage first.
+- **SONAME.** The staged copy must keep the source basename. Android keys libraries by
+  `DT_SONAME`, and a Turnip build's soname is its filename, so staging it as
+  `vkdriver.so` fails.
+- **Trailing slash.** `adrenotools_open_libvulkan` concatenates `customDriverDir` and
+  `customDriverName` with no separator (its `src/driver.cpp`), so the directory must
+  end in `/`. Without it the `stat` check fails and it returns null *before* logging
+  anything, which is a confusing way to lose an hour.
+- **`useLegacyPackaging = true`.** Required in `app/build.gradle` or Android reads
+  `.so` straight from the APK and `nativeLibraryDir` - which is where the hooks must
+  live - is never populated. Already set.
+
+`hookLibDir` is derived with `dladdr` on one of our own functions: `dli_fname` gives
+the full path of `libSelaco.so`, whose directory *is* `nativeLibraryDir`. No JNI needed.
+
+### Whether it is worth using
+
+Unmeasured for performance. The bottleneck is translucent overdraw - ~36 ms of a 47 ms
+explosion frame - which is fill rate and bandwidth, so a driver swap should not move it
+much. The plausible win is different tiler load/store decisions. Measure with
+`thor-turnip` against `thor-bench` before believing either way.
+
+`libhardware-stub/` is left in the tree from the direct-HAL attempt. adrenotools does
+not need it, since its namespace can resolve private platform libraries properly.
 
 ---
 
