@@ -146,7 +146,17 @@ FString M_GetCachePath(bool create)
 
 FString M_GetAutoexecPath()
 {
-	return GetUserFile("autoexec.cfg");
+	// External, not internal. Unlike the config - which is private engine state and
+	// belongs in internal storage - autoexec.cfg is authored by the user, so it has to
+	// live somewhere they can put a file. This is also $PROGDIR (see i_main.cpp) and is
+	// where SelacoActivity.extractAssets() drops the shipped default.
+	//
+	// Returning the internal path here meant a freshly generated config recorded
+	// [Selaco.AutoExec] Path=/data/data/<pkg>/files/autoexec.cfg, which nothing can
+	// write to without adb and a debug build - so the autoexec silently never ran on a
+	// clean install. It only appeared to work on configs generated before this was
+	// noticed, because those had already recorded a different path.
+	return AndroidExternalPath() + "autoexec.cfg";
 }
 
 //===========================================================================

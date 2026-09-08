@@ -95,6 +95,26 @@ it. Current contents, each justified:
 
 Switch profiles with `./android/set-config.sh <thor|thor-bench|thor-demo>`.
 
+### The autoexec must live in EXTERNAL storage
+
+`M_GetAutoexecPath()` returns the external files dir, i.e. `$PROGDIR`. It used to return
+internal storage, which meant a freshly generated config recorded
+
+    [Selaco.AutoExec]
+    Path=/data/data/<pkg>/files/autoexec.cfg
+
+- a path nothing can write to without adb *and* a debug build. The autoexec therefore
+silently never ran on a clean install, which would have hit every user of a release APK.
+It only appeared to work during development because those inis predated the fix and had
+recorded a different path.
+
+The config belongs in internal storage (private engine state); the autoexec does not, as
+it is authored by the user and is where `extractAssets()` drops the shipped default.
+
+If the `[Selaco.AutoExec]` section already exists but is wrong, deleting the Path line is
+not enough - `CreateStandardAutoExec` only populates the section when it is *absent*.
+Delete the whole section and let the engine regenerate it.
+
 ### Two facts that resolve most config confusion
 
 **`setdefault` works.** Selaco ships a `CVARINFO.defaults` lump (~65 entries) that
@@ -191,6 +211,27 @@ Full-game baseline on a Thor at 1080p with `GFXPresetDeckLow` + `SpectacleDeck`:
 33.3 ms locked, 39.2 ms peak explosion window, 52 ms worst frame. Of a 47 ms explosion
 frame, roughly 36 ms is the main scene pass — translucent overdraw. The instrumented
 postprocess chain is only 1.5-4.5 ms, so cutting SSAO or bloom buys almost nothing.
+
+### Resolution is the largest single lever
+
+Measured A/B on the same scene, uncapped: `vid_scalefactor` 1.0 -> 0.75 (1920x1080 ->
+1440x810, 56% of the pixels) took 24.4 ms to 20.0 ms, about **18%**. That is the only
+lever of that size, and it is consistent with the cost being pixel-bound.
+
+Two traps when measuring it:
+
+- **Never measure under a frame cap.** At `vid_maxfps 35` every window read 28.6 ms
+  regardless of resolution - the cap hid the entire effect.
+- **Selaco's Video menu will undo it.** `OptionValue VidScales` lists only
+  `1, 1.25, 1.5, 1.75, 2`, because it presents Scale Factor as supersampling. 0.75 is
+  not representable, so opening that page snaps it back to 1.0.
+
+Render size is `vid_scalefactor * scalemode_result` (r_videoscale.cpp:195). Selaco's
+Resolution menu sets `vid_scalemode 5` with an explicit 1920x1080, so the scale factor
+multiplies that. Setting `vid_scale_customwidth/height` directly is equivalent.
+
+**Shipped default keeps 1080p.** The 18% was judged not worth the softness on a 7-inch
+panel; a brief 24 fps explosion dip against a steady 30 was preferred.
 
 **An arm64 ZScript JIT is not worth building.** Measured, the VM is ~1 ms of a 33 ms
 frame and ~3.8 ms of a 47 ms explosion frame. `HAVE_VM_JIT` is x86_64-only
