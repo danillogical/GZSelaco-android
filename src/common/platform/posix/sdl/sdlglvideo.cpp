@@ -33,6 +33,11 @@
 
 // HEADER FILES ------------------------------------------------------------
 
+#ifdef __ANDROID__
+#include <sys/stat.h>
+#include <SDL.h>
+#endif
+
 #include "i_module.h"
 #include "i_soundinternal.h"
 #include "i_system.h"
@@ -84,6 +89,88 @@ EXTERN_CVAR (Int, vid_defheight)
 EXTERN_CVAR (Bool, cl_capfps)
 EXTERN_CVAR(Bool, vk_debug)
 EXTERN_CVAR(Int, gl_max_transfer_threads)
+
+#ifdef __ANDROID__
+// Path to a replacement Vulkan driver, e.g. a Mesa/Turnip build. Empty uses the
+// system driver. Takes effect on restart, since it is read when volk initialises.
+//
+//   vk_driver "/sdcard/Selaco/vulkan.purple.so"
+//
+// Android ships Vulkan drivers as HAL modules rather than ICDs, so ZVulkan walks the
+// HAL protocol by hand to load one - see LoadCustomDriver in vulkaninstance.cpp. Every
+// step there is validated and any failure silently falls back to the system driver, so
+// a bad path or an incompatible build costs a log line, not a black screen.
+CVAR(String, vk_driver, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+
+// Copy a replacement Vulkan driver into internal storage and return the path to use,
+// or an empty string to mean "use the system driver".
+//
+// The copy is not optional. An app's linker namespace ("classloader-namespace") only
+// permits dlopen from the APK's own lib/ directory and the app's internal data dir, so
+// loading straight from /sdcard fails with "not accessible for the namespace" - and
+// /sdcard is a noexec FUSE mount besides. Internal storage is both inside the namespace
+// and executable by our own uid, which is how emulator front-ends do this.
+static FString I_StageVulkanDriver(const char *sourcePath)
+{
+	if (sourcePath == nullptr || *sourcePath == '\0')
+		return FString();
+
+	const char *internal = SDL_AndroidGetInternalStoragePath();
+	if (internal == nullptr)
+	{
+		Printf(TEXTCOLOR_RED "vk_driver: no internal storage path available\n");
+		return FString();
+	}
+
+	FString dest;
+	dest.Format("%s/vkdriver.so", internal);
+
+	// Already staged and the same size? Skip the copy; this runs on every launch.
+	struct stat ssrc, sdst;
+	if (stat(sourcePath, &ssrc) != 0)
+	{
+		Printf(TEXTCOLOR_RED "vk_driver: cannot read %s\n", sourcePath);
+		return FString();
+	}
+	if (stat(dest.GetChars(), &sdst) == 0 && sdst.st_size == ssrc.st_size)
+		return dest;
+
+	FILE *in = fopen(sourcePath, "rb");
+	if (in == nullptr)
+	{
+		Printf(TEXTCOLOR_RED "vk_driver: cannot open %s\n", sourcePath);
+		return FString();
+	}
+	FILE *out = fopen(dest.GetChars(), "wb");
+	if (out == nullptr)
+	{
+		fclose(in);
+		Printf(TEXTCOLOR_RED "vk_driver: cannot write %s\n", dest.GetChars());
+		return FString();
+	}
+
+	char buf[64 * 1024];
+	size_t n;
+	bool ok = true;
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+	{
+		if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+	}
+	fclose(in);
+	if (fclose(out) != 0) ok = false;
+
+	if (!ok)
+	{
+		remove(dest.GetChars());
+		Printf(TEXTCOLOR_RED "vk_driver: copy to %s failed\n", dest.GetChars());
+		return FString();
+	}
+
+	Printf("vk_driver: staged %s -> %s (%lld bytes)\n", sourcePath, dest.GetChars(),
+		(long long)ssrc.st_size);
+	return dest;
+}
+#endif
 
 
 // PUBLIC DATA DEFINITIONS -------------------------------------------------
@@ -424,6 +511,25 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
 			const char* names[64];
 			if (!I_GetVulkanPlatformExtensions(&count, names))
 				VulkanError("I_GetVulkanPlatformExtensions failed");
+
+#ifdef __ANDROID__
+			// Hand the replacement-driver path to ZVulkan, which reads it from the
+			// environment because it is a standalone library with no cvar access.
+			// Must happen before VulkanInstanceBuilder::Create(), which is what
+			// initialises volk. Empty means use the system driver.
+			//
+			// Dereference with *cvar: the implicit const char* conversion lives on the
+			// EXTERN_CVAR reference wrapper, not on FStringCVar itself.
+			{
+				const char *driverPath = *vk_driver;
+				Printf("vk_driver: cvar is \"%s\"\n", driverPath ? driverPath : "(null)");
+				FString staged = I_StageVulkanDriver(driverPath);
+				if (staged.IsNotEmpty())
+					setenv("ZVULKAN_DRIVER", staged.GetChars(), 1);
+				else
+					unsetenv("ZVULKAN_DRIVER");
+			}
+#endif
 
 			VulkanInstanceBuilder builder;
 			builder.DebugLayer(vk_debug);

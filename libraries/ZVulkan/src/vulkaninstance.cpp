@@ -6,6 +6,12 @@
 #include <string>
 #include <cstring>
 
+#ifdef __ANDROID__
+// Defined further down, next to the custom-driver loader.
+static bool UsingCustomDriver();
+static void ForceSystemDriver();
+#endif
+
 VulkanInstance::VulkanInstance(std::vector<uint32_t> apiVersionsToTry, std::set<std::string> requiredExtensions, std::set<std::string> optionalExtensions, bool wantDebugLayer)
 	: ApiVersionsToTry(std::move(apiVersionsToTry)), RequiredExtensions(std::move(requiredExtensions)), OptionalExtensions(std::move(optionalExtensions)), WantDebugLayer(wantDebugLayer)
 {
@@ -17,6 +23,30 @@ VulkanInstance::VulkanInstance(std::vector<uint32_t> apiVersionsToTry, std::set<
 	}
 	catch (...)
 	{
+#ifdef __ANDROID__
+		// A replacement driver can load cleanly and still be unusable. A bare HAL
+		// provides no window-system integration - VK_KHR_surface and
+		// VK_KHR_android_surface come from Android's Vulkan loader, not the driver - so
+		// CreateInstance fails with "extension not present" even though volk
+		// initialised and reported a version. Without this retry the engine would then
+		// fall through to OpenGL, which is not built for Android, and die.
+		if (UsingCustomDriver())
+		{
+			ReleaseResources();
+			ForceSystemDriver();
+			try
+			{
+				InitVolk();
+				CreateInstance();
+				return;
+			}
+			catch (...)
+			{
+				ReleaseResources();
+				throw;
+			}
+		}
+#endif
 		ReleaseResources();
 		throw;
 	}
@@ -38,8 +68,224 @@ void VulkanInstance::ReleaseResources()
 	Instance = nullptr;
 }
 
+#ifdef __ANDROID__
+
+#include <dlfcn.h>
+#include <cstddef>
+#include <android/log.h>
+
+// Load a replacement Vulkan driver, e.g. a Mesa/Turnip build, from the path in
+// $ZVULKAN_DRIVER. Returns nullptr to mean "use the system driver".
+//
+// Android ships Vulkan drivers as HAL modules, not as loadable ICDs. A Turnip .so
+// exports exactly one symbol - HMI, a hw_module_t - and no vkGetInstanceProcAddr or
+// vk_icdGetInstanceProcAddr, so it cannot simply be dlopen'd and dlsym'd. Installing
+// it the supported way means writing to /vendor/lib64/hw, which needs root. What is
+// left, and what Android emulator front-ends do, is to walk the HAL protocol by hand:
+// dlopen, read HMI, call its open(), and take GetInstanceProcAddr off the device.
+//
+// The HAL structs live in AOSP's hardware/hwvulkan.h, which is a platform header and
+// is NOT in the NDK, so the layouts below are reproduced rather than included. The
+// offsets that matter were verified against a real driver binary (HMI is 248 bytes,
+// tag reads 'HWMT', methods sits at offset 32). Because a wrong guess here would be
+// silent memory corruption, every step is checked and any failure falls back to the
+// system driver instead of proceeding.
+namespace
+{
+	constexpr uint32_t kHardwareModuleTag = 0x48574d54; // 'HWMT'
+	constexpr uint32_t kHardwareDeviceTag = 0x48574454; // 'HWDT'
+
+	struct hw_module_t;
+	struct hw_device_t;
+
+	struct hw_module_methods_t
+	{
+		int (*open)(const hw_module_t *module, const char *id, hw_device_t **device);
+	};
+
+	struct hw_module_t
+	{
+		uint32_t tag;
+		uint16_t module_api_version;
+		uint16_t hal_api_version;
+		const char *id;
+		const char *name;
+		const char *author;
+		hw_module_methods_t *methods;
+		void *dso;
+		uint32_t reserved[32 - 7];
+	};
+
+	struct hw_device_t
+	{
+		uint32_t tag;
+		uint32_t version;
+		hw_module_t *module;
+		// reserved is 24 words, not the 12 that older copies of hardware.h show. Found
+		// by probing a real device struct with dladdr: module lands at +8 and the four
+		// function pointers (close, then the three Vulkan entry points below) at +112,
+		// +120, +128 and +136, which only works if reserved spans 16..111.
+		uint32_t reserved[24];
+		int (*close)(hw_device_t *device);
+	};
+
+	// hwvulkan_device_t: hw_device_t followed by three entry points.
+	struct hwvulkan_device_t
+	{
+		hw_device_t common;
+		PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+		PFN_vkCreateInstance CreateInstance;
+		PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+	};
+
+	void DriverLog(const char *fmt, ...)
+	{
+		va_list args;
+		va_start(args, fmt);
+		__android_log_vprint(ANDROID_LOG_INFO, "selaco-ea", fmt, args);
+		va_end(args);
+	}
+
+	// Set once a replacement driver is in use, cleared when we give up on it, so the
+	// constructor knows a retry with the system driver is worth attempting.
+	bool sUsingCustomDriver = false;
+	bool sSystemDriverForced = false;
+
+	PFN_vkGetInstanceProcAddr LoadCustomDriver()
+	{
+		if (sSystemDriverForced)
+			return nullptr;
+
+		const char *path = getenv("ZVULKAN_DRIVER");
+		if (path == nullptr || *path == '\0')
+		{
+			DriverLog("vk_driver: ZVULKAN_DRIVER unset, using system driver");
+			return nullptr;
+		}
+
+		void *module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+		if (module == nullptr)
+		{
+			DriverLog("vk_driver: dlopen failed for %s: %s", path, dlerror());
+			return nullptr;
+		}
+
+		auto hmi = (hw_module_t *)dlsym(module, "HMI");
+		if (hmi == nullptr)
+		{
+			DriverLog("vk_driver: %s has no HMI symbol - not an Android Vulkan HAL", path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		// If the tag is wrong our idea of the layout does not match the driver's, so
+		// stop before dereferencing anything else.
+		if (hmi->tag != kHardwareModuleTag)
+		{
+			DriverLog("vk_driver: HMI tag 0x%08x, expected 'HWMT' - layout mismatch, ignoring %s",
+				hmi->tag, path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		if (hmi->methods == nullptr || hmi->methods->open == nullptr)
+		{
+			DriverLog("vk_driver: %s HMI has no open() method", path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		hw_device_t *dev = nullptr;
+		int err = hmi->methods->open(hmi, "vk0", &dev); // HWVULKAN_DEVICE_0
+		if (err != 0 || dev == nullptr)
+		{
+			DriverLog("vk_driver: open() failed (%d) for %s", err, path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		if (dev->tag != kHardwareDeviceTag)
+		{
+			DriverLog("vk_driver: device tag 0x%08x, expected 'HWDT' - layout mismatch, ignoring %s",
+				dev->tag, path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		auto vkdev = (hwvulkan_device_t *)dev;
+		PFN_vkGetInstanceProcAddr gipa = vkdev->GetInstanceProcAddr;
+
+		// The hw_device_t layout is reproduced from a platform header we cannot include,
+		// so if our guessed offset is wrong, find the real one instead of giving up:
+		// walk the struct and ask dladdr what each pointer-sized slot points at. dladdr
+		// only inspects, it never calls, so a wrong guess here is harmless.
+		if (gipa == nullptr)
+		{
+			DriverLog("vk_driver: GetInstanceProcAddr null at assumed offset %zu; probing",
+				offsetof(hwvulkan_device_t, GetInstanceProcAddr));
+
+			auto words = (void **)dev;
+			for (size_t i = 0; i < 24; i++)
+			{
+				void *p = words[i];
+				if (p == nullptr) continue;
+				Dl_info info{};
+				if (dladdr(p, &info) != 0 && info.dli_fname != nullptr)
+				{
+					DriverLog("vk_driver:   +%3zu %p  %s  %s", i * sizeof(void *), p,
+						info.dli_sname ? info.dli_sname : "(no symbol)", info.dli_fname);
+				}
+			}
+		}
+
+		if (gipa == nullptr)
+		{
+			DriverLog("vk_driver: %s device has no GetInstanceProcAddr", path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		// Final check that we really are holding a Vulkan entry point and not whatever
+		// happens to sit at that offset: a valid loader resolves vkCreateInstance from
+		// a null instance.
+		if (gipa(VK_NULL_HANDLE, "vkCreateInstance") == nullptr)
+		{
+			DriverLog("vk_driver: GetInstanceProcAddr from %s cannot resolve vkCreateInstance", path);
+			dlclose(module);
+			return nullptr;
+		}
+
+		DriverLog("vk_driver: using %s", path);
+		sUsingCustomDriver = true;
+		return gipa; // module intentionally left loaded for the process lifetime
+	}
+}
+
+static bool UsingCustomDriver() { return sUsingCustomDriver; }
+
+static void ForceSystemDriver()
+{
+	DriverLog("vk_driver: replacement driver could not create an instance "
+		"(a bare HAL has no VK_KHR_surface); retrying with the system driver");
+	sUsingCustomDriver = false;
+	sSystemDriverForced = true;
+}
+#endif
+
 void VulkanInstance::InitVolk()
 {
+#ifdef __ANDROID__
+	if (PFN_vkGetInstanceProcAddr custom = LoadCustomDriver())
+	{
+		volkInitializeCustom(custom);
+		if (volkGetInstanceVersion() != 0)
+			return;
+		// The driver loaded but reports no usable version; fall through to the system
+		// one rather than leaving volk pointed at something broken.
+		DriverLog("vk_driver: custom driver reports no instance version, using system driver");
+	}
+#endif
+
 	if (volkInitialize() != VK_SUCCESS)
 	{
 		VulkanError("Unable to find Vulkan");

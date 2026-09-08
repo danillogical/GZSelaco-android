@@ -201,6 +201,46 @@ GZDoom has not done it either, so there is nothing to cherry-pick.
 
 ---
 
+## Replacement Vulkan drivers (Mesa/Turnip): attempted, does not work
+
+`vk_driver` loads a Turnip build and then falls back to the system driver. Kept
+because the loader is sound and the failure is informative, but it cannot render.
+
+Android ships Vulkan drivers as HAL modules, not ICDs. A Turnip `.so` exports exactly
+one symbol - `HMI`, a `hw_module_t` - so it cannot be dlopen'd and dlsym'd for
+`vkGetInstanceProcAddr`. Installing it properly means `/vendor/lib64/hw`, i.e. root.
+
+Three obstacles were solved along the way, all worth keeping:
+
+- **Linker namespace.** An app may only dlopen from its APK `lib/` or its internal
+  data dir; `/sdcard` is outside the namespace *and* noexec. The engine stages the
+  driver into internal storage first (`I_StageVulkanDriver`, sdlglvideo.cpp).
+- **`libhardware.so`.** Turnip imports `hw_get_module`, and libhardware is a private
+  platform library apps cannot link. `android/libhardware-stub/` builds a stub that
+  satisfies it, returning `-ENOENT`; the engine never uses AHardwareBuffer interop.
+- **Struct layout.** `hwvulkan.h` is a platform header not in the NDK. `hw_device_t`'s
+  `reserved` is **24 words, not the 12** older copies show - established by probing a
+  live device struct with `dladdr`, which found `module` at +8 and four function
+  pointers at +112/+120/+128/+136, putting `GetInstanceProcAddr` at 136.
+
+**What kills it:** `VK_KHR_surface` and `VK_KHR_android_surface` are implemented by
+Android's Vulkan *loader*, not by the driver. Talking to the HAL directly loses
+window-system integration, so `CreateInstance` fails with "extension not present"
+even though volk initialised and reported a version. Before the retry was added this
+also fell through to OpenGL - not built for Android - and killed the process.
+
+**The correct approach** is libadrenotools, which Eden and other emulators use
+(`adrenotools_open_libvulkan`, see `~/src/eden/src/android/app/src/main/jni/native.cpp`).
+It keeps `libvulkan.so` and hooks only the driver load, so WSI survives. That means
+vendoring libadrenotools + linkernsbypass.
+
+**Whether it is worth finishing:** probably not. The bottleneck is translucent
+overdraw - ~36 ms of a 47 ms explosion frame - which is fill rate and bandwidth. A
+driver swap changes neither. The plausible win is different tiler load/store
+decisions, which is real but small.
+
+---
+
 ## Sandbox notes specific to this repo
 
 - Swift-style nested `sandbox-exec` is not involved here, but Gradle is — see above.
