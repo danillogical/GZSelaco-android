@@ -103,6 +103,17 @@ EXTERN_CVAR(Int, gl_max_transfer_threads)
 // a bad path or an incompatible build costs a log line, not a black screen.
 CVAR(String, vk_driver, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 
+// Space-separated KEY=VALUE pairs exported before the driver loads, for tuning a
+// replacement driver. Mesa/Turnip reads its options from the environment, so this is
+// the only way to reach them.
+//
+//   vk_driver_env "TU_DEBUG=noconform,sysmem MESA_VK_WSI_PRESENT_MODE=mailbox"
+//
+// sysmem makes Turnip render through system memory instead of the tiler, which is a
+// different enough path to be worth trying when the tiled one misbehaves. Winlator-family
+// apps set exactly these per game, which is where the idea came from.
+CVAR(String, vk_driver_env, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+
 // Copy a replacement Vulkan driver into internal storage and return the path to use,
 // or an empty string to mean "use the system driver".
 //
@@ -222,6 +233,31 @@ static void I_SetupVulkanDriverEnv(const char *cvarPath)
 	if (hslash < 0)
 		return;
 	hookDir.Truncate(hslash);
+
+	// Driver options first, so they are visible when the driver initialises.
+	{
+		FString opts = *vk_driver_env;
+		while (opts.IsNotEmpty())
+		{
+			ptrdiff_t sp = opts.IndexOf(" ");
+			FString pair = sp < 0 ? opts : opts.Left(sp);
+			opts = sp < 0 ? FString() : opts.Mid(sp + 1);
+			pair.StripLeftRight();
+			if (pair.IsEmpty()) continue;
+
+			ptrdiff_t eq = pair.IndexOf("=");
+			if (eq <= 0)
+			{
+				Printf(TEXTCOLOR_RED "vk_driver_env: ignoring \"%s\", expected KEY=VALUE\n",
+					pair.GetChars());
+				continue;
+			}
+			FString key = pair.Left(eq);
+			FString val = pair.Mid(eq + 1);
+			setenv(key.GetChars(), val.GetChars(), 1);
+			Printf("vk_driver_env: %s=%s\n", key.GetChars(), val.GetChars());
+		}
+	}
 
 	setenv("ZVULKAN_DRIVER", name.GetChars(), 1);
 	setenv("ZVULKAN_DRIVER_DIR", dir.GetChars(), 1);

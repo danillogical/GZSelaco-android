@@ -221,6 +221,24 @@ the engine's background texture upload. `vk_max_transfer_threads 0` does not avo
 and the same level loads fine on Qualcomm's driver - so it is neither our threading nor
 an engine bug.
 
+**Five configurations have been tried; all fail. Do not spend more time here.**
+
+| driver | `TU_DEBUG` | outcome |
+|---|---|---|
+| MrPurple T30 (Mesa 26.2.99) | none | 0x1b0 at level load |
+| stevenmx v26.2.0-R6 (Mesa 26.1.99) | none | 0x1b0 at level load |
+| stevenmx v26.2.0-R6 | `noconform` | 0x1b0 at level load, unchanged |
+| stevenmx v26.2.0-R6 | `noconform,sysmem` | crashes at init instead, different address |
+| any | `vk_max_transfer_threads 0` | 0x1b0 at level load, unchanged |
+
+`sysmem` forces rendering through system memory instead of the tiler, so it does reach a
+genuinely different path - it just breaks earlier. `noconform` changes nothing.
+
+Beware the version naming: stevenmx's build is packaged as "v26.2.0-R6" but reports
+**Mesa 26.1.99**, and MrPurple's T30 reports 26.2.99. Both are development snapshots
+despite one looking like a stable release, so "find a stable Mesa" is harder to satisfy
+than the package names suggest.
+
 **Two independent builds fail identically, so do not bother hunting for a better one.**
 Tested MrPurple T30 (Mesa 26.2.99, a dev snapshot) and stevenmx v26.2.0-R6 (a stable
 release, "A7xx main"): different maintainers, different BuildIds, one stripped and one
@@ -232,8 +250,13 @@ version regression.
 Note the fallback only covers init-time failure. A driver that initialises and then
 crashes mid-frame cannot be recovered from, so treat `vk_driver` as experimental.
 
-Switch with `./android/set-config.sh thor-turnip` after putting a driver at
-`/sdcard/Selaco/vulkan.purple.so`.
+`vk_driver_env` exports space-separated `KEY=VALUE` pairs before the driver loads, which
+is the only way to reach Mesa's options (it reads them from the environment):
+
+    vk_driver_env "TU_DEBUG=noconform,sysmem MESA_VK_WSI_PRESENT_MODE=mailbox"
+
+Switch with `./android/set-config.sh thor-turnip` after putting a driver in
+`/sdcard/Selaco/` and pointing `vk_driver` at it.
 
 ### Why adrenotools and not a direct load
 
