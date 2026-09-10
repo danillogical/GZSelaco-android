@@ -50,8 +50,10 @@ times a graphics block here silently overrode the player's in-menu choices, and 
 values rotted invisibly when the full game renamed cvars (`r_effectLOD` deleted,
 `reflections`→`r_reflections`, `r_gamedetail`→`g_gamedetail`, `r_permanentblood` split).
 
-A cvar belongs there only if Selaco's menus and defaults cannot express it. Note that
-**every current entry except `vid_vsync` and `vid_maxfps` exists only because the cvar is
+A cvar belongs there only if Selaco's menus and defaults cannot express it. The current
+contents and the justification for each are tabulated in
+[TECHNICAL.md](TECHNICAL.md#the-shipped-config). Note the pattern there: apart from vsync,
+the frame cap and the beta fps readout, **every entry exists only because the cvar is
 `CVAR_ARCHIVE` and something else once set it.** An archived cvar left unset is not
 "default", it is "whatever the last profile did" — which is how a measurement run came out
 locked at 30 fps, and how the shipped profile nearly went out loading an experimental driver.

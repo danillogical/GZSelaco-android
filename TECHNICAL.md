@@ -157,6 +157,27 @@ whole section and let the engine regenerate it.
 
 ---
 
+## The shipped config
+
+`android/configs/thor.cfg` is the shipped autoexec and is deliberately tiny. **Do not add graphics
+settings to it** — see CLAUDE.md for why that has burned this project three times.
+
+| cvar | why it is there |
+|---|---|
+| `vid_vsync 1` | not in `CVARINFO.defaults`; the engine default is false |
+| `vid_maxfps 30` | Selaco defaults 200. 30 divides a 60 Hz panel exactly; 35 gives 1.71 vblanks and judders |
+| `vid_fps 1` | on for the beta, so a tester reports a number rather than "choppy". Revisit for release |
+| `i_benchmark 0` | ours, `CVAR_ARCHIVE`, so it stays on across launches unless stated |
+| `con_notifylines 0` | `CVAR_ARCHIVE` — otherwise console text draws over the game |
+| `con_scale 0` | `CVAR_ARCHIVE` — benchmark profiles set 4, this puts it back to auto |
+| `vk_driver ""` | `CVAR_ARCHIVE` — otherwise the *shipped* profile keeps loading whatever driver was last set |
+| `vk_driver_env ""` | ditto |
+
+Note the pattern: apart from the first three, **every entry exists only because the cvar is
+`CVAR_ARCHIVE` and something else once set it.** An archived cvar left unset is not "default", it
+is "whatever the last profile did" — which is how a measurement run came out silently locked at
+30 fps, and how the shipped profile nearly went out loading an experimental driver.
+
 ## Patches carried against upstream
 
 **openal-soft `LoadBufferStatic` overrun** — the important one. In the looping branch,
@@ -317,34 +338,55 @@ p90 10.28 → 6.48 ms, and **mean burst unchanged at 1.45 → 1.44 ms** — the 
 work, only the timing changed, which is the correct signature for a pipelining change rather
 than a workload change.
 
-### How it works: REGION PARTITIONING, not buffer rotation
+### How it works: one buffer per frame, rotated
 
-Every buffer the engine rewinds per frame gets one region per frame in flight, with the
-allocator biased by frame slot:
+Every buffer the CPU writes per frame gets **one buffer per frame in flight**, and rotation is
+driven by the frame slot:
 
-- `VkStreamBuffer` (stream + matrix UBOs) — `SetRegion()`, partitioned in place
-- `HWViewpointBuffer`, `FLightBuffer`, `BoneBuffer` — one full-capacity region each, sized
-  through the **constructor**
-- `FFlatVertexBuffer` — partitioned in place above `mIndex`
+| buffer | mechanism |
+|---|---|
+| `HWViewpointBuffer`, `FLightBuffer`, `BoneBuffer` | `mPipelineNbr` copies, `SetPipelinePos()` |
+| `FFlatVertexBuffer` | `mPipelineNbr` copies, `SetPipelinePos()` |
+| `VkStreamBuffer` (stream + matrix UBOs) | N internal `UniformBuffer`s, `SetPipelinePos()` |
 
-**Do NOT use GZDoom's `mPipelineNbr`.** That mechanism exists (`mBufferPipeline[]`, rotated by
-`Clear()`) and `buffers.h` even says it is "for letting the GPU run in parallel with the
-playsim", but it is **GL-only and cannot work on Vulkan**. GL rebinds the buffer at draw time
-so a rotating handle is free; Vulkan bakes one `VkBuffer` into a descriptor set and varies only
-a **dynamic offset**, so a rotating handle never reaches the shader. Worse,
-`VkBufferManager::CreateDataBuffer` assigns `ViewpointUBO`/`LightBufferSSO`/`BoneBufferSSO` on
-every call, so N pipelined buffers leave those pointing at the last one. Tried here; produced
-severe popping and flickering. Upstream wiring it into GL only was correct, not an oversight.
+**Separate buffers rather than regions inside one, deliberately.** Regions were tried first and
+worked, but the failure modes are asymmetric: a region overrun is a *legal* write into another
+in-flight frame's data, so neither the driver nor the validation layers can see it and it surfaces
+only as a one-frame flicker — the hardest symptom to attribute. An overrun of a separate buffer is
+out of bounds and can be caught. Costs ~93 MB more at depth 2, nearly all of it `FFlatVertexBuffer`
+at 61 MB per copy, which is a good trade for making a class of silent corruption inexpressible.
 
-Region partitioning fits Vulkan precisely *because* dynamic offsets are what it already varies
-per draw. Memory cost is ~10 MB, and the 64 MB flat vertex buffer needs none of it (~1,000,000
-vertices per frame per region against an `AllocVertices` limit whose own error text calls
-2,000,000 in one scene "something very wrong").
+Three things that make this work, each of which broke it first:
 
-**Sizing must go through the constructor.** `Resize()`/`SetData()` on an existing buffer reaches
-`VkHardwareBuffer::Resize` → `WaitForCommands` → `FlushCommands` →
-`GetRenderState()->EndRenderPass()`, and `mRenderState` does not exist during
-`InitializeState()`. Doing it the other way segfaults at startup.
+- **The descriptor set must bind the ACTIVE buffer.** `VkBufferManager::CreateDataBuffer` assigns
+  `ViewpointUBO`/`LightBufferSSO`/`BoneBufferSSO` on *every* call, so with N buffers those cached
+  pointers hold whichever was constructed last. `UpdateHWBufferSet` therefore reads
+  `screen->mViewpoints->GetBuffer()` and friends. Binding the cached pointer bound the wrong buffer
+  on every frame the rotation did not land on the last one — severe flickering.
+- **Rotation must be driven by the frame slot, not by `Clear()`.** The descriptor set is written
+  once per frame in `BeginFrame`, while `Clear()` runs later and repeatedly during the frame, so
+  rotating there leaves the descriptor pointing at a buffer other than the one being written.
+  `VulkanRenderDevice::BeginFrame` calls `SetPipelinePos()` on all of them immediately before
+  `mDescriptorSetManager->BeginFrame()`. `Clear()` skips its own rotation once `mExternalPipeline`
+  is set, so the GL backend is unaffected.
+- **`FFlatVertexBuffer` never actually rotated upstream.** `mPipelinePos` is set once in the
+  constructor and only used by `Copy()` to seed the reserved quads into every copy. GL survives
+  that because writing a buffer the GPU is reading makes the driver rename it implicitly; Vulkan
+  has no such behaviour, so real rotation had to be added. It needs no descriptor work — it is
+  bound with `vkCmdBindVertexBuffers` via `GetBufferObjects()`, and `VkRenderState` rebinds when
+  the handle changes.
+
+**`SetSubData` needed fixing too**, and this is easy to miss because it is not one of the obvious
+per-frame buffers. It memcpy'd into a **shared** staging buffer and then recorded a `copyBuffer`,
+so frame N+1 could overwrite the staging data before frame N's copy executed — the frame-end fence
+used to prevent exactly that. It now allocates a transient staging buffer per call and hands it to
+`TransferDeleteList`. The only caller is the shadowmap AABB tree, at most twice per frame and only
+when dynamic geometry moved, so the allocation is cheap and the bug would have been a rare
+one-frame shadow glitch.
+
+Note what does **not** need duplicating: render targets, depth buffers and anything else only the
+GPU writes. Submissions are ordered on one queue, so two frames never execute simultaneously — the
+overlap is CPU recording against GPU execution. Only CPU-written data needs a second copy.
 
 ### Why it is not settable
 
