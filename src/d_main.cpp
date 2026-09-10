@@ -901,11 +901,19 @@ static void DrawOverlays()
 		FStat::PrintStat (twod);
 }
 
+// Wall time at which the last frame finished submitting and presenting. Everything between
+// here and the next screen->BeginFrame() is CPU-only work that the GPU could in principle be
+// overlapping - see vk_defer_frame_wait in vk_commandbuffer.cpp. Measured so the size of that
+// window is a number rather than an assumption.
+static double BenchFrameEndMs = 0.0;
+static double BenchTickMs = 0.0;
+
 static void End2DAndUpdate()
 {
 	twod->End();
 	CheckBench();
 	screen->Update();
+	BenchFrameEndMs = I_msTimeFS();
 	twod->OnFrameDone();
 }
 
@@ -1049,6 +1057,21 @@ void D_Display ()
 
 	TexAnim.UpdateAnimations(screen->FrameTime);
 	R_UpdateSky(screen->FrameTime);
+
+	// The overlap window closes here: BeginFrame is where the deferred fence wait settles, so
+	// this is the last moment at which the GPU could still have been working on the previous
+	// frame. gap is the ceiling on what vk_defer_frame_wait can recover; tick is the part of it
+	// that is game simulation rather than loop and event overhead.
+	// Consumed, not just read: D_Display has three early returns above (nodrawers, !AppActive,
+	// !CanDisplay) that skip End2DAndUpdate, so a stale timestamp would otherwise report one
+	// gap spanning two frames. Zeroing it means a skipped frame contributes no sample at all.
+	if (BenchFrameEndMs > 0.0)
+	{
+		extern void I_BenchmarkCpuGap(double tickMs, double gapMs);
+		I_BenchmarkCpuGap(BenchTickMs, I_msTimeFS() - BenchFrameEndMs);
+		BenchFrameEndMs = 0.0;
+	}
+
 	screen->BeginFrame();
 	twod->ClearClipRect();
 	if ((gamestate == GS_LEVEL || gamestate == GS_TITLELEVEL) && gametic != 0)
@@ -1270,6 +1293,7 @@ void D_DoomLoop ()
 			I_SetFrameTime();
 
 			// process one or more tics
+			double benchTickStart = I_msTimeFS();
 			if (singletics)
 			{
 				I_StartTic ();
@@ -1291,6 +1315,7 @@ void D_DoomLoop ()
 			{
 				TryRunTics (); // will run at least one tic
 			}
+			BenchTickMs = I_msTimeFS() - benchTickStart;
 			// Update display, next frame, with current state.
 			I_StartTic ();
 			statDatabase.update();

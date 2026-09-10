@@ -192,6 +192,15 @@ int main (int argc, char **argv)
 		if (progdir.Len() == 0 || progdir[progdir.Len() - 1] != '/')
 			progdir += "/";
 	}
+
+	// Now that progdir is known, start persisting crashes there. This CHAINS to bionic's
+	// debuggerd rather than replacing it, so the tombstone and logcat dump are still produced -
+	// see i_crashlog.cpp. A beta tester can retrieve $PROGDIR/selaco-ea-crash.log over USB with
+	// no adb and no root, which is the whole point.
+	{
+		extern void I_InstallCrashLog();
+		I_InstallCrashLog();
+	}
 #else
 	char program[PATH_MAX];
 	if (realpath (argv[0], program) == NULL)

@@ -61,6 +61,8 @@
 #endif
 
 #ifdef HAVE_VULKAN
+#include <vector>
+#include "cmdlib.h"
 #include "vulkan/system/vk_renderdevice.h"
 #include <zvulkan/vulkaninstance.h>
 #include <zvulkan/vulkansurface.h>
@@ -122,6 +124,133 @@ CVAR(String, vk_driver_env, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 // loading straight from /sdcard fails with "not accessible for the namespace" - and
 // /sdcard is a noexec FUSE mount besides. Internal storage is both inside the namespace
 // and executable by our own uid, which is how emulator front-ends do this.
+// Read DT_SONAME out of an ELF shared object.
+//
+// This exists so a driver can be named anything on disk. Android's linker keys libraries by
+// their soname, and every Turnip build's soname is whatever its original filename was
+// ("libvulkan_freedreno.so", "vulkan.purple.so"), so staging a renamed copy under the NEW name
+// fails to load. Staging under the soname read from the file makes "rename it to vulkan.so"
+// work, which is the whole point of the auto-detection below.
+//
+// Deliberately minimal: 64-bit little-endian only, which is every Android arm64 driver, and a
+// failure just falls back to the source basename.
+// Auto-detect a replacement Vulkan driver named "vulkan.so", so a user can drop one next to the
+// game data without editing any config. Searched only when vk_driver is unset, and vk_driver
+// still wins if set.
+//
+// The directory list mirrors what gameconfigfile.cpp already adds to IWADSearch/FileSearch, plus
+// progdir (the app's external files dir), so "put it with your game data" means what a player
+// would expect. /sdcard is a symlink to /storage/emulated/0 on every current Android, but both
+// are listed because either can be the one that resolves.
+//
+// The file may be a plain rename of any Turnip build - I_ReadElfSoname handles staging it under
+// its real soname, which is what makes renaming safe.
+static FString I_FindVulkanDriver()
+{
+	static const char *const dirs[] = {
+		"/sdcard/Selaco",
+		"/sdcard/Download",
+		"/storage/emulated/0/Selaco",
+		"/storage/emulated/0/Download",
+	};
+
+	TArray<FString> candidates;
+	if (progdir.IsNotEmpty())
+	{
+		FString p = progdir;
+		if (p.Back() != '/') p += "/";
+		candidates.Push(p + "vulkan.so");
+	}
+	for (const char *d : dirs)
+	{
+		FString p;
+		p.Format("%s/vulkan.so", d);
+		candidates.Push(p);
+	}
+
+	for (const FString &c : candidates)
+	{
+		struct stat st;
+		if (stat(c.GetChars(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+		{
+			Printf("vk_driver: auto-detected %s (%lld bytes)\n", c.GetChars(), (long long)st.st_size);
+			return c;
+		}
+	}
+	return FString();
+}
+
+static FString I_ReadElfSoname(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f) return FString();
+
+	unsigned char ident[16];
+	if (fread(ident, 1, 16, f) != 16 || memcmp(ident, "\177ELF", 4) != 0 || ident[4] != 2)
+	{
+		fclose(f);
+		return FString();
+	}
+
+	// e_phoff at 0x20, e_phentsize at 0x36, e_phnum at 0x38 for ELF64.
+	uint64_t phoff = 0; uint16_t phentsize = 0, phnum = 0;
+	if (fseek(f, 0x20, SEEK_SET) != 0 || fread(&phoff, 8, 1, f) != 1) { fclose(f); return FString(); }
+	if (fseek(f, 0x36, SEEK_SET) != 0 || fread(&phentsize, 2, 1, f) != 1) { fclose(f); return FString(); }
+	if (fread(&phnum, 2, 1, f) != 1) { fclose(f); return FString(); }
+
+	// Find PT_DYNAMIC (2), and keep the PT_LOAD (1) segments so a vaddr can be mapped to a file
+	// offset - DT_STRTAB is given as an address, not an offset.
+	struct Seg { uint64_t vaddr, off, filesz; };
+	std::vector<Seg> loads;
+	uint64_t dynOff = 0, dynSz = 0;
+	for (uint16_t i = 0; i < phnum; i++)
+	{
+		unsigned char ph[56];
+		if (fseek(f, (long)(phoff + (uint64_t)i * phentsize), SEEK_SET) != 0) break;
+		if (fread(ph, 1, sizeof(ph), f) != sizeof(ph)) break;
+		uint32_t type; memcpy(&type, ph + 0, 4);
+		uint64_t off, vaddr, filesz;
+		memcpy(&off, ph + 8, 8); memcpy(&vaddr, ph + 16, 8); memcpy(&filesz, ph + 32, 8);
+		if (type == 2) { dynOff = off; dynSz = filesz; }
+		else if (type == 1) loads.push_back({ vaddr, off, filesz });
+	}
+	if (dynOff == 0 || dynSz == 0) { fclose(f); return FString(); }
+
+	auto vaddrToOff = [&loads](uint64_t va, uint64_t &out) -> bool {
+		for (const auto &s : loads)
+			if (va >= s.vaddr && va < s.vaddr + s.filesz) { out = s.off + (va - s.vaddr); return true; }
+		return false;
+	};
+
+	uint64_t sonameStrOff = 0, strtabVa = 0;
+	bool haveSoname = false;
+	for (uint64_t at = 0; at + 16 <= dynSz; at += 16)
+	{
+		unsigned char dyn[16];
+		if (fseek(f, (long)(dynOff + at), SEEK_SET) != 0) break;
+		if (fread(dyn, 1, 16, f) != 16) break;
+		uint64_t tag, val;
+		memcpy(&tag, dyn, 8); memcpy(&val, dyn + 8, 8);
+		if (tag == 0) break;                      // DT_NULL
+		else if (tag == 14) { sonameStrOff = val; haveSoname = true; }   // DT_SONAME
+		else if (tag == 5) strtabVa = val;                              // DT_STRTAB
+	}
+
+	FString result;
+	uint64_t strtabOff = 0;
+	if (haveSoname && strtabVa && vaddrToOff(strtabVa, strtabOff))
+	{
+		if (fseek(f, (long)(strtabOff + sonameStrOff), SEEK_SET) == 0)
+		{
+			char name[256] = {};
+			size_t got = fread(name, 1, sizeof(name) - 1, f);
+			if (got > 0 && name[0]) result = name;
+		}
+	}
+	fclose(f);
+	return result;
+}
+
 static FString I_StageVulkanDriver(const char *sourcePath)
 {
 	if (sourcePath == nullptr || *sourcePath == '\0')
@@ -134,12 +263,23 @@ static FString I_StageVulkanDriver(const char *sourcePath)
 		return FString();
 	}
 
-	// Stage under the source's own basename, not a generic one. Android's linker keys
-	// libraries by DT_SONAME, and a Turnip build's soname is its filename
-	// (e.g. "vulkan.purple.so"), so renaming it makes the load fail.
-	FString base = sourcePath;
-	ptrdiff_t sl = base.LastIndexOf("/");
-	if (sl >= 0) base = base.Mid(sl + 1);
+	// Stage under the driver's DT_SONAME, not the on-disk filename. Android's linker keys
+	// libraries by soname, and a Turnip build's soname is whatever it was originally called
+	// (e.g. "vulkan.purple.so"), so a copy staged under any other name fails to load. Reading it
+	// from the file is what lets the user rename the driver to vulkan.so on disk.
+	FString base = I_ReadElfSoname(sourcePath);
+	if (!base.IsEmpty())
+	{
+		Printf("vk_driver: soname is %s\n", base.GetChars());
+	}
+	else
+	{
+		// Fall back to the source basename, which is correct for an unrenamed driver.
+		base = sourcePath;
+		ptrdiff_t sl = base.LastIndexOf("/");
+		if (sl >= 0) base = base.Mid(sl + 1);
+		Printf("vk_driver: no soname readable, staging as %s\n", base.GetChars());
+	}
 	if (base.IsEmpty()) return FString();
 
 	FString dest;
@@ -203,12 +343,21 @@ static void I_SetupVulkanDriverEnv(const char *cvarPath)
 	unsetenv("ZVULKAN_DRIVER_DIR");
 	unsetenv("ZVULKAN_HOOK_DIR");
 
-	if (cvarPath == nullptr || *cvarPath == '\0')
-		return;
+	// An explicit vk_driver always wins. With it unset, look for a "vulkan.so" dropped next to
+	// the game data, so using a replacement driver needs no config edit at all.
+	FString path = (cvarPath != nullptr) ? FString(cvarPath) : FString();
+	if (path.IsEmpty())
+	{
+		path = I_FindVulkanDriver();
+		if (path.IsEmpty())
+			return;                 // no driver configured and none found: use the system driver
+	}
+	else
+	{
+		Printf("vk_driver: requested %s\n", path.GetChars());
+	}
 
-	Printf("vk_driver: requested %s\n", cvarPath);
-
-	FString staged = I_StageVulkanDriver(cvarPath);
+	FString staged = I_StageVulkanDriver(path.GetChars());
 	if (staged.IsEmpty())
 		return;
 

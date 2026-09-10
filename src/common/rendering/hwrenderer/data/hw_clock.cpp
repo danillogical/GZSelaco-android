@@ -158,6 +158,14 @@ static bool switchfps;
 static uint64_t waitstart;
 EXTERN_CVAR(Bool, vid_fps)
 
+// i_benchmark already samples the "rendertimes" stat every frame (i_benchmark.cpp kStats),
+// but glcycle_t only accumulates while active - so every benchmark report printed the whole
+// rendertimes block as zeros ("BSP = 0.000, W: Render=0.000, ...") and looked like the
+// timers were broken. They were simply switched off. Enabling them here is what makes
+// GPU Wait, Drawcalls, All and Finish readable, which is the only way to tell whether a
+// frame is CPU bound, GPU bound or serialising on a fence.
+EXTERN_CVAR(Int, i_benchmark)
+
 void CheckBench()
 {
 	if (printstats && ConsoleState == c_up)
@@ -209,6 +217,6 @@ bool glcycle_t::active = false;
 void  checkBenchActive()
 {
 	FStat *stat = FStat::FindStat("rendertimes");
-	glcycle_t::active = ((stat != NULL && stat->isActive()) || printstats);
+	glcycle_t::active = ((stat != NULL && stat->isActive()) || printstats || i_benchmark > 0);
 }
 
