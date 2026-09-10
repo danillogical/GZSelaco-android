@@ -37,9 +37,13 @@ bool VkStreamBufferWriter::Write(const StreamData& data)
 	if (mDataIndex == MAX_STREAM_DATA)
 	{
 		mDataIndex = 0;
-		mStreamDataOffset = mBuffer->NextStreamDataBlock();
-		if (mStreamDataOffset == 0xffffffff)
+		// Keep the previous VALID offset if the block allocation fails. Assigning the 0xffffffff
+		// sentinel first would leave a bound-able dynamic offset of 4294967295 if anything reads
+		// StreamDataOffset() before the caller recovers via WaitForStreamBuffers().
+		uint32_t next = mBuffer->NextStreamDataBlock();
+		if (next == 0xffffffff)
 			return false;
+		mStreamDataOffset = next;
 	}
 	uint8_t* ptr = (uint8_t*)mBuffer->UniformBuffer->Memory();
 	memcpy(ptr + mStreamDataOffset + sizeof(StreamData) * mDataIndex, &data, sizeof(StreamData));
@@ -49,8 +53,11 @@ bool VkStreamBufferWriter::Write(const StreamData& data)
 void VkStreamBufferWriter::Reset()
 {
 	mDataIndex = MAX_STREAM_DATA - 1;
-	mStreamDataOffset = 0;
 	mBuffer->Reset();
+	// The region start, not 0: ApplyHWBufferSet reads StreamDataOffset() and can bind before this
+	// frame's first Write(), which with a nonzero region would otherwise point into region 0 -
+	// i.e. at another in-flight frame's data.
+	mStreamDataOffset = mBuffer->RegionStart();
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -80,7 +87,8 @@ static void BufferedSet(bool& modified, VSMatrix& dst, const VSMatrix& src)
 
 bool VkMatrixBufferWriter::Write(const VSMatrix& modelMatrix, bool modelMatrixEnabled, const VSMatrix& textureMatrix, bool textureMatrixEnabled)
 {
-	bool modified = (mOffset == 0); // always modified first call
+	bool modified = mFirstWrite; // always modified first call
+	mFirstWrite = false;
 
 	if (modelMatrixEnabled)
 	{
@@ -105,9 +113,11 @@ bool VkMatrixBufferWriter::Write(const VSMatrix& modelMatrix, bool modelMatrixEn
 
 	if (modified)
 	{
-		mOffset = mBuffer->NextStreamDataBlock();
-		if (mOffset == 0xffffffff)
+		// Same reasoning as VkStreamBufferWriter::Write - do not poison mOffset on failure.
+		uint32_t next = mBuffer->NextStreamDataBlock();
+		if (next == 0xffffffff)
 			return false;
+		mOffset = next;
 
 		uint8_t* ptr = (uint8_t*)mBuffer->UniformBuffer->Memory();
 		memcpy(ptr + mOffset, &mMatrices, sizeof(MatricesUBO));
@@ -118,6 +128,7 @@ bool VkMatrixBufferWriter::Write(const VSMatrix& modelMatrix, bool modelMatrixEn
 
 void VkMatrixBufferWriter::Reset()
 {
-	mOffset = 0;
 	mBuffer->Reset();
+	mOffset = mBuffer->RegionStart();
+	mFirstWrite = true;
 }

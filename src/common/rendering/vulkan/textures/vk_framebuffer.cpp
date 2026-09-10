@@ -37,13 +37,16 @@ VkFramebufferManager::VkFramebufferManager(VulkanRenderDevice* fb) : fb(fb)
 	SwapChain = VulkanSwapChainBuilder()
 		.Create(fb->device.get());
 
-	SwapChainImageAvailableSemaphore = SemaphoreBuilder()
-		.DebugName("SwapChainImageAvailableSemaphore")
-		.Create(fb->device.get());
+	for (int i = 0; i < maxSemaphoreSlots; i++)
+	{
+		SwapChainImageAvailableSemaphore[i] = SemaphoreBuilder()
+			.DebugName("SwapChainImageAvailableSemaphore")
+			.Create(fb->device.get());
 
-	RenderFinishedSemaphore = SemaphoreBuilder()
-		.DebugName("RenderFinishedSemaphore")
-		.Create(fb->device.get());
+		RenderFinishedSemaphore[i] = SemaphoreBuilder()
+			.DebugName("RenderFinishedSemaphore")
+			.Create(fb->device.get());
+	}
 }
 
 VkFramebufferManager::~VkFramebufferManager()
@@ -91,7 +94,11 @@ void VkFramebufferManager::AcquireImage()
 		SwapChain->Create(CurrentWidth, CurrentHeight, CurrentVSync ? 2 : 3, CurrentVSync, CurrentHdr, CurrentExclusiveFullscreen);
 	}
 
-	PresentImageIndex = SwapChain->AcquireImage(SwapChainImageAvailableSemaphore.get());
+	// Alternate unconditionally, not only when pipelining is on: with one frame in flight the
+	// pair used two frames ago has certainly completed, so this is correct either way and avoids
+	// the acquire path having to know about vk_frames_in_flight.
+	AcquireSlot = (AcquireSlot + 1) % 2;
+	PresentImageIndex = SwapChain->AcquireImage(ImageAvailableSemaphore());
 	if (PresentImageIndex != -1)
 	{
 		fb->GetPostprocess()->DrawPresentTexture(fb->mOutputLetterbox, true, false);
@@ -101,5 +108,5 @@ void VkFramebufferManager::AcquireImage()
 void VkFramebufferManager::QueuePresent()
 {
 	if (PresentImageIndex != -1)
-		SwapChain->QueuePresent(PresentImageIndex, RenderFinishedSemaphore.get());
+		SwapChain->QueuePresent(PresentImageIndex, FrameFinishedSemaphore());
 }

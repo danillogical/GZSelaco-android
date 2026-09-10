@@ -26,11 +26,15 @@
 
 static const int BONE_SIZE = (16*sizeof(float));
 
-BoneBuffer::BoneBuffer(int pipelineNbr) : mPipelineNbr(pipelineNbr)
+BoneBuffer::BoneBuffer(int pipelineNbr, int regionCount) : mPipelineNbr(pipelineNbr)
 {
 	int maxNumberOfBones = 80000;
 
-	mBufferSize = maxNumberOfBones;
+	// One full-capacity region per frame in flight, sized up front - same reasoning as
+	// FLightBuffer, and the buffer cannot be reallocated after construction.
+	mRegionCount = regionCount < 1 ? 1 : regionCount;
+	mRegionSize = maxNumberOfBones;
+	mBufferSize = mRegionSize * (unsigned int)mRegionCount;
 	mByteSize = mBufferSize * BONE_SIZE;
 
 	if (screen->useSSBO())
@@ -38,7 +42,7 @@ BoneBuffer::BoneBuffer(int pipelineNbr) : mPipelineNbr(pipelineNbr)
 		mBufferType = true;
 		mBlockAlign = 0;
 		mBlockSize = mBufferSize;
-		mMaxUploadSize = mBlockSize;
+		mMaxUploadSize = mRegionSize;
 	}
 	else
 	{
@@ -62,9 +66,15 @@ BoneBuffer::~BoneBuffer()
 	delete mBuffer;
 }
 
+void BoneBuffer::SetFrameRegion(int slot)
+{
+	if (slot < 0 || slot >= mRegionCount) slot = 0;
+	mRegionStart = (unsigned int)slot * mRegionSize;
+}
+
 void BoneBuffer::Clear()
 {
-	mIndex = 0;
+	mIndex = mRegionStart;
 
 	mPipelinePos++;
 	mPipelinePos %= mPipelineNbr;
@@ -87,7 +97,7 @@ int BoneBuffer::UploadBones(const TArray<VSMatrix>& bones)
 
 	unsigned int thisindex = mIndex.fetch_add(totalsize);
 
-	if (thisindex + totalsize <= mBufferSize)
+	if (thisindex + totalsize <= mRegionStart + mRegionSize)
 	{
 		memcpy(mBufferPointer + thisindex * BONE_SIZE, bones.Data(), totalsize * BONE_SIZE);
 		return thisindex;

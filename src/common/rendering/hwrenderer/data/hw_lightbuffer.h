@@ -24,11 +24,18 @@ class FLightBuffer
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
 
+	// Frame-region support for two frames in flight. UploadLights returns an ABSOLUTE element
+	// index that the shader reads directly, so biasing the allocator is all that is needed.
+	int mRegionCount = 1;
+	unsigned int mRegionStart = 0;
+	unsigned int mRegionSize = 0;
+
 	void CheckSize();
 
 public:
+	void SetFrameRegion(int slot);
 
-	FLightBuffer(int pipelineNbr = 1);
+	FLightBuffer(int pipelineNbr = 1, int regionCount = 1);
 	~FLightBuffer();
 	void Clear();
 	int UploadLights(FDynLightData &data);

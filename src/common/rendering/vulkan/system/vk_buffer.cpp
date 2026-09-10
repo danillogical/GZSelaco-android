@@ -107,6 +107,12 @@ void VkBufferManager::CreateFanToTrisIndexBuffer()
 	FanToTrisIndexBuffer->SetData(sizeof(uint32_t) * data.Size(), data.Data(), BufferUsageType::Static);
 }
 
+void VkBufferManager::SetFrameRegion(int slot, int slots)
+{
+	MatrixBuffer->SetRegion(slot, slots);
+	StreamBuffer->SetRegion(slot, slots);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 
 VkStreamBuffer::VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size_t count)
@@ -122,12 +128,32 @@ VkStreamBuffer::~VkStreamBuffer()
 	delete UniformBuffer;
 }
 
+void VkStreamBuffer::SetRegion(int slot, int slots)
+{
+	if (slots <= 1)
+	{
+		mRegionStart = 0;
+		mRegionEnd = 0;                       // whole buffer
+	}
+	else
+	{
+		// Region boundaries must land on block multiples or the returned offsets stop being
+		// validly aligned for a dynamic uniform buffer binding.
+		uint32_t blocks = (uint32_t)(UniformBuffer->Size() / mBlockSize);
+		uint32_t per = blocks / (uint32_t)slots;
+		mRegionStart = (uint32_t)slot * per * mBlockSize;
+		mRegionEnd = mRegionStart + per * mBlockSize;
+	}
+	mStreamDataOffset = mRegionStart;
+}
+
 uint32_t VkStreamBuffer::NextStreamDataBlock()
 {
 	mStreamDataOffset += mBlockSize;
-	if (mStreamDataOffset + (size_t)mBlockSize >= UniformBuffer->Size())
+	size_t limit = mRegionEnd ? (size_t)mRegionEnd : UniformBuffer->Size();
+	if (mStreamDataOffset + (size_t)mBlockSize >= limit)
 	{
-		mStreamDataOffset = 0;
+		mStreamDataOffset = mRegionStart;
 		return 0xffffffff;
 	}
 	return mStreamDataOffset;

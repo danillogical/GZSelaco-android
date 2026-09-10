@@ -521,6 +521,14 @@ void HWDrawInfo::RenderScene(FRenderState &state)
 		drawlists[GLDL_MASKEDWALLSOFS].SortWalls();
 	}
 
+	// Split the scene pass in the `gpu` stat. Before these groups the whole pass was a
+	// single unmeasured number that had to be inferred by subtracting the postprocess
+	// chain from the frame - which on a handheld is ~36 ms of a 47 ms explosion frame,
+	// so the entire cost sat somewhere nobody could see. Names appear in i_benchmark's
+	// gpu line. Expect more than one entry each when portals or mirrors re-enter the
+	// scene draw; that is real, not double counting.
+	state.PushGroup("opaque");
+
 	// Part 1: solid geometry. This is set up so that there are no transparent parts
 	state.SetDepthFunc(DF_Less);
 	state.AlphaFunc(Alpha_GEqual, 0.f);
@@ -528,30 +536,53 @@ void HWDrawInfo::RenderScene(FRenderState &state)
 
 	state.EnableTexture(gl_texture);
 	state.EnableBrightmap(true);
-	drawlists[GLDL_PLAINWALLS].DrawWalls(this, state, false);
-	drawlists[GLDL_PLAINFLATS].DrawFlats(this, state, false);
 
+	// Per-list breakdown inside `opaque`. These nest under it, which the group stack
+	// handles, and both the total and the parts are reported. Needed because `opaque`
+	// was measured swinging 0.4 -> 5.5 -> 21.6 -> 98.6 ms and a single number cannot
+	// distinguish expensive shading from a barrier stalling at the first draw.
+	state.PushGroup("plainwalls");
+	drawlists[GLDL_PLAINWALLS].DrawWalls(this, state, false);
+	state.PopGroup();
+
+	state.PushGroup("plainflats");
+	drawlists[GLDL_PLAINFLATS].DrawFlats(this, state, false);
+	state.PopGroup();
 
 	// Part 2: masked geometry. This is set up so that only pixels with alpha>gl_mask_threshold will show
 	state.AlphaFunc(Alpha_GEqual, gl_mask_threshold);
+
+	state.PushGroup("maskedwalls");
 	drawlists[GLDL_MASKEDWALLS].DrawWalls(this, state, false);
+	state.PopGroup();
+
+	state.PushGroup("maskedflats");
 	drawlists[GLDL_MASKEDFLATS].DrawFlats(this, state, false);
+	state.PopGroup();
 
 	// Part 3: masked geometry with polygon offset. This list is empty most of the time so only waste time on it when in use.
 	if (drawlists[GLDL_MASKEDWALLSOFS].Size() > 0)
 	{
+		state.PushGroup("maskedwallsofs");
 		state.SetDepthBias(-1, -128);
 		drawlists[GLDL_MASKEDWALLSOFS].DrawWalls(this, state, false);
 		state.ClearDepthBias();
+		state.PopGroup();
 	}
 
+	state.PushGroup("models");
 	drawlists[GLDL_MODELS].Draw(this, state, false);
+	state.PopGroup();
+
+	state.PopGroup();	// opaque
 
 	state.SetRenderStyle(STYLE_Translucent);
 
 	// Part 4: Draw decals (not a real pass)
+	state.PushGroup("decals");
 	state.SetDepthFunc(DF_LEqual);
 	DrawDecals(state, Decals[0]);
+	state.PopGroup();
 
 	RenderAll.Unclock();
 }
@@ -571,10 +602,21 @@ void HWDrawInfo::RenderTranslucent(FRenderState &state)
 	state.SetRenderStyle(STYLE_Translucent);
 
 	state.EnableBrightmap(true);
+
+	state.PushGroup("tborder");
 	drawlists[GLDL_TRANSLUCENTBORDER].Draw(this, state, true);
+	state.PopGroup();
+
 	state.SetDepthMask(false);
 
+	// The one that matters: sorted translucent geometry, which is where particles, smoke
+	// and every other blended sprite is drawn. If the translucent-overdraw theory is
+	// right this is the bulk of the frame during an explosion. Kept separate from
+	// tborder so a big number cannot be blamed on the wrong list.
+	state.PushGroup("translucent");
 	drawlists[GLDL_TRANSLUCENT].DrawSorted(this, state);
+	state.PopGroup();
+
 	state.EnableBrightmap(false);
 
 

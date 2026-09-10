@@ -33,12 +33,19 @@ static const int ELEMENTS_PER_LIGHT = 4;			// each light needs 4 vec4's.
 static const int ELEMENT_SIZE = (4*sizeof(float));
 
 
-FLightBuffer::FLightBuffer(int pipelineNbr):
+FLightBuffer::FLightBuffer(int pipelineNbr, int regionCount):
 	mPipelineNbr(pipelineNbr)
 {
 	int maxNumberOfLights = 80000;
 
-	mBufferSize = maxNumberOfLights * ELEMENTS_PER_LIGHT;
+	// One full-capacity region per frame in flight, sized up front - the buffer cannot be
+	// reallocated after construction (see the note in HWViewpointBuffer's constructor). Growing
+	// rather than halving keeps the full 80,000 lights per frame; at 5.12 MB a region that is
+	// cheap, and it means this change cannot make "buffer is full" - which UploadLights cannot
+	// recover from mid-frame - newly reachable.
+	mRegionCount = regionCount < 1 ? 1 : regionCount;
+	mRegionSize = maxNumberOfLights * ELEMENTS_PER_LIGHT;
+	mBufferSize = mRegionSize * (unsigned int)mRegionCount;
 	mByteSize = mBufferSize * ELEMENT_SIZE;
 
 	if (screen->useSSBO())
@@ -46,7 +53,8 @@ FLightBuffer::FLightBuffer(int pipelineNbr):
 		mBufferType = true;
 		mBlockAlign = 0;
 		mBlockSize = mBufferSize;
-		mMaxUploadSize = mBlockSize;
+		// A single upload must stay inside one region, unlike the whole-buffer SSBO binding.
+		mMaxUploadSize = mRegionSize;
 	}
 	else
 	{
@@ -72,9 +80,15 @@ FLightBuffer::~FLightBuffer()
 	delete mBuffer;
 }
 
+void FLightBuffer::SetFrameRegion(int slot)
+{
+	if (slot < 0 || slot >= mRegionCount) slot = 0;
+	mRegionStart = (unsigned int)slot * mRegionSize;
+}
+
 void FLightBuffer::Clear()
 {
-	mIndex = 0;
+	mIndex = mRegionStart;
 
 	mPipelinePos++;
 	mPipelinePos %= mPipelineNbr;
@@ -116,7 +130,7 @@ int FLightBuffer::UploadLights(FDynLightData &data)
 	unsigned thisindex = mIndex.fetch_add(totalsize);
 	float parmcnt[] = { 0, float(size0), float(size0 + size1), float(size0 + size1 + size2) };
 
-	if (thisindex + totalsize <= mBufferSize)
+	if (thisindex + totalsize <= mRegionStart + mRegionSize)
 	{
 		float *copyptr = mBufferPointer + thisindex*4;
 

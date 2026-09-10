@@ -38,6 +38,9 @@ public:
 	std::unique_ptr<VkStreamBuffer> MatrixBuffer;
 	std::unique_ptr<VkStreamBuffer> StreamBuffer;
 
+	// Point both stream allocators at frame slot `slot` of `slots`. See VkStreamBuffer::SetRegion.
+	void SetFrameRegion(int slot, int slots);
+
 	std::unique_ptr<IIndexBuffer> FanToTrisIndexBuffer;
 
 private:
@@ -55,11 +58,25 @@ public:
 	~VkStreamBuffer();
 
 	uint32_t NextStreamDataBlock();
-	void Reset() { mStreamDataOffset = 0; }
+	void Reset() { mStreamDataOffset = mRegionStart; }
+
+	// Restrict allocation to one of `slots` equal regions, so that two frames in flight can
+	// write concurrently without one rewinding over data the GPU is still reading.
+	//
+	// This costs no extra memory because the buffers are enormously oversized relative to what
+	// a frame uses: MatrixBuffer is 50,000 blocks against at most ~3,500 used (one per MODIFIED
+	// matrix set), StreamBuffer is 300 blocks against ~14 (one per MAX_STREAM_DATA draws). Half
+	// of either still leaves 7-10x headroom. The headroom is deliberate - exhausting a buffer
+	// calls WaitForStreamBuffers(), which stalls the GPU completely - so halving it must not eat
+	// into the margin, and it does not.
+	void SetRegion(int slot, int slots);
+	uint32_t RegionStart() const { return mRegionStart; }
 
 	VkHardwareDataBuffer* UniformBuffer = nullptr;
 
 private:
 	uint32_t mBlockSize = 0;
 	uint32_t mStreamDataOffset = 0;
+	uint32_t mRegionStart = 0;
+	uint32_t mRegionEnd = 0;      // exclusive; 0 until SetRegion, meaning "whole buffer"
 };

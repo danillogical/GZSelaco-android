@@ -30,8 +30,24 @@ VulkanDevice::VulkanDevice(std::shared_ptr<VulkanInstance> instance, std::shared
 	}
 
 	// Test to see if we can fit more upload queues
-	int rqt = (UploadFamily == GraphicsFamily ? 1 : 0) + (PresentFamily == UploadFamily ? 1 : 0);
-	UploadQueuesSupported = selectedDevice.Device->QueueFamilies[UploadFamily].queueCount - rqt;
+	//
+	// UploadFamily is -1 when no upload-capable family was found, which has to be
+	// checked before indexing: QueueFamilies[-1] is an out-of-bounds read, and the
+	// garbage queueCount it returns leaves UploadQueuesSupported positive about half
+	// the time. The loop in CreateDevice then adds a VkDeviceQueueCreateInfo with
+	// queueFamilyIndex = (uint32_t)-1 = 4294967295, which is invalid usage -
+	// queueFamilyIndex must be less than queueFamilyCount. Qualcomm's driver ignores
+	// it; Mesa/Turnip indexes its own arrays with it and segfaults in tu_CreateDevice.
+	// PresentFamily is already guarded this way in CreateDevice.
+	if (UploadFamily >= 0)
+	{
+		int rqt = (UploadFamily == GraphicsFamily ? 1 : 0) + (PresentFamily == UploadFamily ? 1 : 0);
+		UploadQueuesSupported = selectedDevice.Device->QueueFamilies[UploadFamily].queueCount - rqt;
+	}
+	else
+	{
+		UploadQueuesSupported = 0;
+	}
 
 	try
 	{
@@ -106,7 +122,7 @@ void VulkanDevice::CreateDevice(int numUploadSlots)
 	std::vector<int> uploadFamilySlots;
 	int numUploadQueues = numUploadSlots >= 0 ? numUploadSlots : 2;
 
-	for (int x = 0; x < numUploadQueues && x < UploadQueuesSupported; x++) {
+	for (int x = 0; UploadFamily >= 0 && x < numUploadQueues && x < UploadQueuesSupported; x++) {
 		uploadFamilySlots.push_back(CreateOrModifyQueueInfo(queueCreateInfos, UploadFamily, queuePriority));
 	}
 

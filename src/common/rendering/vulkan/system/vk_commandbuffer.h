@@ -23,6 +23,23 @@ public:
 	void WaitForCommands(bool finish) { WaitForCommands(finish, false); }
 	void WaitForCommands(bool finish, bool uploadOnly);
 
+
+	// Two frames in flight. Called once at the top of each frame: retires the frame that ended,
+	// then waits for the frame TWO back - the one whose resources are about to be reused - so
+	// the frame in between can still be executing on the GPU while this one is recorded.
+	void AdvanceFrameSlot();
+	int FrameSlot() const { return mFrameSlot; }
+
+	// Frames in flight, fixed at 2 and NOT runtime settable.
+	//
+	// It was a cvar so the change could be A/B'd, and that is done: 35.7 -> 27.2 ms. But changing
+	// it at runtime is a use-after-free - AdvanceFrameSlot stops retiring slots at the same moment
+	// FinishFrameWait starts clearing them, tearing down retained delete lists while a frame is
+	// still executing. That showed up as SIGABRT in scudo::reportInvalidChunkState from
+	// tu_FreeDescriptorSets: a double free Qualcomm's driver silently tolerated and Turnip, built
+	// against the scudo heap checker, aborts on. A constant removes the whole class of bug.
+	enum { framesInFlight = 2 };
+
 	void PushGroup(const FString& name);
 	void PopGroup();
 	void UpdateGpuStats();
@@ -80,6 +97,38 @@ private:
 	VkFence mSubmitWaitFences[maxConcurrentSubmitCount];
 	int mNextSubmit = 0;
 
+	// Whether each pool fence has been signalled by a submit and not yet waited on and reset.
+	//
+	// Needed because with two frames in flight there are two places that retire a fence - the
+	// reuse check in FlushCommands and AdvanceFrameSlot - and waiting on an already-reset fence
+	// with no pending signal operation deadlocks. Tracking it explicitly is robust no matter how
+	// many submits a frame makes, which the old `mNextSubmit >= maxConcurrentSubmitCount` test
+	// was not: it assumed a fixed submits-per-frame, and vk_submit_size and mid-frame
+	// WaitForStreamBuffers flushes both change that count.
+	bool mFenceOutstanding[maxConcurrentSubmitCount] = {};
+
+	// Resources belonging to one in-flight frame, freed only once its fences have signalled.
+	struct FrameSlotData
+	{
+		std::vector<int> FenceIndices;
+		std::unique_ptr<DeleteList> TransferDeleteList;
+		std::unique_ptr<DeleteList> DrawDeleteList;
+	};
+	FrameSlotData mFrameSlots[framesInFlight];
+	int mFrameSlot = 0;
+	std::vector<int> mCurrentFrameFences;
+
+	// Whether the immediately preceding submit actually signalled its semaphore.
+	//
+	// The wait and the signal are not symmetric: a submit signals mSubmitSemaphore only
+	// when !lastsubmit, but the following submit used to wait on it unconditionally. As
+	// every frame ends via SubmitAndWait with lastsubmit = true, that made each frame
+	// boundary wait on a binary semaphore with no pending signal operation, which the
+	// spec leaves undefined. No driver tested actually misbehaves on it.
+	bool mPrevSubmitSignalled = false;
+
+	void FinishFrameWait(bool uploadOnly, bool clockIt);
+
 	struct TimestampQuery
 	{
 		FString name;
@@ -87,7 +136,12 @@ private:
 		uint32_t endIndex;
 	};
 
-	enum { MaxTimestampQueries = 100 };
+	// Raised from 100. The scene pass now has ~10 groups (opaque plus its six draw lists,
+	// decals, tborder, translucent) at 2 timestamps each, and a frame with portals or
+	// mirrors re-enters RenderScene several times - three sets in one frame has been
+	// observed. Add the postprocess chain and 100 was close enough to the ceiling to start
+	// silently dropping groups, since PushGroup just stops recording when it runs out.
+	enum { MaxTimestampQueries = 256 };
 	std::unique_ptr<VulkanQueryPool> mTimestampQueryPool;
 	int mNextTimestampQuery = 0;
 	std::vector<size_t> mGroupStack;

@@ -29,6 +29,7 @@
 #include "vulkan/renderer/vk_postprocess.h"
 #include "hw_clock.h"
 #include "v_video.h"
+#include <cassert>
 
 extern int rendered_commandbuffers;
 int current_rendered_commandbuffers;
@@ -113,10 +114,14 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
 {
 	int currentIndex = mNextSubmit % maxConcurrentSubmitCount;
 
-	if (mNextSubmit >= maxConcurrentSubmitCount)
+	// Reclaim this fence if a previous submit still owns it. With two frames in flight this is
+	// also the throttle that stops the CPU running more than maxConcurrentSubmitCount submits
+	// ahead of the GPU.
+	if (mFenceOutstanding[currentIndex])
 	{
 		vkWaitForFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
 		vkResetFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence);
+		mFenceOutstanding[currentIndex] = false;
 	}
 
 	QueueSubmit submit;
@@ -124,19 +129,57 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
 	for (size_t i = 0; i < count; i++)
 		submit.AddCommandBuffer(commands[i]);
 
-	if (mNextSubmit > 0)
+	// The swapchain acquire wait is added FIRST, ahead of the cross-submit wait below,
+	// and the order matters to Mesa/Turnip on KGSL even though Vulkan treats waits as an
+	// unordered set.
+	//
+	// Turnip folds a submit's waits into one sync object with kgsl_syncobj_merge(), which
+	// walks pWaitSemaphores in order. Its accumulator starts SIGNALED, so whichever wait
+	// comes first decides the branch the next one takes. A semaphore signalled by a
+	// previous submit is timestamp-backed (TS); the acquire semaphore is fd-backed, since
+	// it wraps the ANativeWindow fence. Put the TS first and the fd hits a branch that
+	// converts the wrong operand and dereferences a null queue pointer - a segfault at
+	// tu_queue::device, offset 0x1b0. Put the fd first and the TS takes the mirror-image
+	// branch, which is correct.
+	//
+	// Vulkan attaches pWaitDstStageMask per index, and AddWait keeps each mask with its
+	// semaphore, so reordering is free and changes no semantics: all waits must still be
+	// satisfied before the batch executes.
+	//
+	// This is why the bug is not universal on Turnip - listing the acquire semaphore first
+	// is the common convention, and most submits have only that one wait.
+	bool presenting = finish && fb->GetFramebufferManager()->PresentImageIndex != -1;
+
+	if (presenting)
+		submit.AddWait(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, fb->GetFramebufferManager()->ImageAvailableSemaphore());
+
+	// Only wait if the previous submit actually signalled. It signals mSubmitSemaphore
+	// only when !lastsubmit (below), and every frame ends via SubmitAndWait with
+	// lastsubmit = true - so waiting whenever mNextSubmit > 0 meant each frame boundary
+	// waited on a binary semaphore with no pending signal operation, which the spec
+	// leaves undefined. Every driver tested tolerates it, so this fixes no known crash;
+	// it is just not defensible as written.
+	//
+	// Present in upstream GZDoom since 2022 (ecd2dc6300/ed134c9b19), still in master.
+	if (mNextSubmit > 0 && mPrevSubmitSignalled)
 		submit.AddWait(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSubmitSemaphore[(mNextSubmit - 1) % maxConcurrentSubmitCount].get());
 
-	if (finish && fb->GetFramebufferManager()->PresentImageIndex != -1)
-	{
-		submit.AddWait(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, fb->GetFramebufferManager()->SwapChainImageAvailableSemaphore.get());
-		submit.AddSignal(fb->GetFramebufferManager()->RenderFinishedSemaphore.get());
-	}
+	if (presenting)
+		submit.AddSignal(fb->GetFramebufferManager()->FrameFinishedSemaphore());
 
 	if (!lastsubmit)
+	{
 		submit.AddSignal(mSubmitSemaphore[currentIndex].get());
+		mPrevSubmitSignalled = true;
+	}
+	else
+	{
+		mPrevSubmitSignalled = false;
+	}
 
 	submit.Execute(fb->device.get(), *queue, mSubmitFence[currentIndex].get());
+	mFenceOutstanding[currentIndex] = true;
+	mCurrentFrameFences.push_back(currentIndex);
 	mNextSubmit++;
 }
 
@@ -172,6 +215,109 @@ void VkCommandBufferManager::FlushCommands(bool finish, bool lastsubmit, bool up
 
 extern glcycle_t GPUWait, FPSWait;
 
+// The wait, the recycle, and the submit counter reset - the part that must happen before any
+// GPU-visible resource is rewritten.
+void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
+{
+	// Only fences a submit actually signalled and nobody has reclaimed yet. Waiting on the raw
+	// [0, mNextSubmit) range would block forever on any fence already reset by the reuse path
+	// above, which two frames in flight makes reachable.
+	VkFence waitFences[maxConcurrentSubmitCount];
+	int numWaitFences = 0;
+	for (int i = 0; i < maxConcurrentSubmitCount; i++)
+		if (mFenceOutstanding[i])
+			waitFences[numWaitFences++] = mSubmitFence[i]->fence;
+
+	if (numWaitFences > 0)
+	{
+		if (clockIt) { GPUWait.Reset(); GPUWait.Clock(); }
+		vkWaitForFences(fb->device->device, numWaitFences, waitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+		vkResetFences(fb->device->device, numWaitFences, waitFences);
+		if (clockIt) GPUWait.Unclock();
+		for (int i = 0; i < maxConcurrentSubmitCount; i++)
+			mFenceOutstanding[i] = false;
+	}
+
+	DeleteFrameObjects(uploadOnly);
+
+	// The GPU is now idle, so nothing is owed on any slot. Dropping the retained lists here is
+	// what makes the on-demand sync paths a safe fallback while pipelining is enabled.
+	for (auto& slot : mFrameSlots)
+	{
+		slot.FenceIndices.clear();
+		slot.TransferDeleteList.reset();
+		slot.DrawDeleteList.reset();
+	}
+	mCurrentFrameFences.clear();
+	mNextSubmit = 0;
+}
+
+// Retire the frame that just ended into its own slot, then take ownership of the slot belonging
+// to the frame two back and wait for it. Waiting two back rather than one is the entire point:
+// the frame in between stays in flight, so the GPU keeps working while this frame is recorded.
+void VkCommandBufferManager::AdvanceFrameSlot()
+{
+	if (mIsUploadOnly)
+		return;
+
+	// Only mNextSubmit % maxConcurrentSubmitCount is meaningful once frames overlap, so rebase
+	// to keep it small - it no longer resets every frame and would otherwise grow without bound.
+	mNextSubmit %= maxConcurrentSubmitCount;
+
+	// Hand the just-finished frame's garbage and fences to the slot it was using.
+	FrameSlotData& ending = mFrameSlots[mFrameSlot];
+	ending.FenceIndices = std::move(mCurrentFrameFences);
+	ending.TransferDeleteList = std::move(TransferDeleteList);
+	ending.DrawDeleteList = std::move(DrawDeleteList);
+	mCurrentFrameFences.clear();
+
+	mFrameSlot = (mFrameSlot + 1) % framesInFlight;
+
+	FrameSlotData& reusing = mFrameSlots[mFrameSlot];
+
+	// Clear each flag AS the fence is collected, not in a second pass afterwards.
+	//
+	// That ordering is load-bearing, not style. FenceIndices gets an entry per SUBMIT, so a frame
+	// with more than maxConcurrentSubmitCount submits repeats indices - and it can: 4 submits per
+	// frame at the default vk_submit_size, but mid-frame WaitForStreamBuffers flushes, the
+	// postprocess chain and shadowmap passes all add more, and vk_submit_size 50 measured 79.
+	// Testing the flag without clearing it let every repeat of an index pass, so n could exceed
+	// the array and smash the stack - a corruption that surfaces anywhere later, which is exactly
+	// how it presented: one crash inside tu_FreeDescriptorSets that looked like a double free, and
+	// one while standing still doing nothing.
+	//
+	// Clearing on collection makes each fence contribute at most once, which bounds n to
+	// maxConcurrentSubmitCount by construction since that is how many fences exist.
+	VkFence waitFences[maxConcurrentSubmitCount];
+	int n = 0;
+	for (int idx : reusing.FenceIndices)
+	{
+		if (idx < 0 || idx >= maxConcurrentSubmitCount || !mFenceOutstanding[idx])
+			continue;
+		mFenceOutstanding[idx] = false;
+		waitFences[n++] = mSubmitFence[idx]->fence;
+	}
+	assert(n <= maxConcurrentSubmitCount);
+
+	if (n > 0)
+	{
+		GPUWait.Reset();
+		GPUWait.Clock();
+		vkWaitForFences(fb->device->device, n, waitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+		vkResetFences(fb->device->device, n, waitFences);
+		GPUWait.Unclock();
+	}
+	reusing.FenceIndices.clear();
+
+	// Safe now: those fences signalled, so the GPU has finished reading everything this frame
+	// created two frames ago.
+	reusing.TransferDeleteList.reset();
+	reusing.DrawDeleteList.reset();
+
+	TransferDeleteList = std::make_unique<DeleteList>();
+	DrawDeleteList = std::make_unique<DeleteList>();
+}
+
 void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
 {
 	if (finish)
@@ -199,24 +345,21 @@ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
 		fb->GetFramebufferManager()->QueuePresent();
 	}
 
-	int numWaitFences = min(mNextSubmit, (int)maxConcurrentSubmitCount);
-
-	if (numWaitFences > 0)
+	// Only the frame-end call is deferrable, and never for the upload-only managers - their
+	// callers (e.g. WaitForStreamBuffers) need the GPU idle on return.
+	// Resources are retired in AdvanceFrameSlot instead, so a frame ends with its submit and
+	// present and no wait at all. mNextSubmit is deliberately NOT reset: the fence index must keep
+	// advancing across the frame boundary, or this frame would reuse fences the previous one is
+	// still waiting on and serialize.
+	if (finish && !mIsUploadOnly)
 	{
-		if (finish) {
-			GPUWait.Reset();
-			GPUWait.Clock();
-		}
-		auto res = vkWaitForFences(fb->device->device, numWaitFences, mSubmitWaitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
-		vkResetFences(fb->device->device, numWaitFences, mSubmitWaitFences);
-
-		if (finish) {
-			GPUWait.Unclock();
-		}
+		Finish.Unclock();
+		rendered_commandbuffers = current_rendered_commandbuffers;
+		current_rendered_commandbuffers = 0;
+		return;
 	}
 
-	DeleteFrameObjects(uploadOnly);
-	mNextSubmit = 0;
+	FinishFrameWait(uploadOnly, finish);
 
 	if (finish)
 	{
@@ -267,6 +410,22 @@ void VkCommandBufferManager::PopGroup()
 
 void VkCommandBufferManager::UpdateGpuStats()
 {
+	// With two frames in flight the timestamp pool is shared between a frame being recorded and
+	// one still executing, and reading it with VK_QUERY_RESULT_WAIT_BIT blocks on the GPU -
+	// reintroducing precisely the stall pipelining exists to remove, which would make the change
+	// measure as doing nothing. Per-group GPU timings are therefore unavailable in this mode.
+	// rendertimes, i_benchmark's cpu gap and frame times are all unaffected.
+	// Always, now that two frames in flight is unconditional.
+	{
+		gpuStatOutput = "";
+		timeElapsedQueries.clear();
+		mGroupStack.clear();
+		mNextTimestampQuery = 0;
+		gpuStatActive = false;
+		keepGpuStatActive = false;
+		return;
+	}
+
 	uint64_t timestamps[MaxTimestampQueries];
 	if (mNextTimestampQuery > 0)
 		mTimestampQueryPool->getResults(0, mNextTimestampQuery, sizeof(uint64_t) * mNextTimestampQuery, timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);

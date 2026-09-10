@@ -727,6 +727,19 @@ public:
 	virtual void Draw(int dt, int index, int count, bool apply = true) = 0;
 	virtual void DrawIndexed(int dt, int index, int count, bool apply = true) = 0;
 
+	// GPU timestamp groups, reported by the `gpu` stat and by i_benchmark.
+	//
+	// PPRenderState has had these for the postprocess chain since forever, which is why
+	// bloom/ssao/shadowmap show up in the stat. The scene pass had none, so its cost was
+	// only ever knowable by subtracting the postprocess chain from the frame - and on this
+	// device that scene pass is ~36 ms of a 47 ms explosion frame, i.e. the entire problem
+	// sat inside one unmeasured number.
+	//
+	// No-op by default: only the Vulkan backend implements them, and only while the stat is
+	// active, so this costs nothing when it is off.
+	virtual void PushGroup(const FString &name) {}
+	virtual void PopGroup() {}
+
 	// Immediate render state change commands. These only change infrequently and should not clutter the render state.
 	virtual bool SetDepthClamp(bool on) = 0;					// Deactivated only by skyboxes.
 	virtual void SetDepthMask(bool on) = 0;						// Used by decals and indirectly by portal setup.

@@ -33,10 +33,16 @@
 
 static const int INITIAL_BUFFER_SIZE = 100;	// 100 viewpoints per frame should nearly always be enough
 
-HWViewpointBuffer::HWViewpointBuffer(int pipelineNbr):
+HWViewpointBuffer::HWViewpointBuffer(int pipelineNbr, int regionCount):
 	mPipelineNbr(pipelineNbr)
 {
-	mBufferSize = INITIAL_BUFFER_SIZE;
+	// Sized for all regions up front. It must NOT be resized later to add regions: Resize() ends
+	// up in VkHardwareBuffer::Resize -> WaitForCommands -> FlushCommands ->
+	// GetRenderState()->EndRenderPass(), and during InitializeState() the render state does not
+	// exist yet, which segfaults.
+	mRegionCount = regionCount < 1 ? 1 : regionCount;
+	mRegionSize = INITIAL_BUFFER_SIZE;
+	mBufferSize = mRegionSize * (unsigned int)mRegionCount;
 	mBlockAlign = ((sizeof(HWViewpointUniforms) / screen->uniformblockalignment) + 1) * screen->uniformblockalignment;
 	mByteSize = mBufferSize * mBlockAlign;
 
@@ -56,9 +62,19 @@ HWViewpointBuffer::~HWViewpointBuffer()
 }
 
 
+void HWViewpointBuffer::SetFrameRegion(int slot)
+{
+	if (slot < 0 || slot >= mRegionCount) slot = 0;
+	mRegionSlot = slot;
+	mRegionStart = (unsigned int)slot * mRegionSize;
+	// The bound offset is a function of the region, so a repeated logical index across a region
+	// change must not short-circuit the rebind in Bind().
+	mLastMappedIndex = UINT_MAX;
+}
+
 void HWViewpointBuffer::CheckSize()
 {
-	if (mUploadIndex >= mBufferSize)
+	if (mUploadIndex >= mRegionSize)
 	{
 		mBufferSize *= 2;
 		mByteSize *= 2;
@@ -66,6 +82,12 @@ void HWViewpointBuffer::CheckSize()
 		{
 			mBufferPipeline[n]->Resize(mByteSize);
 		}
+		// Region boundaries move, so anything already written this frame at a higher slot is now
+		// at the wrong offset and that frame may glitch once. Growth needs >INITIAL_BUFFER_SIZE
+		// viewpoints in one frame, i.e. exactly as rare as before regions existed.
+		mRegionSize = mBufferSize / (unsigned int)mRegionCount;
+		mRegionStart = (unsigned int)mRegionSlot * mRegionSize;
+		mLastMappedIndex = UINT_MAX;
 	}
 }
 
@@ -74,7 +96,7 @@ int HWViewpointBuffer::Bind(FRenderState &di, unsigned int index)
 	if (index != mLastMappedIndex)
 	{
 		mLastMappedIndex = index;
-		mBuffer->BindRange(&di, index * mBlockAlign, mBlockAlign);
+		mBuffer->BindRange(&di, (mRegionStart + index) * mBlockAlign, mBlockAlign);
 		di.EnableClipDistance(0, mClipPlaneInfo[index]);
 	}
 	return index;
@@ -98,7 +120,7 @@ void HWViewpointBuffer::Set2D(FRenderState &di, int width, int height, int pll)
 
 	CheckSize();
 	mBuffer->Map();
-	memcpy(((char*)mBuffer->Memory()) + mUploadIndex * mBlockAlign, &matrices, sizeof(matrices));
+	memcpy(((char*)mBuffer->Memory()) + (mRegionStart + mUploadIndex) * mBlockAlign, &matrices, sizeof(matrices));
 	mBuffer->Unmap();
 
 	mClipPlaneInfo.Push(0);
@@ -110,7 +132,7 @@ int HWViewpointBuffer::SetViewpoint(FRenderState &di, HWViewpointUniforms *vp)
 {
 	CheckSize();
 	mBuffer->Map();
-	memcpy(((char*)mBuffer->Memory()) + mUploadIndex * mBlockAlign, vp, sizeof(*vp));
+	memcpy(((char*)mBuffer->Memory()) + (mRegionStart + mUploadIndex) * mBlockAlign, vp, sizeof(*vp));
 	mBuffer->Unmap();
 
 	mClipPlaneInfo.Push(vp->mClipHeightDirection != 0.f || vp->mClipLine.X > -10000000.0f);

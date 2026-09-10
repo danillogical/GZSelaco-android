@@ -39,7 +39,8 @@
 #include "hwrenderer/data/hw_viewpointbuffer.h"
 #include "hwrenderer/data/shaderuniforms.h"
 
-CVAR(Int, vk_submit_size, 1000, 0);
+CVAR(Int, vk_submit_size, 1000, 0)
+CVAR(Bool, vk_check_offsets, false, 0);
 EXTERN_CVAR(Bool, r_skipmats)
 
 VkRenderState::VkRenderState(VulkanRenderDevice* fb) : fb(fb), mStreamBufferWriter(fb), mMatrixBufferWriter(fb)
@@ -83,6 +84,16 @@ void VkRenderState::SetDepthMask(bool on)
 {
 	mDepthWrite = on;
 	mNeedApply = true;
+}
+
+void VkRenderState::PushGroup(const FString &name)
+{
+	fb->GetCommands()->PushGroup(name);
+}
+
+void VkRenderState::PopGroup()
+{
+	fb->GetCommands()->PopGroup();
 }
 
 void VkRenderState::SetDepthFunc(int func)
@@ -454,9 +465,47 @@ void VkRenderState::ApplyHWBufferSet()
 		auto passManager = fb->GetRenderPassManager();
 		auto descriptors = fb->GetDescriptorSetManager();
 
+		// Guard the three handles the driver dereferences. A null descriptor set or pipeline
+		// layout makes vkCmdBindDescriptorSets fault inside its own memcpy with a garbage
+		// address that names nothing - which is exactly the crash signature seen at
+		// vk_frames_in_flight 2, with vk_check_offsets confirming all three dynamic offsets
+		// were in range. Logging and skipping identifies which handle is bad AND keeps the
+		// frame alive, instead of dying in the driver.
+		auto hwSet = descriptors->GetHWBufferDescriptorSet();
+		auto fixedSet = descriptors->GetFixedDescriptorSet();
+		auto layout = passManager->GetPipelineLayout(mPipelineKey.NumTextureLayers);
+		if (!hwSet || !fixedSet || !layout || !mCommandBuffer)
+		{
+			Printf(PRINT_HIGH | PRINT_NONOTIFY, "VKNULL hwset=%d fixedset=%d layout=%d cmdbuf=%d\n",
+				hwSet ? 1 : 0, fixedSet ? 1 : 0, layout ? 1 : 0, mCommandBuffer ? 1 : 0);
+			return;
+		}
+
 		uint32_t offsets[3] = { mViewpointOffset, matrixOffset, streamDataOffset };
-		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, passManager->GetPipelineLayout(mPipelineKey.NumTextureLayers), 0, fb->GetDescriptorSetManager()->GetFixedDescriptorSet());
-		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, passManager->GetPipelineLayout(mPipelineKey.NumTextureLayers), 1, descriptors->GetHWBufferDescriptorSet(), 3, offsets);
+
+		// A dynamic uniform offset must satisfy offset + range <= buffer size, and violating it
+		// crashes INSIDE the driver's vkCmdBindDescriptorSets with a garbage address that says
+		// nothing about which of the three was wrong. Diagnostic for the frames-in-flight region
+		// work; costs three comparisons on a path that only runs when an offset changed.
+		if (vk_check_offsets)
+		{
+			auto bm = fb->GetBufferManager();
+			size_t sizes[3] = {
+				bm->ViewpointUBO ? bm->ViewpointUBO->Size() : 0,
+				bm->MatrixBuffer->UniformBuffer->Size(),
+				bm->StreamBuffer->UniformBuffer->Size()
+			};
+			size_t ranges[3] = { sizeof(HWViewpointUniforms), sizeof(MatricesUBO), sizeof(StreamUBO) };
+			const char* names[3] = { "viewpoint", "matrix", "stream" };
+			for (int i = 0; i < 3; i++)
+			{
+				if (sizes[i] && offsets[i] + ranges[i] > sizes[i])
+					Printf(PRINT_HIGH | PRINT_NONOTIFY, "VKOFFSET %s offset=%u range=%zu size=%zu OVERRUN\n",
+						names[i], offsets[i], ranges[i], sizes[i]);
+			}
+		}
+		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, fixedSet);
+		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, hwSet, 3, offsets);
 
 		mLastViewpointOffset = mViewpointOffset;
 		mLastMatricesOffset = matrixOffset;
@@ -485,6 +534,12 @@ void VkRenderState::BeginFrame()
 {
 	mMaterial.Reset();
 	mApplyCount = 0;
+
+	// Rewind the stream writers HERE rather than relying solely on EndFrame's reset, because the
+	// frame region may have just changed underneath them (see VkBufferManager::SetFrameRegion).
+	// A writer still holding the previous region's offset would allocate from the wrong half.
+	mMatrixBufferWriter.Reset();
+	mStreamBufferWriter.Reset();
 }
 
 void VkRenderState::EndRenderPass()

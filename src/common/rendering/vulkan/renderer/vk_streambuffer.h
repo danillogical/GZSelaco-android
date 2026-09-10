@@ -39,4 +39,7 @@ private:
 	MatricesUBO mMatrices = {};
 	VSMatrix mIdentityMatrix;
 	uint32_t mOffset = 0;
+	// Was inferred from mOffset == 0, which stops being a valid "nothing written yet" test once a
+	// frame region can start at a nonzero offset.
+	bool mFirstWrite = true;
 };

@@ -23,8 +23,15 @@ class BoneBuffer
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
 
+	// Frame-region support for two frames in flight; UploadBones returns an absolute index.
+	int mRegionCount = 1;
+	unsigned int mRegionStart = 0;
+	unsigned int mRegionSize = 0;
+
 public:
-	BoneBuffer(int pipelineNbr = 1);
+	void SetFrameRegion(int slot);
+
+	BoneBuffer(int pipelineNbr = 1, int regionCount = 1);
 	~BoneBuffer();
 
 	void Clear();

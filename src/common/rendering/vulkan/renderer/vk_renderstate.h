@@ -29,6 +29,11 @@ public:
 	// Immediate render state change commands. These only change infrequently and should not clutter the render state.
 	bool SetDepthClamp(bool on) override;
 	void SetDepthMask(bool on) override;
+
+	// Forward the scene-pass timestamp groups to the command buffer manager, which owns the
+	// query pool. Vulkan is the only backend with GraphicsTimeQueries here.
+	void PushGroup(const FString &name) override;
+	void PopGroup() override;
 	void SetDepthFunc(int func) override;
 	void SetDepthRange(float min, float max) override;
 	void SetColorMask(bool r, bool g, bool b, bool a) override;

@@ -987,11 +987,46 @@ void VulkanRenderDevice::InitializeState()
 	mRenderPassManager.reset(new VkRenderPassManager(this));
 	mRaytrace.reset(new VkRaytrace(this));
 
+	// NOTE: do NOT set mPipelineNbr here. GZDoom's per-frame buffer pipeline (mBufferPipeline[],
+	// rotated by Clear()) is a GL-backend mechanism and CANNOT work on Vulkan - which is why
+	// upstream only ever set it in gl_framebuffer.cpp. It was tried here and produced severe
+	// popping and flickering.
+	//
+	// GL rebinds the buffer at draw time, so a rotating handle is picked up for free. Vulkan bakes
+	// one VkBuffer handle into a descriptor set (VkDescriptorSetManager::UpdateHWBufferSet) and
+	// varies only a DYNAMIC OFFSET per draw, so a rotating handle never reaches the shader. Worse,
+	// VkBufferManager::CreateDataBuffer assigns ViewpointUBO/LightBufferSSO/BoneBufferSSO on every
+	// call, so N pipelined buffers leave those pointing at the LAST one - the descriptor set then
+	// reads buffer N-1 on every frame the engine writes buffer 0.
+	//
+	// Vulkan instead uses REGION PARTITIONING (SetFrameRegionCount / SetFrameRegion below), which
+	// keeps one buffer bound and biases the start index by frame slot. That is the shape which
+	// fits, precisely because dynamic offsets are what Vulkan already varies per draw.
+	// One region per frame in flight, for all four buffers that hw_entrypoint.cpp rewinds every
+	// frame. Sized at the maximum unconditionally rather than following vk_frames_in_flight,
+	// because these are built once here while the cvar is runtime-settable - and being able to
+	// toggle pipelining at a fixed viewpoint is what makes the A/B trustworthy. Region 0 is
+	// byte-identical to the unpartitioned layout, so depth 1 behaves exactly as before.
+	//
+	// The count goes through the CONSTRUCTOR, not a later resize: Resize()/SetData() on an
+	// existing buffer reaches VkHardwareBuffer::Resize -> WaitForCommands -> FlushCommands ->
+	// GetRenderState()->EndRenderPass(), and mRenderState does not exist yet at this point.
+	// Doing it the other way segfaulted at startup.
+	//
+	// Costs ~10 MB: viewpoint, light and bone are GROWN so each frame keeps its full original
+	// capacity (25 KB + 5.12 MB + 5.12 MB each), while the 64 MB flat vertex buffer is
+	// partitioned IN PLACE, since ~1,000,000 vertices per frame is ample against an AllocVertices
+	// limit whose own error text calls 2,000,000 in one scene "something very wrong".
+	const int regions = VkCommandBufferManager::framesInFlight;
+
 	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight());
 	mSkyData = new FSkyVertexBuffer;
-	mViewpoints = new HWViewpointBuffer;
-	mLights = new FLightBuffer();
-	mBones = new BoneBuffer();
+	mViewpoints = new HWViewpointBuffer(1, regions);
+	mLights = new FLightBuffer(1, regions);
+	mBones = new BoneBuffer(1, regions);
+
+	// Safe to call after construction: it only recomputes indices, it allocates nothing.
+	mVertexData->SetFrameRegionCount(regions);
 
 	mShaderManager.reset(new VkShaderManager(this));
 	mDescriptorSetManager->Init();
@@ -1060,6 +1095,7 @@ void VulkanRenderDevice::Update()
 	Flush3D.Unclock();
 
 	mCommands->WaitForCommands(true);
+
 	mCommands->UpdateGpuStats();
 
 	Super::Update();
@@ -1489,6 +1525,25 @@ TArray<uint8_t> VulkanRenderDevice::GetScreenshotBuffer(int &pitch, ESSType &col
 
 void VulkanRenderDevice::BeginFrame()
 {
+	// Two frames in flight: retire the frame that ended and claim the slot of the frame two
+	// back, waiting only for THAT one. The frame in between keeps executing while this frame is
+	// recorded. Must precede everything that appends to the delete lists (the texture manager
+	// and descriptor set manager both do, just below) and everything that writes the stream
+	// buffers, hence its position at the very top of the frame.
+	mCommands->AdvanceFrameSlot();
+	{
+		const int flight = VkCommandBufferManager::framesInFlight;
+		const int slot = mCommands->FrameSlot();
+		GetBufferManager()->SetFrameRegion(slot, flight);
+		// The four engine-level per-frame buffers. These must be pointed at the slot BEFORE
+		// anything writes them, and hw_entrypoint.cpp's Reset()/Clear() calls (which rewind to
+		// the region start) all happen later in the frame.
+		mVertexData->SetFrameRegion(slot);
+		mViewpoints->SetFrameRegion(slot);
+		mLights->SetFrameRegion(slot);
+		mBones->SetFrameRegion(slot);
+	}
+
 	SetViewportRects(nullptr);
 	mViewpoints->Clear();
 
