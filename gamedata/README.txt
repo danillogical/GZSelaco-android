@@ -104,7 +104,7 @@ Quality plausible. vid_fps 1 shows the frame counter so this can be measured.
 
 Those presets live in a custom mouse-driven dialog a gamepad cannot fully
 navigate (there is no touch input yet), so setting the cvars via autoexec.cfg is
-currently the reliable route. See report-android-port.md.
+currently the reliable route. See TECHNICAL.md.
 
 
 Running

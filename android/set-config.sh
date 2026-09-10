@@ -2,12 +2,11 @@
 #
 # Swap the graphics config on a connected device and restart the game.
 #
-#   ./android/set-config.sh thor-max     everything on; the reference look
-#   ./android/set-config.sh deck-high    Selaco's "Steam Deck: Favour Quality"
-#   ./android/set-config.sh deck-low     Selaco's "Steam Deck: Favour Performance"
+#   ./android/set-config.sh thor               the shipped default; play on this
+#   ./android/set-config.sh thor-fixedview-ab  single-variable A/B harness
+#   ./android/set-config.sh thor-clean-binds   scrub debug keybinds from a dev device
 #
-# All three are native 1080p with identical UI scaling and benchmarking, so a
-# before/after only ever differs in the graphics ladder. See configs/README.md.
+# Run with no argument to list what is available. See configs/README.md.
 #
 # This pushes over the autoexec the app extracted on first run. The app only
 # extracts that file when it is absent (SelacoActivity.extractAssets), so a push

@@ -2,8 +2,7 @@
 
 Builds GZSelaco for macOS (Apple Silicon by default), rendering with **Vulkan via MoltenVK**.
 
-See [../plan-macos-port.md](../plan-macos-port.md) for the work breakdown and rationale, and
-[../report-android-port.md](../report-android-port.md) for cross-platform decisions.
+See [../TECHNICAL.md](../TECHNICAL.md) for architecture and cross-platform decisions.
 
 ## Build
 
@@ -33,7 +32,7 @@ Alternatively drop `Selaco.ipk3` into `~/Library/Application Support/selaco-ea/`
 with no arguments.
 
 **Verified:** loads the 2023 Selaco demo (235 MB ipk3, 13432 lumps) and reaches the main menu in
-~2 s, rendering through MoltenVK. Audio does not work yet — see `report-android-port.md` D5.
+~2 s, rendering through MoltenVK. Audio does not work yet — see TECHNICAL.md.
 
 ## Notes
 

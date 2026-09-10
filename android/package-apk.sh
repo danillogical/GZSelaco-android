@@ -45,7 +45,7 @@ install -m 644 "$ENGINE_BUILD/src/libSelaco.so" "$JNILIBS/libSelaco.so"
 
 # libsndfile carries static ogg/vorbis/FLAC/opus inside it and is a DT_NEEDED of
 # libzmusic.so. Without it there is no decoder for any compressed audio and the
-# game is completely silent - see report-android-port.md D5.
+# game is completely silent - see TECHNICAL.md, Patches carried against upstream.
 # The four *_hook libs are libadrenotools'. They are never linked or dlopen'd by us -
 # adrenotools loads them itself out of nativeLibraryDir, which is why they only need to
 # be packaged. That also requires useLegacyPackaging = true in app/build.gradle, or
@@ -103,7 +103,7 @@ if [ -n "${GRADLE_LAUNCHER_JAR:-}" ]; then
 	# Gradle's FileLockContentionHandler binds ("java.net.SocketException:
 	# Operation not permitted"). Invoking java directly rather than through the
 	# gradle shell script avoids the extra process layer that the tool allowlist
-	# does not reach. See report-android-port.md W5.
+	# does not reach. See TECHNICAL.md, Building.
 	java -Xmx4g -classpath "$GRADLE_LAUNCHER_JAR" org.gradle.launcher.GradleMain --no-daemon assembleDebug
 elif [ -x ./gradlew ]; then
 	./gradlew assembleDebug
@@ -111,7 +111,7 @@ elif command -v gradle >/dev/null 2>&1; then
 	gradle assembleDebug
 else
 	echo "No Gradle wrapper and no gradle on PATH."
-	echo "See report-android-port.md D7 - do not use Homebrew's Gradle 9.x with AGP 8.x."
+	echo "Use Gradle 8.x - AGP 8.x rejects Gradle 9, so Homebrew's current Gradle will not work."
 	exit 1
 fi
 
@@ -130,7 +130,7 @@ if [ -z "$APK" ]; then
 	echo "    cd android && java -classpath \$GRADLE_LAUNCHER_JAR \\"
 	echo "        org.gradle.launcher.GradleMain --no-daemon assembleDebug"
 	echo
-	echo "See report-android-port.md W5."
+	echo "See TECHNICAL.md, Building - gradle must be invoked as java directly."
 	exit 1
 fi
 echo "  $APK"

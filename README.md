@@ -1,106 +1,117 @@
-# GZSelaco — Android and macOS
+# Selaco for Android and macOS
 
-A personal fork of [GZSelaco](https://github.com/TheCockatrice/GZSelaco) (the Selaco
-engine, itself a GZDoom fork) that adds **Android** and **macOS** builds.
+An unofficial port of [Selaco](https://store.steampowered.com/app/1592280/Selaco/) to
+**Android** and **macOS**, built on the Selaco engine (itself a GZDoom fork).
 
-Built and tested on an **AYN Thor** (Snapdragon 8 Gen 2, Android 13, Vulkan 1.3) and
-on Apple Silicon macOS. It runs the full retail Selaco at a locked 30 fps on the Thor.
+Tested on an **AYN Thor** (Snapdragon 8 Gen 2, Android 13) and on Apple Silicon Macs.
 
-You need to own Selaco. **No game data is included here** — you bring your own
+**You need to own Selaco.** No game data is included — you bring your own
 `Selaco.ipk3` from your Steam install.
 
 ---
 
-## Install on an AYN Thor
+## Install on Android
 
 1. Download `Selaco-android.apk` from [Releases](../../releases) and install it.
 2. Find `Selaco.ipk3` in your Steam folder:
    `steamapps/common/Selaco/Selaco.ipk3` (~1.2 GB)
-3. Copy it to the Thor at **`Internal storage/Selaco/`**.
-   Any method works — USB file transfer, an SD card, a cloud download on the device.
-4. Launch Selaco. It will ask for file access — tap **Allow access to manage all
-   files**, then reopen Selaco.
-5. Pick your settings in the first-run dialog.
-   **Steam Deck: Favour Performance** and **Favour Spectacle (Steam Deck Optimized)**
-   are the tested combination and hold 30 fps.
+3. Copy it to **`Internal storage/Selaco/`** on your device. USB, an SD card or a
+   download on the device all work.
+4. Launch Selaco. It asks for file access — tap **Allow access to manage all files**,
+   then reopen it.
+5. Pick your settings in the first-run dialog. **Steam Deck: Favour Performance** plus
+   **Favour Spectacle (Steam Deck Optimized)** is the tested combination.
 
-That's it. The Thor is detected as a Steam Deck automatically, which gives you the
-larger UI, larger subtitles and aim assist that Selaco ships for handhelds.
+The Thor is detected as a handheld automatically, which gives you the larger UI,
+larger subtitles and aim assist that Selaco ships for Steam Deck.
 
-> **Updating:** install the new APK *over* the old one. Don't uninstall first —
-> that would delete anything in the app's private folder. Your `Internal
-> storage/Selaco/` copy is safe either way.
+**Requirements:** Vulkan 1.1+ (there is no OpenGL fallback) and **a gamepad** — touch
+controls are not implemented, so a device with no physical buttons cannot play. Only
+the Thor has been tested; other hardware may need a lower preset.
 
-## Install on other Android devices
-
-Same steps, with two caveats:
-
-- **Vulkan 1.1+ is required.** There is no OpenGL ES fallback in this build.
-- **A gamepad is strongly recommended.** Touch input is not implemented, so on a
-  device with no physical controls you cannot play. Selaco's own on-screen keyboard
-  handles text entry, but everything else needs buttons.
-
-Only the Thor has been tested. Other hardware may need different graphics settings —
-pick a lower preset in the first-run dialog if it struggles.
+**Updating:** install the new APK *over* the old one. Do not uninstall first, or you
+lose your saves. Your `Internal storage/Selaco/` folder is safe either way.
 
 ## Install on macOS
 
-Apple Silicon only (arm64), macOS 11+. Nothing is pre-built, so you compile it:
+Apple Silicon (arm64), macOS 11+. There is no pre-built download — you compile it:
 
 ```bash
-./macos/build-deps.sh        # SDL2, ZMusic, OpenAL, MoltenVK, codecs
-./macos/build-macos.sh       # the engine
-./macos/package-macos.sh     # -> build-macos-arm64/Selaco.app, signed
+./macos/build-deps.sh     # dependencies
+./macos/build-macos.sh    # the engine
+./macos/package-macos.sh  # -> build-macos-arm64/Selaco.app
 ```
 
-Then put your game data in `gamedata/full/` and run:
+Put `Selaco.ipk3` in `gamedata/full/` and run `./macos/run-macos.sh`. Mouse, keyboard
+and Xbox controllers all work.
 
-```bash
-./macos/run-macos.sh
+---
+
+## Reporting a problem
+
+**If it crashes,** just relaunch and keep playing — crash details are saved
+automatically and each crash is appended to the same file, so nothing is lost.
+
+Send us **`Internal storage/Selaco/selaco-ea-crash.log`** — the same folder as your
+game data. Note roughly when it happened and what you were doing; timestamps in the
+file are UTC.
+
+**If it feels choppy,** open the console (`~` on a keyboard, or the on-screen keyboard)
+and type:
+
+```
+fpsdips
 ```
 
-Or double-click `Selaco.app` after copying (or symlinking) `Selaco.ipk3` into
-`~/Library/Application Support/Selaco-EA/`.
+That prints how many frames ran below 26 fps while you played, and the worst one.
+`fpsdips reset` starts the count over. Include that with any performance report, along
+with your graphics preset.
 
-Runs on Vulkan via MoltenVK. Mouse and keyboard work normally, and so do Xbox
-controllers over USB or Bluetooth.
+---
+
+## Optional: a faster graphics driver (Turnip)
+
+Adreno devices can use Mesa's open-source Turnip driver instead of Qualcomm's. On the
+Thor it measured about **8% faster** with no loss of image quality.
+
+1. Download a Turnip build for your device (MrPurple's and stevenmx's both work).
+2. Extract the driver and **rename it to `vulkan.so`**.
+3. Put it in **`Internal storage/Selaco/`**, next to your game data.
+
+It is picked up automatically on the next launch. To go back, delete `vulkan.so`.
+
+> **Experimental.** This is an unofficial driver. If a level fails to load or the game
+> crashes, delete `vulkan.so` and it reverts to the system driver.
 
 ---
 
 ## Known gaps
 
-- **No touch input.** Android needs a gamepad.
-- **No OpenGL ES fallback.** Vulkan only.
-- **macOS has no pre-built release.** Build it yourself.
-- The Thor dips to roughly 25 fps in heavy explosions. That is translucent overdraw,
-  not a bug — see [CLAUDE.md](CLAUDE.md) if you care why.
+- **No touch controls.** A gamepad is required on Android.
+- **Vulkan only** — no OpenGL fallback.
+- **No pre-built macOS release.** Build it yourself.
+- Heavy combat can still dip below 30 fps on the Thor.
 
-## Technical detail
+---
 
-Everything about how the ports work — the build system, the Android storage and
-permission model, performance measurements, and the patches carried against upstream —
-is in **[CLAUDE.md](CLAUDE.md)**.
+## For developers
 
-Also useful:
-
-- `android/configs/README.md` — graphics profiles and what each setting costs
-- `report-android-port.md` — decisions and dead ends from the Android port
-- `plan-android-port.md`, `plan-macos-port.md` — the original plans
-- `gamedata/README.txt` — which game files go where
+Build instructions, the Android storage and permission model, performance
+measurements and the patches carried against upstream are in
+**[CLAUDE.md](CLAUDE.md)**. Graphics profiles used for testing are in
+`android/configs/`.
 
 ---
 
 ## License and credits
 
-GPL v3, inherited from GZDoom. See the license files for individual contributor
-licenses.
+GPL v3, inherited from GZDoom.
 
-- GZDoom — Copyright © 1998-2023 ZDoom + GZDoom teams, and contributors
-- Doom source — Copyright © 1997 id Software, Raven Software, and contributors
-- Selaco and the Selaco engine changes — Altered Orbit Studios / TheCockatrice
+- GZDoom — © 1998-2023 ZDoom + GZDoom teams and contributors
+- Doom source — © 1997 id Software, Raven Software and contributors
+- Selaco and the Selaco engine — Altered Orbit Studios / TheCockatrice
 
-Selaco itself is a commercial game and is **not** distributed here.
+Selaco is a commercial game and is **not** distributed here.
 
-Upstream resources: [zdoom.org](https://zdoom.org/) ·
-[wiki](https://zdoom.org/wiki/) · [forum](https://forum.zdoom.org/) ·
-[Discord](https://dsc.gg/zdoom)
+[zdoom.org](https://zdoom.org/) · [wiki](https://zdoom.org/wiki/) ·
+[forum](https://forum.zdoom.org/) · [Discord](https://dsc.gg/zdoom)

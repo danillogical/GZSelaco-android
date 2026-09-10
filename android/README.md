@@ -3,8 +3,8 @@
 Builds GZSelaco for Android arm64-v8a, targeting the **Ayn Thor** (Snapdragon 8 Gen 2 / Adreno 740,
 Android 13). Renderer is **Vulkan**.
 
-See [../plan-android-port.md](../plan-android-port.md) for the work breakdown and
-[../report-android-port.md](../report-android-port.md) for decisions, trade-offs and known gaps.
+See [../TECHNICAL.md](../TECHNICAL.md) for architecture, port decisions and the patches
+carried against upstream.
 
 ## Build
 
@@ -68,7 +68,7 @@ Gradle 9.x — AGP 8.9 requires Gradle 8.x. There is no wrapper JAR checked in y
   `adb shell monkey -p com.selaco.game -c android.intent.category.LAUNCHER 1`.
 - **GZDoom launcher** - the ZWidget IWAD-picker window shown before the game window
   on desktop (`src/launcher/*.cpp`). It does not exist in the Android build; see
-  report-android-port.md D4.
+  TECHNICAL.md.
 
 ## Notes for anyone touching the build
 

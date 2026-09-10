@@ -53,3 +53,34 @@ gzdoom-crash.log
 /macos/deps/build
 /macos/deps/prefix
 /macos/deps/prefix
+
+# --- this fork ---------------------------------------------------------------
+
+# Claude Code's project state, including any project-scoped local settings. Kept out of
+# the repo: this is a personal fork, so there is no team to share them with.
+.claude/
+
+# Local working notes: scratch that should not follow the repo. Anything here is
+# yours alone, so do not reference it from a tracked file or the pointer dangles
+# for anyone who clones.
+/docs/scratch/
+
+# Build trees
+/build-android-*/
+/build-macos-*/
+/android/app/build/
+/android/app/.cxx/
+/android/.gradle/
+/android/build/
+/android/deps/prefix/
+/android/deps/src/
+/macos/deps/prefix/
+/macos/deps/src/
+
+# Game data - never commit Selaco.ipk3 (~1.2 GB, commercial)
+/gamedata/full/
+/gamedata/demo/
+*.ipk3
+
+# Replacement Vulkan drivers dropped in for testing
+*.so

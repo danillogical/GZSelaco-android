@@ -96,7 +96,8 @@ build_sdl2() {
 # So FluidSynth is dropped and CreateFluidSynthMIDIDevice replaced with a stub that
 # reports it as unavailable. ZMusic still ships adlmidi, opnmidi, timidity, timidity++,
 # wildmidi and oplsynth, so MIDI - including soundfont playback via timidity - keeps
-# working. See report-android-port.md D5b for restoring FluidSynth properly.
+# working. To restore FluidSynth properly, port its ~150 lines of glib stubs to pthreads
+# and __atomic_* builtins rather than cross-compiling glib. See TECHNICAL.md.
 patch_zmusic_drop_fluidsynth() {
 	local root="$SRC/ZMusic"
 	[ -f "$root/.android-fluidsynth-dropped" ] && return
