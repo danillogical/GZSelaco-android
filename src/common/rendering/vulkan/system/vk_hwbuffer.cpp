@@ -21,6 +21,9 @@
 */
 
 #include "vk_hwbuffer.h"
+#include "c_dispatch.h"
+#include <algorithm>
+#include <map>
 #include "zvulkan/vulkanbuilders.h"
 #include "vk_renderdevice.h"
 #include "vk_commandbuffer.h"
@@ -56,13 +59,58 @@ void VkHardwareBuffer::Reset()
 	}
 }
 
+// Buffer allocation accounting, so "where did the memory go" is answered by an inventory rather
+// than by arithmetic. Records every VkHardwareBuffer allocation; print it with `vkbufmem`.
+//
+// Needed because comparing dumpsys meminfo between builds is not a controlled experiment: its
+// "Graphics" bucket lumps our allocations together with driver-side overhead, and the readings were
+// taken at a title screen whose contents differ run to run.
+struct VkBufAllocStat { size_t bytes = 0; int count = 0; };
+static std::map<FString, VkBufAllocStat> vkBufAllocs;
+static size_t vkBufAllocTotal = 0;
+static size_t vkBufFreedTotal = 0;
+
+static void VkRecordBufAlloc(const char* label, size_t bytes)
+{
+	auto& s = vkBufAllocs[label];
+	s.bytes += bytes;
+	s.count++;
+	vkBufAllocTotal += bytes;
+}
+
+CCMD(vkbufmem)
+{
+	Printf("Vulkan buffer allocations, largest first:\n");
+	TArray<std::pair<FString, VkBufAllocStat>> rows;
+	for (auto& kv : vkBufAllocs) rows.Push({ kv.first, kv.second });
+	std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.second.bytes > b.second.bytes; });
+	for (auto& r : rows)
+		Printf("  %9.2f MB  x%-4d  %s\n", r.second.bytes / 1048576.0, r.second.count, r.first.GetChars());
+	Printf("  ---------\n  %9.2f MB total allocated, %.2f MB of that since freed\n",
+		vkBufAllocTotal / 1048576.0, vkBufFreedTotal / 1048576.0);
+}
+
 void VkHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType usage)
 {
 	size_t bufsize = max(size, (size_t)16); // For supporting zero byte buffers
 
+	{
+		const char* u = usage == BufferUsageType::Static ? "Static"
+			: usage == BufferUsageType::Stream ? "Stream"
+			: usage == BufferUsageType::Persistent ? "Persistent" : "Mappable";
+		FString label;
+		label.Format("%-10s %8.2f MB each", u, bufsize / 1048576.0);
+		VkRecordBufAlloc(label.GetChars(), bufsize);
+		// Static and Stream also allocate a same-sized staging buffer, which is real memory too.
+		if (usage == BufferUsageType::Static || usage == BufferUsageType::Stream)
+			VkRecordBufAlloc("(staging for Static/Stream)", bufsize);
+	}
+
+
 	// If SetData is called multiple times we have to keep the old buffers alive as there might still be draw commands referencing them
 	if (mBuffer)
 	{
+		vkBufFreedTotal += mBuffer->size;
 		fb->GetCommands()->DrawDeleteList->Add(std::move(mBuffer));
 	}
 	if (mStaging)
@@ -144,11 +192,28 @@ void VkHardwareBuffer::SetSubData(size_t offset, size_t size, const void *data)
 
 	if (mStaging)
 	{
-		void *dst = mStaging->Map(offset, size);
-		memcpy(dst, data, size);
-		mStaging->Unmap();
+		// A TRANSIENT staging buffer per call, not the persistent mStaging.
+		//
+		// mStaging is shared across frames. With two frames in flight the CPU can memcpy frame
+		// N+1's data into it before frame N's copyBuffer has executed, so frame N would upload
+		// N+1's contents. The frame-end fence used to make that impossible; it no longer exists.
+		//
+		// The only caller is the shadowmap AABB tree (hw_shadowmap.cpp), at most twice per frame
+		// and only when dynamic geometry actually moved, so an allocation here is cheap. Handing
+		// the temporary to TransferDeleteList retains it until the frame that uses it retires,
+		// which is exactly the lifetime the copy needs.
+		auto staging = BufferBuilder()
+			.Usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
+			.Size(size)
+			.DebugName("VkHardwareBuffer.Staging.SubData")
+			.Create(fb->device.get());
 
-		fb->GetCommands()->GetTransferCommands()->copyBuffer(mStaging.get(), mBuffer.get(), offset, offset, size);
+		void *dst = staging->Map(0, size);
+		memcpy(dst, data, size);
+		staging->Unmap();
+
+		fb->GetCommands()->GetTransferCommands()->copyBuffer(staging.get(), mBuffer.get(), 0, offset, size);
+		fb->GetCommands()->TransferDeleteList->Add(std::move(staging));
 	}
 	else
 	{
