@@ -33,19 +33,12 @@ static const int ELEMENTS_PER_LIGHT = 4;			// each light needs 4 vec4's.
 static const int ELEMENT_SIZE = (4*sizeof(float));
 
 
-FLightBuffer::FLightBuffer(int pipelineNbr, int regionCount):
+FLightBuffer::FLightBuffer(int pipelineNbr):
 	mPipelineNbr(pipelineNbr)
 {
 	int maxNumberOfLights = 80000;
 
-	// One full-capacity region per frame in flight, sized up front - the buffer cannot be
-	// reallocated after construction (see the note in HWViewpointBuffer's constructor). Growing
-	// rather than halving keeps the full 80,000 lights per frame; at 5.12 MB a region that is
-	// cheap, and it means this change cannot make "buffer is full" - which UploadLights cannot
-	// recover from mid-frame - newly reachable.
-	mRegionCount = regionCount < 1 ? 1 : regionCount;
-	mRegionSize = maxNumberOfLights * ELEMENTS_PER_LIGHT;
-	mBufferSize = mRegionSize * (unsigned int)mRegionCount;
+	mBufferSize = maxNumberOfLights * ELEMENTS_PER_LIGHT;
 	mByteSize = mBufferSize * ELEMENT_SIZE;
 
 	if (screen->useSSBO())
@@ -53,8 +46,7 @@ FLightBuffer::FLightBuffer(int pipelineNbr, int regionCount):
 		mBufferType = true;
 		mBlockAlign = 0;
 		mBlockSize = mBufferSize;
-		// A single upload must stay inside one region, unlike the whole-buffer SSBO binding.
-		mMaxUploadSize = mRegionSize;
+		mMaxUploadSize = mBlockSize;
 	}
 	else
 	{
@@ -80,18 +72,31 @@ FLightBuffer::~FLightBuffer()
 	delete mBuffer;
 }
 
-void FLightBuffer::SetFrameRegion(int slot)
+// Rotation driven by the frame slot rather than by Clear(); see HWViewpointBuffer::SetPipelinePos
+// for why separate buffers are preferred over regions in one.
+void FLightBuffer::SetPipelinePos(int pos)
 {
-	if (slot < 0 || slot >= mRegionCount) slot = 0;
-	mRegionStart = (unsigned int)slot * mRegionSize;
+	mExternalPipeline = true;
+	if (mPipelineNbr <= 1)
+		return;
+
+	int next = pos % mPipelineNbr;
+	if (next != mPipelinePos)
+	{
+		mPipelinePos = next;
+		mBuffer = mBufferPipeline[mPipelinePos];
+	}
 }
 
 void FLightBuffer::Clear()
 {
-	mIndex = mRegionStart;
+	mIndex = 0;
 
-	mPipelinePos++;
-	mPipelinePos %= mPipelineNbr;
+	if (!mExternalPipeline)
+	{
+		mPipelinePos++;
+		mPipelinePos %= mPipelineNbr;
+	}
 
 	mBuffer = mBufferPipeline[mPipelinePos];
 }
@@ -130,7 +135,7 @@ int FLightBuffer::UploadLights(FDynLightData &data)
 	unsigned thisindex = mIndex.fetch_add(totalsize);
 	float parmcnt[] = { 0, float(size0), float(size0 + size1), float(size0 + size1 + size2) };
 
-	if (thisindex + totalsize <= mRegionStart + mRegionSize)
+	if (thisindex + totalsize <= mBufferSize)
 	{
 		float *copyptr = mBufferPointer + thisindex*4;
 

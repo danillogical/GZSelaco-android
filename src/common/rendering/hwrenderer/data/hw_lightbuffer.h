@@ -24,18 +24,16 @@ class FLightBuffer
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
 
-	// Frame-region support for two frames in flight. UploadLights returns an ABSOLUTE element
-	// index that the shader reads directly, so biasing the allocator is all that is needed.
-	int mRegionCount = 1;
-	unsigned int mRegionStart = 0;
-	unsigned int mRegionSize = 0;
+	// See HWViewpointBuffer::SetPipelinePos - Clear() must not rotate when the frame slot does.
+	bool mExternalPipeline = false;
 
 	void CheckSize();
 
 public:
-	void SetFrameRegion(int slot);
+	// Select the buffer for this frame in flight. Drives rotation instead of Clear().
+	void SetPipelinePos(int pos);
 
-	FLightBuffer(int pipelineNbr = 1, int regionCount = 1);
+	FLightBuffer(int pipelineNbr = 1);
 	~FLightBuffer();
 	void Clear();
 	int UploadLights(FDynLightData &data);

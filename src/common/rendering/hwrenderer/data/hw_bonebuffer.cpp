@@ -26,15 +26,11 @@
 
 static const int BONE_SIZE = (16*sizeof(float));
 
-BoneBuffer::BoneBuffer(int pipelineNbr, int regionCount) : mPipelineNbr(pipelineNbr)
+BoneBuffer::BoneBuffer(int pipelineNbr) : mPipelineNbr(pipelineNbr)
 {
 	int maxNumberOfBones = 80000;
 
-	// One full-capacity region per frame in flight, sized up front - same reasoning as
-	// FLightBuffer, and the buffer cannot be reallocated after construction.
-	mRegionCount = regionCount < 1 ? 1 : regionCount;
-	mRegionSize = maxNumberOfBones;
-	mBufferSize = mRegionSize * (unsigned int)mRegionCount;
+	mBufferSize = maxNumberOfBones;
 	mByteSize = mBufferSize * BONE_SIZE;
 
 	if (screen->useSSBO())
@@ -42,7 +38,7 @@ BoneBuffer::BoneBuffer(int pipelineNbr, int regionCount) : mPipelineNbr(pipeline
 		mBufferType = true;
 		mBlockAlign = 0;
 		mBlockSize = mBufferSize;
-		mMaxUploadSize = mRegionSize;
+		mMaxUploadSize = mBlockSize;
 	}
 	else
 	{
@@ -66,18 +62,31 @@ BoneBuffer::~BoneBuffer()
 	delete mBuffer;
 }
 
-void BoneBuffer::SetFrameRegion(int slot)
+// Rotation driven by the frame slot rather than by Clear(); see HWViewpointBuffer::SetPipelinePos
+// for why separate buffers are preferred over regions in one.
+void BoneBuffer::SetPipelinePos(int pos)
 {
-	if (slot < 0 || slot >= mRegionCount) slot = 0;
-	mRegionStart = (unsigned int)slot * mRegionSize;
+	mExternalPipeline = true;
+	if (mPipelineNbr <= 1)
+		return;
+
+	int next = pos % mPipelineNbr;
+	if (next != mPipelinePos)
+	{
+		mPipelinePos = next;
+		mBuffer = mBufferPipeline[mPipelinePos];
+	}
 }
 
 void BoneBuffer::Clear()
 {
-	mIndex = mRegionStart;
+	mIndex = 0;
 
-	mPipelinePos++;
-	mPipelinePos %= mPipelineNbr;
+	if (!mExternalPipeline)
+	{
+		mPipelinePos++;
+		mPipelinePos %= mPipelineNbr;
+	}
 
 	mBuffer = mBufferPipeline[mPipelinePos];
 }
@@ -97,7 +106,7 @@ int BoneBuffer::UploadBones(const TArray<VSMatrix>& bones)
 
 	unsigned int thisindex = mIndex.fetch_add(totalsize);
 
-	if (thisindex + totalsize <= mRegionStart + mRegionSize)
+	if (thisindex + totalsize <= mBufferSize)
 	{
 		memcpy(mBufferPointer + thisindex * BONE_SIZE, bones.Data(), totalsize * BONE_SIZE);
 		return thisindex;

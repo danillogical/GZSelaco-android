@@ -21,22 +21,22 @@ class HWViewpointBuffer
 
 	unsigned int mBlockSize;
 
-	// Frame-region support, for two frames in flight on Vulkan. The buffer OFFSET is biased by
-	// the region while mUploadIndex stays 0-based, because mClipPlaneInfo is indexed by the same
-	// counter and is rebuilt from zero every Clear(). With one region this is all identity, so
-	// the GL backend is unaffected.
-	int mRegionCount = 1;
-	int mRegionSlot = 0;
-	unsigned int mRegionStart = 0;
-	unsigned int mRegionSize = 0;
+	// Set when the frame slot drives rotation from outside (Vulkan). Clear() must then NOT
+	// advance the pipeline itself: the descriptor set is written once at BeginFrame, while Clear()
+	// runs later and repeatedly during the frame, so a rotation inside Clear() would leave the
+	// descriptor pointing at a different buffer than the one being written.
+	bool mExternalPipeline = false;
 
 	void CheckSize();
 
 public:
-	void SetFrameRegion(int slot);
+	// Select the buffer for this frame in flight. Drives rotation instead of Clear().
+	void SetPipelinePos(int pos);
 
-	// regionCount > 1 carves the buffer into one region per frame in flight; see mRegionCount.
-	HWViewpointBuffer(int pipelineNbr = 1, int regionCount = 1);
+	// The buffer currently being written, which is what a Vulkan descriptor set must bind.
+	IDataBuffer* GetBuffer() const { return mBuffer; }
+
+	HWViewpointBuffer(int pipelineNbr = 1);
 	~HWViewpointBuffer();
 	void Clear();
 	int Bind(FRenderState &di, unsigned int index);

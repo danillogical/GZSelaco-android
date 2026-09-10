@@ -999,34 +999,31 @@ void VulkanRenderDevice::InitializeState()
 	// call, so N pipelined buffers leave those pointing at the LAST one - the descriptor set then
 	// reads buffer N-1 on every frame the engine writes buffer 0.
 	//
-	// Vulkan instead uses REGION PARTITIONING (SetFrameRegionCount / SetFrameRegion below), which
-	// keeps one buffer bound and biases the start index by frame slot. That is the shape which
-	// fits, precisely because dynamic offsets are what Vulkan already varies per draw.
-	// One region per frame in flight, for all four buffers that hw_entrypoint.cpp rewinds every
-	// frame. Sized at the maximum unconditionally rather than following vk_frames_in_flight,
-	// because these are built once here while the cvar is runtime-settable - and being able to
-	// toggle pipelining at a fixed viewpoint is what makes the A/B trustworthy. Region 0 is
-	// byte-identical to the unpartitioned layout, so depth 1 behaves exactly as before.
+	// Fixed by having the descriptor set bind whichever buffer is ACTIVE (see
+	// VkDescriptorSetManager::UpdateHWBufferSet) and by driving rotation from the frame slot
+	// rather than from Clear(), which runs too late and too often.
+	// One BUFFER per frame in flight for everything hw_entrypoint.cpp rewinds each frame, using
+	// GZDoom's own mPipelineNbr mechanism rather than partitioning one buffer into regions.
 	//
-	// The count goes through the CONSTRUCTOR, not a later resize: Resize()/SetData() on an
-	// existing buffer reaches VkHardwareBuffer::Resize -> WaitForCommands -> FlushCommands ->
-	// GetRenderState()->EndRenderPass(), and mRenderState does not exist yet at this point.
-	// Doing it the other way segfaulted at startup.
+	// Separate buffers deliberately. A region overrun is a legal write into another in-flight
+	// frame's data, so nothing catches it - not the driver, not the validation layers - and it
+	// surfaces only as a one-frame flicker, which is the hardest symptom to attribute. An overrun
+	// of a separate buffer is out of bounds and can be caught. The two Vulkan-internal stream and
+	// matrix buffers keep regions, since they are simple bump allocators with a wrap check and
+	// UNIFORM_BUFFER_DYNAMIC exists precisely to address sub-ranges of one buffer.
 	//
-	// Costs ~10 MB: viewpoint, light and bone are GROWN so each frame keeps its full original
-	// capacity (25 KB + 5.12 MB + 5.12 MB each), while the 64 MB flat vertex buffer is
-	// partitioned IN PLACE, since ~1,000,000 vertices per frame is ample against an AllocVertices
-	// limit whose own error text calls 2,000,000 in one scene "something very wrong".
-	const int regions = VkCommandBufferManager::framesInFlight;
+	// Costs ~71 MB of ADDED memory at depth 2 - one extra copy of each - and nearly all of it is
+	// FFlatVertexBuffer, at 61 MB per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex). About
+	// 0.5% of this device's RAM, in exchange for a whole class of silent corruption becoming
+	// impossible to express.
+	const int pipelineDepth = VkCommandBufferManager::framesInFlight;
+	mPipelineNbr = pipelineDepth;
 
-	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight());
+	mVertexData = new FFlatVertexBuffer(GetWidth(), GetHeight(), pipelineDepth);
 	mSkyData = new FSkyVertexBuffer;
-	mViewpoints = new HWViewpointBuffer(1, regions);
-	mLights = new FLightBuffer(1, regions);
-	mBones = new BoneBuffer(1, regions);
-
-	// Safe to call after construction: it only recomputes indices, it allocates nothing.
-	mVertexData->SetFrameRegionCount(regions);
+	mViewpoints = new HWViewpointBuffer(pipelineDepth);
+	mLights = new FLightBuffer(pipelineDepth);
+	mBones = new BoneBuffer(pipelineDepth);
 
 	mShaderManager.reset(new VkShaderManager(this));
 	mDescriptorSetManager->Init();
@@ -1532,16 +1529,19 @@ void VulkanRenderDevice::BeginFrame()
 	// buffers, hence its position at the very top of the frame.
 	mCommands->AdvanceFrameSlot();
 	{
-		const int flight = VkCommandBufferManager::framesInFlight;
 		const int slot = mCommands->FrameSlot();
-		GetBufferManager()->SetFrameRegion(slot, flight);
-		// The four engine-level per-frame buffers. These must be pointed at the slot BEFORE
-		// anything writes them, and hw_entrypoint.cpp's Reset()/Clear() calls (which rewind to
-		// the region start) all happen later in the frame.
-		mVertexData->SetFrameRegion(slot);
-		mViewpoints->SetFrameRegion(slot);
-		mLights->SetFrameRegion(slot);
-		mBones->SetFrameRegion(slot);
+
+		// The stream and matrix UBOs rotate too, so everything per-frame uses one mechanism.
+		GetBufferManager()->SetPipelinePos(slot);
+
+		// This must happen before
+		// mDescriptorSetManager->BeginFrame() below writes the descriptor set, because that set
+		// binds whichever buffer is active now - and it must not be left to their own Clear(),
+		// which runs later and repeatedly during the frame.
+		mVertexData->SetPipelinePos(slot);
+		mViewpoints->SetPipelinePos(slot);
+		mLights->SetPipelinePos(slot);
+		mBones->SetPipelinePos(slot);
 	}
 
 	SetViewportRects(nullptr);

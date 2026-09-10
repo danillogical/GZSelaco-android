@@ -35,6 +35,9 @@
 #include "vulkan/system/vk_buffer.h"
 #include "flatvertices.h"
 #include "hw_viewpointuniforms.h"
+#include "hwrenderer/data/hw_viewpointbuffer.h"
+#include "hwrenderer/data/hw_lightbuffer.h"
+#include "hwrenderer/data/hw_bonebuffer.h"
 #include "v_2ddrawer.h"
 
 VkDescriptorSetManager::VkDescriptorSetManager(VulkanRenderDevice* fb) : fb(fb)
@@ -80,12 +83,28 @@ void VkDescriptorSetManager::UpdateHWBufferSet()
 		HWBufferSet = HWBufferDescriptorPool->allocate(HWBufferSetLayout.get());
 	}
 
+	// Bind the buffer each engine object is CURRENTLY writing, not VkBufferManager's cached
+	// pointer. With one frame in flight those are the same thing, but the viewpoint, light and
+	// bone buffers are now rotated per frame, and CreateDataBuffer assigns
+	// ViewpointUBO/LightBufferSSO/BoneBufferSSO on EVERY call - so with N buffers those pointers
+	// hold whichever was constructed last. Reading them here bound the wrong buffer on every
+	// frame the rotation did not happen to land on the last one, which presented as heavy
+	// flickering.
+	//
+	// This is written once per frame from BeginFrame, and VulkanRenderDevice::BeginFrame calls
+	// SetPipelinePos on those objects immediately BEFORE this runs. That ordering is load-bearing:
+	// their own Clear() fires later and repeatedly during a frame, so rotating there would leave
+	// the descriptor pointing at a buffer other than the one being written.
+	auto viewpoints = static_cast<VkHardwareDataBuffer*>(screen->mViewpoints->GetBuffer());
+	auto lights = static_cast<VkHardwareDataBuffer*>(screen->mLights->GetBuffer());
+	auto bones = static_cast<VkHardwareDataBuffer*>(screen->mBones->GetBuffer());
+
 	WriteDescriptors()
-		.AddBuffer(HWBufferSet.get(), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, fb->GetBufferManager()->ViewpointUBO->mBuffer.get(), 0, sizeof(HWViewpointUniforms))
+		.AddBuffer(HWBufferSet.get(), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, viewpoints->mBuffer.get(), 0, sizeof(HWViewpointUniforms))
 		.AddBuffer(HWBufferSet.get(), 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, fb->GetBufferManager()->MatrixBuffer->UniformBuffer->mBuffer.get(), 0, sizeof(MatricesUBO))
 		.AddBuffer(HWBufferSet.get(), 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, fb->GetBufferManager()->StreamBuffer->UniformBuffer->mBuffer.get(), 0, sizeof(StreamUBO))
-		.AddBuffer(HWBufferSet.get(), 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, fb->GetBufferManager()->LightBufferSSO->mBuffer.get())
-		.AddBuffer(HWBufferSet.get(), 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, fb->GetBufferManager()->BoneBufferSSO->mBuffer.get())
+		.AddBuffer(HWBufferSet.get(), 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, lights->mBuffer.get())
+		.AddBuffer(HWBufferSet.get(), 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bones->mBuffer.get())
 		.Execute(fb->device.get());
 }
 

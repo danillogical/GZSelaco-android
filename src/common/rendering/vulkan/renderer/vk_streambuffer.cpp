@@ -53,11 +53,8 @@ bool VkStreamBufferWriter::Write(const StreamData& data)
 void VkStreamBufferWriter::Reset()
 {
 	mDataIndex = MAX_STREAM_DATA - 1;
+	mStreamDataOffset = 0;
 	mBuffer->Reset();
-	// The region start, not 0: ApplyHWBufferSet reads StreamDataOffset() and can bind before this
-	// frame's first Write(), which with a nonzero region would otherwise point into region 0 -
-	// i.e. at another in-flight frame's data.
-	mStreamDataOffset = mBuffer->RegionStart();
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -128,7 +125,7 @@ bool VkMatrixBufferWriter::Write(const VSMatrix& modelMatrix, bool modelMatrixEn
 
 void VkMatrixBufferWriter::Reset()
 {
+	mOffset = 0;
 	mBuffer->Reset();
-	mOffset = mBuffer->RegionStart();
 	mFirstWrite = true;
 }

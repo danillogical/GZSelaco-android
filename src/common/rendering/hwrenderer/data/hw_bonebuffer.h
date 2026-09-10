@@ -23,15 +23,14 @@ class BoneBuffer
 	unsigned int mByteSize;
     unsigned int mMaxUploadSize;
 
-	// Frame-region support for two frames in flight; UploadBones returns an absolute index.
-	int mRegionCount = 1;
-	unsigned int mRegionStart = 0;
-	unsigned int mRegionSize = 0;
+	// See HWViewpointBuffer::SetPipelinePos - Clear() must not rotate when the frame slot does.
+	bool mExternalPipeline = false;
 
 public:
-	void SetFrameRegion(int slot);
+	// Select the buffer for this frame in flight. Drives rotation instead of Clear().
+	void SetPipelinePos(int pos);
 
-	BoneBuffer(int pipelineNbr = 1, int regionCount = 1);
+	BoneBuffer(int pipelineNbr = 1);
 	~BoneBuffer();
 
 	void Clear();

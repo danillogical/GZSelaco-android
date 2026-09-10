@@ -73,17 +73,6 @@ public:
 	std::atomic<unsigned int> mCurIndex;
 	unsigned int mNumReserved;
 
-	// Frame-region support for two frames in flight. Partitioned IN PLACE rather than grown,
-	// unlike the three small buffers: this one is BUFFER_SIZE * sizeof(FFlatVertex) = 64 MB, and
-	// halving it still leaves ~1,000,000 vertices per frame against an AllocVertices limit whose
-	// own error text calls 2,000,000 in a single scene "something very wrong". So there is ample
-	// margin and no reason to spend another 64 MB.
-	//
-	// The first NUM_RESERVED vertices are shared: they are the static fullscreen/present/stencil
-	// quads written by Copy(), read-only during a frame, so no region may start below mIndex.
-	int mRegionCount = 1;
-	unsigned int mRegionStart = 0;
-	unsigned int mRegionSize = 0;
 
 	unsigned int mMapStart;
 
@@ -128,28 +117,27 @@ public:
 
 	void Reset()
 	{
-		mCurIndex = mIndex + mRegionStart;
+		mCurIndex = mIndex;
 	}
 
-	// count regions carved out of the streaming area above mIndex. Region 0 starts exactly where
-	// the unpartitioned buffer did, so one region is byte-for-byte the old behaviour.
-	void SetFrameRegionCount(int count)
+	// Select the buffer for this frame in flight.
+	//
+	// Upstream allocates mPipelineNbr vertex buffers but never actually switches between them -
+	// mPipelinePos is set once in the constructor and only used by Copy() to seed the reserved
+	// quads into all of them. GL gets away with that because writing a buffer the GPU is still
+	// reading makes the driver rename it implicitly; Vulkan has no such magic, so the rotation has
+	// to be real here. Unlike the UBOs there is no descriptor set involved - this is bound with
+	// vkCmdBindVertexBuffers via GetBufferObjects(), and VkRenderState rebinds when the handle
+	// changes - so switching the handle is all that is required.
+	void SetPipelinePos(int pos)
 	{
-		if (count < 1) count = 1;
-		mRegionCount = count;
-		mRegionSize = (BUFFER_SIZE_TO_USE - mIndex) / (unsigned int)count;
-		SetFrameRegion(0);
-	}
-
-	void SetFrameRegion(int slot)
-	{
-		if (slot < 0 || slot >= mRegionCount) slot = 0;
-		mRegionStart = (unsigned int)slot * mRegionSize;
-	}
-
-	unsigned int RegionLimit() const
-	{
-		return mRegionCount > 1 ? mIndex + mRegionStart + mRegionSize : BUFFER_SIZE_TO_USE;
+		if (mPipelineNbr <= 1) return;
+		int next = pos % mPipelineNbr;
+		if (next != mPipelinePos)
+		{
+			mPipelinePos = next;
+			mVertexBuffer = mVertexBufferPipeline[mPipelinePos];
+		}
 	}
 
 	void NextPipelineBuffer()

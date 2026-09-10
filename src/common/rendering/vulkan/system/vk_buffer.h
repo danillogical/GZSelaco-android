@@ -38,8 +38,8 @@ public:
 	std::unique_ptr<VkStreamBuffer> MatrixBuffer;
 	std::unique_ptr<VkStreamBuffer> StreamBuffer;
 
-	// Point both stream allocators at frame slot `slot` of `slots`. See VkStreamBuffer::SetRegion.
-	void SetFrameRegion(int slot, int slots);
+	// Point both stream allocators at the buffer for this frame in flight.
+	void SetPipelinePos(int pos);
 
 	std::unique_ptr<IIndexBuffer> FanToTrisIndexBuffer;
 
@@ -54,29 +54,30 @@ private:
 class VkStreamBuffer
 {
 public:
-	VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size_t count);
+	VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size_t count, int pipelineNbr = 1);
 	~VkStreamBuffer();
 
 	uint32_t NextStreamDataBlock();
-	void Reset() { mStreamDataOffset = mRegionStart; }
+	void Reset() { mStreamDataOffset = 0; }
 
-	// Restrict allocation to one of `slots` equal regions, so that two frames in flight can
-	// write concurrently without one rewinding over data the GPU is still reading.
+	// Select the buffer for this frame in flight. One buffer per frame rather than regions inside
+	// one, matching how the engine-level buffers do it (mPipelineNbr): a region overrun is a legal
+	// write into another in-flight frame's data, so nothing catches it and it surfaces only as a
+	// one-frame flicker. An overrun of a separate buffer is out of bounds and can be caught.
 	//
-	// This costs no extra memory because the buffers are enormously oversized relative to what
-	// a frame uses: MatrixBuffer is 50,000 blocks against at most ~3,500 used (one per MODIFIED
-	// matrix set), StreamBuffer is 300 blocks against ~14 (one per MAX_STREAM_DATA draws). Half
-	// of either still leaves 7-10x headroom. The headroom is deliberate - exhausting a buffer
-	// calls WaitForStreamBuffers(), which stalls the GPU completely - so halving it must not eat
-	// into the margin, and it does not.
-	void SetRegion(int slot, int slots);
-	uint32_t RegionStart() const { return mRegionStart; }
+	// Nothing downstream needs to change: UniformBuffer points at the active buffer, and both the
+	// descriptor write and the writers dereference it.
+	void SetPipelinePos(int pos);
 
+	// The buffer for the frame currently being recorded.
 	VkHardwareDataBuffer* UniformBuffer = nullptr;
 
 private:
+	enum { maxPipelineNbr = 4 };
+	VkHardwareDataBuffer* mPipeline[maxPipelineNbr] = {};
+	int mPipelineNbr = 1;
+	int mPipelinePos = 0;
+
 	uint32_t mBlockSize = 0;
 	uint32_t mStreamDataOffset = 0;
-	uint32_t mRegionStart = 0;
-	uint32_t mRegionEnd = 0;      // exclusive; 0 until SetRegion, meaning "whole buffer"
 };

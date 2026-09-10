@@ -489,9 +489,13 @@ void VkRenderState::ApplyHWBufferSet()
 		// work; costs three comparisons on a path that only runs when an offset changed.
 		if (vk_check_offsets)
 		{
+			// Every buffer bound here is now rotated per frame in flight rather than partitioned,
+			// so the whole of the ACTIVE buffer is valid for the frame being recorded and a plain
+			// bounds check is the right check again. Violating offset + range <= size crashes
+			// inside the driver's vkCmdBindDescriptorSets with an address that names nothing.
 			auto bm = fb->GetBufferManager();
 			size_t sizes[3] = {
-				bm->ViewpointUBO ? bm->ViewpointUBO->Size() : 0,
+				screen->mViewpoints ? static_cast<VkHardwareDataBuffer*>(screen->mViewpoints->GetBuffer())->Size() : 0,
 				bm->MatrixBuffer->UniformBuffer->Size(),
 				bm->StreamBuffer->UniformBuffer->Size()
 			};
@@ -504,6 +508,7 @@ void VkRenderState::ApplyHWBufferSet()
 						names[i], offsets[i], ranges[i], sizes[i]);
 			}
 		}
+
 		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, fixedSet);
 		mCommandBuffer->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, hwSet, 3, offsets);
 

@@ -21,6 +21,8 @@
 */
 
 #include "vk_buffer.h"
+#include "vk_commandbuffer.h"
+#include <cassert>
 #include "vk_hwbuffer.h"
 #include "vulkan/renderer/vk_streambuffer.h"
 #include "hwrenderer/data/shaderuniforms.h"
@@ -35,8 +37,10 @@ VkBufferManager::~VkBufferManager()
 
 void VkBufferManager::Init()
 {
-	MatrixBuffer.reset(new VkStreamBuffer(this, sizeof(MatricesUBO), 50000));
-	StreamBuffer.reset(new VkStreamBuffer(this, sizeof(StreamUBO), 300));
+	// One buffer per frame in flight, matching the engine-level buffers' mPipelineNbr model.
+	const int pipelineNbr = VkCommandBufferManager::framesInFlight;
+	MatrixBuffer.reset(new VkStreamBuffer(this, sizeof(MatricesUBO), 50000, pipelineNbr));
+	StreamBuffer.reset(new VkStreamBuffer(this, sizeof(StreamUBO), 300, pipelineNbr));
 
 	CreateFanToTrisIndexBuffer();
 }
@@ -107,54 +111,55 @@ void VkBufferManager::CreateFanToTrisIndexBuffer()
 	FanToTrisIndexBuffer->SetData(sizeof(uint32_t) * data.Size(), data.Data(), BufferUsageType::Static);
 }
 
-void VkBufferManager::SetFrameRegion(int slot, int slots)
+void VkBufferManager::SetPipelinePos(int pos)
 {
-	MatrixBuffer->SetRegion(slot, slots);
-	StreamBuffer->SetRegion(slot, slots);
+	MatrixBuffer->SetPipelinePos(pos);
+	StreamBuffer->SetPipelinePos(pos);
 }
 
 /////////////////////////////////////////////////////////////////////////////
 
-VkStreamBuffer::VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size_t count)
+VkStreamBuffer::VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size_t count, int pipelineNbr)
 {
+	mPipelineNbr = pipelineNbr < 1 ? 1 : (pipelineNbr > maxPipelineNbr ? maxPipelineNbr : pipelineNbr);
 	mBlockSize = static_cast<uint32_t>((structSize + screen->uniformblockalignment - 1) / screen->uniformblockalignment * screen->uniformblockalignment);
 
-	UniformBuffer = (VkHardwareDataBuffer*)buffers->CreateDataBuffer(-1, false, false);
-	UniformBuffer->SetData(mBlockSize * count, nullptr, BufferUsageType::Persistent);
+	for (int i = 0; i < mPipelineNbr; i++)
+	{
+		mPipeline[i] = (VkHardwareDataBuffer*)buffers->CreateDataBuffer(-1, false, false);
+		mPipeline[i]->SetData(mBlockSize * count, nullptr, BufferUsageType::Persistent);
+	}
+	UniformBuffer = mPipeline[0];
 }
 
 VkStreamBuffer::~VkStreamBuffer()
 {
-	delete UniformBuffer;
+	for (int i = 0; i < mPipelineNbr; i++)
+		delete mPipeline[i];
 }
 
-void VkStreamBuffer::SetRegion(int slot, int slots)
+void VkStreamBuffer::SetPipelinePos(int pos)
 {
-	if (slots <= 1)
+	if (mPipelineNbr <= 1)
+		return;
+
+	int next = pos % mPipelineNbr;
+	if (next != mPipelinePos)
 	{
-		mRegionStart = 0;
-		mRegionEnd = 0;                       // whole buffer
+		mPipelinePos = next;
+		UniformBuffer = mPipeline[mPipelinePos];
 	}
-	else
-	{
-		// Region boundaries must land on block multiples or the returned offsets stop being
-		// validly aligned for a dynamic uniform buffer binding.
-		uint32_t blocks = (uint32_t)(UniformBuffer->Size() / mBlockSize);
-		uint32_t per = blocks / (uint32_t)slots;
-		mRegionStart = (uint32_t)slot * per * mBlockSize;
-		mRegionEnd = mRegionStart + per * mBlockSize;
-	}
-	mStreamDataOffset = mRegionStart;
 }
 
 uint32_t VkStreamBuffer::NextStreamDataBlock()
 {
 	mStreamDataOffset += mBlockSize;
-	size_t limit = mRegionEnd ? (size_t)mRegionEnd : UniformBuffer->Size();
-	if (mStreamDataOffset + (size_t)mBlockSize >= limit)
+	if (mStreamDataOffset + (size_t)mBlockSize >= UniformBuffer->Size())
 	{
-		mStreamDataOffset = mRegionStart;
+		mStreamDataOffset = 0;
 		return 0xffffffff;
 	}
+
+	assert(mStreamDataOffset + mBlockSize <= UniformBuffer->Size());
 	return mStreamDataOffset;
 }

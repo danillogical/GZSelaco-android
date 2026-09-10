@@ -104,7 +104,6 @@ FFlatVertexBuffer::FFlatVertexBuffer(int width, int height, int pipelineNbr):
 
 	mIndex = mCurIndex = NUM_RESERVED;
 	mNumReserved = NUM_RESERVED;
-	mRegionSize = BUFFER_SIZE_TO_USE - mIndex;
 	Copy(0, NUM_RESERVED);
 }
 
@@ -151,7 +150,7 @@ std::pair<FFlatVertex *, unsigned int> FFlatVertexBuffer::AllocVertices(unsigned
 {
 	FFlatVertex *p = GetBuffer();
 	auto index = mCurIndex.fetch_add(count);
-	if (index + count >= RegionLimit())
+	if (index + count >= BUFFER_SIZE_TO_USE)
 	{
 		// If a single scene needs 2'000'000 vertices there must be something very wrong. 
 		I_FatalError("Out of vertex memory. Tried to allocate more than %u vertices for a single frame", index + count);
