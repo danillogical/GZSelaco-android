@@ -8,8 +8,8 @@
         game.
 
         windowLayoutInDisplayCutoutMode is set programmatically in
-        SelacoActivity.goImmersive() rather than here, because the attribute needs
-        API 27 and minSdk is 26.
+        SelacoActivity.goImmersive() rather than here, because this theme has no
+        version-qualified variant and the attribute is API 27.
     -->
     <style name="GameTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen">
         <item name="android:windowNoTitle">true</item>

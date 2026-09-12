@@ -3,7 +3,6 @@ package com.selaco.game;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
@@ -94,13 +93,11 @@ public class SelacoActivity extends SDLActivity {
     }
 
     private boolean hasAllFilesAccess() {
-        // isExternalStorageManager() is API 30+, and MANAGE_EXTERNAL_STORAGE does not exist
-        // before it. Below 30 the legacy permission applies instead - see the
-        // READ_EXTERNAL_STORAGE entry in AndroidManifest.xml, which is declared with
-        // maxSdkVersion 29 for exactly this window. Without it this returning true would mean
-        // "no public storage access at all", and the engine would fail to find Selaco.ipk3 with
-        // nothing pointing at the cause.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true;
+        // No version guard: MANAGE_EXTERNAL_STORAGE and isExternalStorageManager() are both API 30,
+        // and minSdk is 30 for exactly that reason - it is the lowest level at which this app's
+        // storage model works at all. Below it the only route was READ_EXTERNAL_STORAGE, which is a
+        // RUNTIME permission that nothing here ever requested, so 26-29 believed it had access and
+        // then could not read /sdcard/Selaco.
         return Environment.isExternalStorageManager();
     }
 
@@ -177,21 +174,16 @@ public class SelacoActivity extends SDLActivity {
      * surface rather than showing through it.
      *
      * setDefaultFocusHighlightEnabled is the purpose-built API for this and landed
-     * in API 26, which is exactly our minSdk.
+     * in API 26, well below our minSdk of 30, so no version guard is needed.
      */
     private void disableFocusHighlight() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
         View decor = getWindow().getDecorView();
         decor.setDefaultFocusHighlightEnabled(false);
         clearFocusHighlight(decor);
     }
 
     private void clearFocusHighlight(View view) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            view.setDefaultFocusHighlightEnabled(false);
-        }
+        view.setDefaultFocusHighlightEnabled(false);
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
             for (int i = 0; i < group.getChildCount(); i++) {
@@ -202,53 +194,40 @@ public class SelacoActivity extends SDLActivity {
 
     /** Hide the status and navigation bars; they steal touches at the screen edges. */
     private void goImmersive() {
-        // Draw into the display cutout as well, so a notch does not letterbox the
-        // game. Set here rather than in the theme because the attribute needs API
-        // 27 and minSdk is 26.
+        // Draw into the display cutout as well, so a notch does not letterbox the game. Set
+        // programmatically rather than in the theme because windowLayoutInDisplayCutoutMode is
+        // itself an API 27 attribute and the theme has no version-qualified variant here.
         //
-        // setAttributes(), not just mutating the object getAttributes() returns: that
-        // returns the live LayoutParams and changing a field on it does not schedule the
-        // re-layout that makes the change take effect.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-            getWindow().setAttributes(lp);
-        }
+        // setAttributes(), not just mutating the object getAttributes() returns: that returns the
+        // live LayoutParams and changing a field on it does not schedule the re-layout that makes
+        // the change take effect.
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        getWindow().setAttributes(lp);
 
-        // API 30+ MUST use WindowInsetsController. The SYSTEM_UI_FLAG_* constants and
-        // setSystemUiVisibility() below are deprecated as of API 30 and no longer reliably
-        // take effect - they appear to work at first launch only because the theme's
-        // windowFullscreen already gave us the whole screen, and then silently do nothing
-        // when re-applied after a resume.
+        // WindowInsetsController, not setSystemUiVisibility. The SYSTEM_UI_FLAG_* constants are
+        // deprecated as of API 30 and no longer reliably take effect - they appeared to work at
+        // first launch only because the theme's windowFullscreen had already given us the whole
+        // screen, and then silently did nothing when re-applied after a resume.
         //
-        // That is exactly what went wrong on an Android 13 device: after background ->
-        // foreground the system bar inset came back, so Android reported the app content
-        // area as 1920x1025 on a 1920x1080 display. The engine and the Vulkan swapchain
-        // were both still at 1920x1080 and consistent - the top 55 px was simply no longer
-        // presented, which read as "the fps counter disappeared" because that is where it
-        // draws.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            getWindow().setDecorFitsSystemWindows(false);
-            WindowInsetsController insets = getWindow().getInsetsController();
-            if (insets != null) {
-                insets.hide(WindowInsets.Type.systemBars());
-                // Sticky-immersive equivalent: a swipe shows the bars transiently instead of
-                // resizing the window, so the surface never changes size underneath us.
-                insets.setSystemBarsBehavior(
-                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
-            return;
+        // That is exactly what went wrong on an Android 13 device: after background -> foreground
+        // the system bar inset came back, so Android reported the app content area as 1920x1025 on
+        // a 1920x1080 display. The engine and the Vulkan swapchain were both still at 1920x1080 and
+        // consistent - the top 55 px was simply no longer presented, which read as "the fps counter
+        // disappeared" because that is where it draws.
+        //
+        // No version guard: this is API 30 and so is minSdk. The legacy flag path it replaced is
+        // gone rather than kept as dead code.
+        getWindow().setDecorFitsSystemWindows(false);
+        WindowInsetsController insets = getWindow().getInsetsController();
+        if (insets != null) {
+            insets.hide(WindowInsets.Type.systemBars());
+            // Sticky-immersive equivalent: a swipe shows the bars transiently instead of resizing
+            // the window, so the surface never changes size underneath us.
+            insets.setSystemBarsBehavior(
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
-
-        View decor = getWindow().getDecorView();
-        decor.setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
     /**

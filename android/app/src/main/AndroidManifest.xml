@@ -24,14 +24,11 @@
          still runs from $PROGDIR if it is declined. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!-- MANAGE_EXTERNAL_STORAGE does not exist before API 30, and minSdk is 26. Without this
-         the 26-29 window has NO public-storage access at all: hasAllFilesAccess() returns true
-         there only because the check is inapplicable, so the app sails past the permission gate
-         and the engine then cannot see /sdcard/Selaco, failing with a generic "cannot find a
-         game IWAD" that points at nothing. maxSdkVersion keeps it out of the way on 30+, where
-         MANAGE_EXTERNAL_STORAGE is the mechanism. -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+    <!-- No READ_EXTERNAL_STORAGE. It only mattered below API 30, and minSdk is 30 precisely
+         because that is the lowest level where MANAGE_EXTERNAL_STORAGE and
+         isExternalStorageManager() exist - i.e. where this app's storage model works at all.
+         Declaring it was in any case not enough: it is a RUNTIME permission on API 23+ and
+         nothing here ever called requestPermissions(). -->
 
     <!-- The vendored SDL calls Vibrator.vibrate() from SDLControllerManager whenever the engine
          rumbles, and joy_feedback defaults to true (m_joy.cpp). Without this the first rumble
