@@ -38,12 +38,16 @@
          (non-runtime) permission. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- allowBackup is defence in depth, NOT the fix for losing saves. Android's auto-backup needs a
+         Google account with backup enabled and caps at 25 MB, so it cannot be relied on. Savegames
+         are kept in the PUBLIC folder for that reason - see M_GetSavegamesPath in
+         posix/android/i_specialpaths.cpp - which survives uninstall on its own. -->
     <application
         android:label="Selaco"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:hasCode="true"
-        android:allowBackup="false"
+        android:allowBackup="true"
         android:hardwareAccelerated="true"
         android:isGame="true"
         android:theme="@style/GameTheme"

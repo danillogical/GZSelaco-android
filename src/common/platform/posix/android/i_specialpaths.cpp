@@ -48,6 +48,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>		// access()
 
 #include <SDL.h>
 
@@ -90,6 +91,38 @@ static FString AndroidExternalPath()
 	if (result.Len() == 0 || result[result.Len() - 1] != '/')
 		result += "/";
 	return result;
+}
+
+// The PUBLIC game-data folder, if we can write to it.
+//
+// This is the only location that survives an uninstall. Both app-scoped dirs - internal
+// /data/data/<pkg>/files and external /sdcard/Android/data/<pkg>/files - are deleted with the app,
+// so saves kept in either are destroyed by an uninstall, by "clear storage", or by the
+// INSTALL_FAILED_UPDATE_INCOMPATIBLE that any signing-key change forces you to resolve that way.
+//
+// Writability is tested rather than assumed, because the developer workflow adb-pushes the ipk3 into
+// the app-private dir, which makes hasGameData() true, which means SelacoActivity never asks for
+// MANAGE_EXTERNAL_STORAGE. A normal install cannot be in that state - the ipk3 cannot reach the
+// private dir without adb, so the permission prompt fires until it is granted - but a dev device can.
+//
+// Same candidate list and same probe-by-trying approach as the crash log (i_crashlog.cpp).
+static FString AndroidPublicPath(const char *subdir)
+{
+	static const char *const candidates[] = {
+		"/sdcard/Selaco/",
+		"/storage/emulated/0/Selaco/",
+		nullptr
+	};
+
+	for (int i = 0; candidates[i] != nullptr; i++)
+	{
+		FString dir = candidates[i];
+		dir += subdir;
+		CreatePath(dir.GetChars());          // void; success is decided by the access() test below
+		if (access(dir.GetChars(), W_OK) == 0)
+			return dir;
+	}
+	return FString();
 }
 
 FString GetUserFile (const char *file)
@@ -196,7 +229,28 @@ FString M_GetScreenshotsPath()
 
 FString M_GetSavegamesPath()
 {
-	return AndroidInternalPath() + "savegames/";
+	// Public folder when it is writable, so an uninstall or a reinstall does not take the player's
+	// progress with it - see AndroidPublicPath. This is the same folder the user already put
+	// Selaco.ipk3 in, so it needs no explaining and they can copy saves off the device.
+	//
+	// Internal is the fallback for the adb developer workflow only. Note M_GetSavegamesPaths keeps
+	// internal in the SEARCH list either way, so existing saves are still found and nothing has to be
+	// migrated.
+	//
+	// Resolved once. There are five call sites (m_misc.cpp, savegamemanager.cpp) and the save menu hits
+	// them per redraw, so probing would mean an mkdir plus an access() on every one. Caching is safe
+	// because the answer cannot change mid-session: SelacoActivity gates startup on the permission
+	// already being granted, so it is settled before the engine runs.
+	static FString cached;
+	static bool resolved = false;
+	if (!resolved)
+	{
+		resolved = true;
+		cached = AndroidPublicPath("savegames/");
+		if (cached.IsEmpty())
+			cached = AndroidInternalPath() + "savegames/";
+	}
+	return cached;
 }
 
 //===========================================================================
@@ -209,16 +263,34 @@ FString M_GetSavegamesPath()
 
 int M_GetSavegamesPaths(TArray<FString>& outputAr)
 {
-	outputAr.Push(M_GetSavegamesPath());
-	int cnt = 1;
+	// Write path first, then every location a save could already be sitting in. G_BuildSaveNames
+	// walks all of them, so moving the write path to public storage does not orphan saves written
+	// before that change - no migration step, no copying.
+	//
+	// Note the app-external entry used to be justified as "so they can be moved on and off the device
+	// without root". That has not been true since Android 11: the Files app and MTP both refuse to
+	// enter /sdcard/Android/data. It is kept only because saves may already be there.
+	const FString candidates[] = {
+		M_GetSavegamesPath(),
+		AndroidInternalPath() + "savegames/",
+		AndroidExternalPath() + "savegames/",
+	};
 
-	// Also offer saves dropped into external storage, so they can be moved on
-	// and off the device without root.
-	FString externalPath = AndroidExternalPath() + "savegames/";
-	if (M_GetSavegamesPath().CompareNoCase(externalPath.GetChars()))
+	int cnt = 0;
+	for (const FString &path : candidates)
 	{
-		outputAr.Push(externalPath);
-		cnt++;
+		if (path.IsEmpty())
+			continue;
+
+		bool seen = false;
+		for (unsigned int i = 0; i < outputAr.Size(); i++)
+			if (outputAr[i].CompareNoCase(path.GetChars()) == 0) { seen = true; break; }
+
+		if (!seen)
+		{
+			outputAr.Push(path);
+			cnt++;
+		}
 	}
 
 	return cnt;

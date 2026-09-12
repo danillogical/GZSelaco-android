@@ -613,6 +613,30 @@ void M_LoadDefaults ()
 	path += "selaco.globals";
 	M_LoadGlobalVars(path.GetChars());
 
+#ifdef __ANDROID__
+	// Fold in a selaco.globals left behind in another savegames directory.
+	//
+	// Savegames need no migration because G_BuildSaveNames searches every path M_GetSavegamesPaths
+	// returns, but this file is only read from and written to the single write path. So when that path
+	// moved to public storage to survive uninstall, it stopped finding the player's existing progress
+	// and silently started over from an empty set.
+	//
+	// Skip the write path itself. M_MigrateGlobalVars deletes its source once the destination is
+	// written, so migrating a file onto itself would delete the file it had just written.
+	//
+	// Android only, deliberately: this deletes the source, and the desktop paths are plural by design
+	// (Windows returns up to four), so running it there would consume globals out of the player's
+	// Documents and Saved Games folders.
+	TArray<FString> savegamesPaths;
+	M_GetSavegamesPaths(savegamesPaths);
+	for (const FString &dir : savegamesPaths)
+	{
+		FString otherGlobals = dir + "selaco.globals";
+		if (otherGlobals.Compare(path) != 0 && FileExists(otherGlobals.GetChars()))
+			M_MigrateGlobalVars(otherGlobals.GetChars(), path.GetChars());
+	}
+#endif
+
 	// Migrate old global vars from the same path as GameConfig
 	if (GameConfig->GetPathName() != nullptr) {
 		FString iniName = GameConfig->GetPathName();
