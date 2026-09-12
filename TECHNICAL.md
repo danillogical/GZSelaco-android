@@ -155,6 +155,42 @@ If the `[Selaco.AutoExec]` section exists but is wrong, deleting the Path line i
 enough — `CreateStandardAutoExec` only populates the section when it is *absent*. Delete the
 whole section and let the engine regenerate it.
 
+### Savegames live in the public folder, and `selaco.globals` needed a migration
+
+`M_GetSavegamesPath()` used to return the app-private *internal* dir. Android deletes that with
+the app, so saves were destroyed by an uninstall, by "clear storage", and by the
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE` that any signing-key change forces you to resolve that
+way — which is the one that matters, because it will happen to anyone installing successive APKs
+from a release page.
+
+It now writes to `/sdcard/Selaco/savegames/`, the folder the player already put the ipk3 in.
+Writability is **probed, not assumed**: the adb workflow pushes the ipk3 into the private dir, so
+`hasGameData()` is true, so `SelacoActivity` never asks for `MANAGE_EXTERNAL_STORAGE` and the
+public folder may not be writable. Internal stays as the fallback. The result is cached — the save
+menu calls this per redraw and the answer cannot change mid-session.
+
+Savegames needed no migration, because `M_GetSavegamesPaths()` returns the write path plus both
+app-scoped dirs and `G_BuildSaveNames` searches all of them.
+
+**`selaco.globals` is the trap.** Unlike savegames it is only ever read from and written to the
+*single* write path (`m_misc.cpp:612` load; `:414`, `:177`, `:191` save), so moving that path
+silently started the player over from an empty set — the symptom was a fresh 4-byte globals file
+next to the real 70-byte one still sitting in internal. `M_LoadDefaults` now folds in a copy left
+in any other savegames directory, skipping the write path itself because `M_MigrateGlobalVars`
+deletes its source once the destination is written — migrating a file onto itself would delete
+what it had just written. **Android-only on purpose:** it deletes what it migrates, and the
+desktop path lists are plural by design (Windows returns up to four), so unguarded it would
+consume globals out of the player's Documents and Saved Games folders.
+
+Two upstream bugs in that area, both left alone deliberately:
+
+- `M_MigrateGlobalVars` reads the source file into `globalStorage` but then iterates a
+  never-populated local `map`, so its documented "adopt the largest value" merge is dead code and
+  migration is really a clobber. **Do not "fix" it.** The merge coerces through `ToLong()` and
+  `"%d"`, and `_Globals.Set` (`m_misc.cpp:137`) stores raw *strings* — repairing the loop would
+  turn every string-valued key into `0`. The accidental clobber is the safer semantic.
+- `M_ReadGlobalVars` guards with `!key.Len() == 0`, which parses as `(!key.Len()) == 0`.
+
 ---
 
 ## The shipped config
@@ -492,6 +528,30 @@ it establishes, since the bug is latent. Upstream GZDoom carries the same line; 
 
 If you touch this again: `Copy()` has **three** callers and one of them is in
 `hw_vertexbuilder.cpp`. Grep the whole tree, not just `flatvertices.*`.
+
+### The wipe path, and why it is dead code in a shipped Selaco
+
+`PerformWipe` (`common/2d/wipe.cpp`) loops `Begin/Run/End/screen->Update()` **without**
+`BeginFrame`, so `Update()` would rotate nothing and reuse a slot still executing.
+`VulkanRenderDevice` carries an `mFrameBegun` flag for it (`vk_renderdevice.cpp:1100`, set at
+`:1559`): when `Update()` runs unpaired, it does a full wait instead of an advance.
+
+**Selaco never executes it.** `wipetype` ships as `0` (`wipe_None`) via the game's own
+`CVARINFO.defaults`, and `d_main.cpp:1225` skips straight to `End2DAndUpdate()` when
+`wipe_type == wipe_None`. No level transition will reach `PerformWipe`, so playing the game is
+not a test of this fix — a full playthrough proves nothing either way. The path is reachable only
+from a cutscene that calls `System_SetTransition` (`d_main.cpp:3238`), which forces a type
+independently of `wipetype`, or from a player who sets the cvar by hand.
+
+To actually exercise it, edit `wipetype=1` into `selaco-ea.ini` **with the game stopped** (a clean
+exit rewrites the ini from memory and would undo the edit; `am force-stop` skips that, which is
+what makes the edit stick). Do not try to do it from the console — printable characters need SDL
+text input and are unreachable over adb. Note `d_main.cpp:1014` wipes on *any* gamestate change,
+so loading a save from the title screen is enough; a level exit is not required. Restore the cvar
+afterwards, or a clean exit archives melt as the player's permanent setting.
+
+Verified on device this way: the "Now Loading" melt rendered and a full level run followed with no
+hang, no crash and no `DEVICE_LOST`.
 
 ---
 

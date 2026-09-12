@@ -24,6 +24,26 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 **Gradle must be invoked as `java` directly** — a shell wrapper fails with
 `java.net.SocketException: Operation not permitted`. Use Gradle **8.x**; AGP 8.x rejects 9.
 
+**Every exit code in that chain lies. Gate on the artifact.** `package-apk.sh` exits **1** on
+success, because its last step tries to run gradle and cannot find it — so a real failure and a
+normal run look identical. Gradle then reports `BUILD SUCCESSFUL in 3s` against a tree it did not
+rebuild, and `adb install -r` reports `Success` installing the stale APK. Three green-looking
+signals, nothing deployed. Compare the packaged library against the freshly built one and refuse
+to test unless they match:
+
+```bash
+DISK=$(stat -f %z android/app/src/main/jniLibs/arm64-v8a/libSelaco.so)
+APKSZ=$(unzip -l android/app/build/outputs/apk/debug/app-debug.apk \
+  | awk '/lib\/arm64-v8a\/libSelaco.so/{print $1}')
+[ "$DISK" = "$APKSZ" ] || echo "STALE APK - do not test"
+```
+
+Do not compare mtimes — APK entries are normalised to 1981. This burned a whole device test:
+the source was 41 seconds newer than the APK, the change was absent from the binary, and the
+resulting "the feature does not work" reading sent me diagnosing `CreatePath` instead. Confirm a
+change is *in* the APK (`strings` on the `.so` for a new literal) before concluding anything from
+device behaviour.
+
 macOS: `./macos/build-deps.sh`, `build-macos.sh`, `package-macos.sh`, `run-macos.sh`.
 `package-macos.sh` re-signs but does not always recompile — if an engine change seems
 absent, run `build-macos.sh` explicitly.
