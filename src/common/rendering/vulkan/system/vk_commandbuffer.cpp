@@ -262,25 +262,34 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 
 	DeleteFrameObjects(uploadOnly);
 
+	// Captured BEFORE mNextSubmit is reset below - it names the submit that could have left an
+	// orphaned signal, and after the reset that information is gone. Only meaningful when
+	// mPrevSubmitSignalled is set; see the note further down.
+	const int orphanIndex = (mNextSubmit + maxConcurrentSubmitCount - 1) % maxConcurrentSubmitCount;
+
 	mCurrentFrameLastSerial = 0;
 	mNextSubmit = 0;
 
-	// Recreate the inter-submit semaphores, and clear the flag with them.
+	// Recreate ONLY the semaphore that can actually hold an orphaned signal, if any.
 	//
-	// A binary semaphore can be left SIGNALLED WITH NO WAITER: a mid-frame flush with !lastsubmit
+	// A binary semaphore can be left signalled with no waiter: a mid-frame flush with !lastsubmit
 	// signals mSubmitSemaphore[k], and if the next FlushCommands finds nothing recorded it does not
 	// submit, so nothing consumes it. Resetting mNextSubmit then loses the back-reference, and the
-	// `mNextSubmit > 0` guard suppresses the wait for good. The next time index k comes round, its
+	// `mNextSubmit > 0` guard suppresses the wait for good. The next time index k comes round its
 	// submit signals an already-signalled binary semaphore - and from then on one wait consumes one
 	// signal and leaves it signalled, so every later wait on k passes instantly on a stale signal and
-	// the intra-frame "submit i finishes before submit i+1 starts" ordering silently stops holding.
+	// intra-frame submit ordering silently stops holding.
 	//
-	// Clearing the flag alone does NOT fix that - it only stops the next submit waiting, which makes
-	// the orphan permanent. The GPU is idle here (every fence was just waited), and destroying a
-	// signalled semaphore with no pending operations is legal, so replacing them is what actually
-	// restores a known-unsignalled state. This path is the on-demand fallback, not per frame.
-	for (auto& semaphore : mSubmitSemaphore)
-		semaphore.reset(new VulkanSemaphore(fb->device.get()));
+	// mPrevSubmitSignalled records exactly that state: FlushCommands sets it iff !lastsubmit, and the
+	// wait consumes it. So there is an orphan if and only if it is set, and it is on the index the next
+	// submit would have waited on. Recreating all 8 was the first fix here and was far heavier than
+	// needed - this path is reached per background TEXTURE UPLOAD via the transfer managers, ~2000 per
+	// level load, where it was 16,000 create/destroy pairs for nothing. Destroying a signalled
+	// semaphore with no pending operations is legal, and the GPU is idle here.
+	if (mPrevSubmitSignalled)
+	{
+		mSubmitSemaphore[orphanIndex].reset(new VulkanSemaphore(fb->device.get()));
+	}
 	mPrevSubmitSignalled = false;
 }
 

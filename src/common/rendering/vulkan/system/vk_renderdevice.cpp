@@ -1019,7 +1019,7 @@ void VulkanRenderDevice::InitializeState()
 	// matrix buffers keep regions, since they are simple bump allocators with a wrap check and
 	// UNIFORM_BUFFER_DYNAMIC exists precisely to address sub-ranges of one buffer.
 	//
-	// Costs ~71 MB of ADDED memory at depth 2 - one extra copy of each - and nearly all of it is
+	// Costs ~98.7 MiB of ADDED memory at depth 2 - one extra copy of each - and nearly all of it is
 	// FFlatVertexBuffer, at 61 MB per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex). About
 	// 0.5% of this device's RAM, in exchange for a whole class of silent corruption becoming
 	// impossible to express.

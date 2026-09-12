@@ -291,6 +291,19 @@ void DFrameBuffer::FPSLimit()
 		period -= 2'000;
 	uint64_t targetWakeTime = fpsLimitTime + period;
 
+	// How close to the deadline we stop sleeping and start spinning. Upstream's flat 2 ms is sized
+	// for the case where overshooting the deadline costs a whole vblank - which is only true on plain
+	// FIFO, and is exactly what the period shave above already compensates for.
+	//
+	// Under relaxed FIFO a late present is simply late, so precision buys nothing and the spin is pure
+	// waste. It matters because this limiter now runs with vsync ON, which upstream skipped: at
+	// vid_maxfps 30 with ~27 ms of frame work there is ~6 ms of slack every frame, so a flat 2 ms
+	// window means spinning 2 ms of every 33 ms - 60 ms/s, 6% of a core, indefinitely, on a
+	// thermally-governed handheld whose render thread and three BSP workers share the cluster.
+	//
+	// Linux/Android with CONFIG_HIGH_RES_TIMERS wakes within ~50-100 us, so 250 us is still 3x margin.
+	const int64_t spinWindow = PresentHoldsLateFrames() ? 2'000 : 250;
+
 	while (true)
 	{
 		fpsLimitTime = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
@@ -301,16 +314,15 @@ void DFrameBuffer::FPSLimit()
 			break;
 		}
 
-		if (timeToWait <= 2'000)
+		if (timeToWait <= spinWindow)
 		{
-			// We are too close to the deadline. OS sleep is not precise enough to wake us before it elapses.
-			// Yield execution and check time again.
+			// Too close to the deadline for a sleep to be reliable. Yield and re-check.
 			sleep_for(nanoseconds(0));
 		}
 		else
 		{
-			// Sleep, but try to wake before deadline.
-			sleep_for(microseconds(timeToWait - 2'000));
+			// Sleep, but try to wake before the deadline.
+			sleep_for(microseconds(timeToWait - spinWindow));
 		}
 	}
 }

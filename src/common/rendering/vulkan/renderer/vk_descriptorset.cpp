@@ -255,10 +255,22 @@ std::unique_ptr<VulkanDescriptorSet> VkDescriptorSetManager::AllocatePPDescripto
 		fb->GetCommands()->DrawDeleteList->Add(std::move(PPDescriptorPool));
 	}
 
+	// Scaled by framesInFlight, because the retention window is what sizes this pool, not the pass
+	// count. Sets allocated here go straight onto DrawDeleteList, which used to be destroyed at frame
+	// end - so peak outstanding was one frame's postprocess passes. AdvanceFrameSlot retains that list
+	// until its slot is reclaimed two frames later, so peak outstanding doubled.
+	//
+	// The shipped Deck profile runs ~32-45 passes per frame (bloom at NumBloomLevels 4, SSAO, camera
+	// exposure, tonemap, colormap, shadowmap, present, plus Selaco's PPCustomShaders), so 2x that is
+	// 64-90 of 100 - and any frame over 50 passes tipped it over. Exhausting the pool retires it to a
+	// delete list and builds a fresh one, which is a vkCreateDescriptorPool per frame; worse, it puts a
+	// pool on a delete list alongside sets allocated FROM it, which is precisely the intra-list
+	// dependency behind the scudo double-free crash. The ordering fixes handle it, but there is no
+	// reason to exercise them 30 times a second for ~2 KB of pool memory.
 	PPDescriptorPool = DescriptorPoolBuilder()
-		.AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 200)
-		.AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4)
-		.MaxSets(100)
+		.AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 200 * VkCommandBufferManager::framesInFlight)
+		.AddPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * VkCommandBufferManager::framesInFlight)
+		.MaxSets(100 * VkCommandBufferManager::framesInFlight)
 		.DebugName("PPDescriptorPool")
 		.Create(fb->device.get());
 

@@ -365,8 +365,31 @@ driven by the frame slot:
 worked, but the failure modes are asymmetric: a region overrun is a *legal* write into another
 in-flight frame's data, so neither the driver nor the validation layers can see it and it surfaces
 only as a one-frame flicker — the hardest symptom to attribute. An overrun of a separate buffer is
-out of bounds and can be caught. Costs ~93 MB more at depth 2, nearly all of it `FFlatVertexBuffer`
-at 61 MB per copy, which is a good trade for making a class of silent corruption inexpressible.
+out of bounds and can be caught. Costs **98.7 MiB** more at depth 2, nearly all of it
+`FFlatVertexBuffer` at 61.04 MiB per copy, which is a good trade for making a class of silent
+corruption inexpressible.
+
+The breakdown, derived rather than estimated — and it reproduces `vkbufmem`'s measured 197.3 MiB of
+Persistent allocations exactly, which is what makes it trustworthy:
+
+| buffer | per copy | added at depth 2 |
+|---|---|---|
+| `FFlatVertexBuffer` vertex (2,000,000 × 32 B) | 61.04 MiB | +61.04 |
+| Stream UBO (300 × 65,280 B) | 18.68 MiB | +18.68 |
+| Matrix UBO (50,000 × 192 B) | 9.16 MiB | +9.16 |
+| `FLightBuffer` (80,000 × 64 B) | 4.88 MiB | +4.88 |
+| `BoneBuffer` (80,000 × 64 B) | 4.88 MiB | +4.88 |
+| `HWViewpointBuffer` (100 × 256 B) | 0.02 MiB | +0.02 |
+| | **101.7 MiB** | **+98.66 MiB** |
+
+Earlier figures of "~71 MB" and "~93 MB" were both wrong: 71 counted only the four engine buffers
+and predates the two `VkStreamBuffer`s being pipelined.
+
+**96% of that is one oversized constant.** `FFlatVertexBuffer::BUFFER_SIZE` is 2,000,000 vertices,
+while `mIndex` on a real level is ~102,000 — the buffer is provisioned ~20× above the static
+high-water mark, and depth 2 doubles the cost of that pessimism. Before shrinking it, measure: there
+is no instrumentation for the actual per-frame peak, and `AllocVertices` turns an overrun into
+`I_FatalError` rather than a wasted page. A max-tracker on `mCurIndex` would give the real headroom.
 
 Three things that make this work, each of which broke it first:
 

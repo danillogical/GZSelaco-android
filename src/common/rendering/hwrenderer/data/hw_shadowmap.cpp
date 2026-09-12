@@ -143,8 +143,11 @@ void IShadowMap::UploadAABBTree()
 		// postprocess pass's descriptor set - which the PREVIOUS frame recorded and may still be
 		// executing, because a frame no longer ends with a fence wait and the next frame's first
 		// submit has no dependency on it. That is a write-after-read hazard on the AABB nodes: one
-		// frame of wrong shadows or garbage light indices. It fires whenever the tree updates, i.e.
-		// any moving door, lift or platform.
+		// frame of wrong shadows or garbage light indices. It fires when a POLYOBJECT moves - in
+		// Selaco, a sliding door - and not on sector movement: DoomLevelAABBTree::Update only sets
+		// `modified` when a line's X,Y endpoints change, and doors, lifts, platforms and crushers move
+		// floors and ceilings, which leaves endpoints alone. Bursts of a second or two, not steady
+		// state; measured at 0.1-0.3 ms on the frames it does fire.
 		//
 		// SetData allocates a fresh buffer and retires the old one through the frame-slot delete list,
 		// so the in-flight frame keeps reading the copy it was given - the same pattern UploadLights
