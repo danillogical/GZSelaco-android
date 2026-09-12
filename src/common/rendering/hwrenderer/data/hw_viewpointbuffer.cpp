@@ -52,7 +52,13 @@ HWViewpointBuffer::HWViewpointBuffer(int pipelineNbr):
 
 HWViewpointBuffer::~HWViewpointBuffer()
 {
-	delete mBuffer;
+	// Every slot, not just the active one. `delete mBuffer` frees whichever slot happens to be
+	// current and leaks the rest - harmless while mPipelineNbr was 1, a real leak per teardown now
+	// that Vulkan allocates one per frame in flight. FFlatVertexBuffer and VkStreamBuffer both loop;
+	// this class, FLightBuffer and BoneBuffer were the three copies of the pattern that did not.
+	for (int n = 0; n < mPipelineNbr; n++)
+		delete mBufferPipeline[n];
+	mBuffer = nullptr;
 }
 
 

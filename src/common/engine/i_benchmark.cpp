@@ -297,8 +297,11 @@ void I_BenchmarkFrame(double frameMs)
 	Printf(kBenchPrint, "BENCH   -- stats as of the worst frame (%.1f ms) --\n", worstInWindow);
 	LogEngineStats();
 
-	if (gpuStatOutput.Len() > 0)
-		Printf(kBenchPrint, "BENCH   gpu: %s\n", gpuStatOutput.GetChars());
+	// No second gpu line here. LogEngineStats already printed worstGpu, which is the gpu stat as it
+	// stood on the WORST frame; printing gpuStatOutput as well printed the LAST frame of the window -
+	// precisely the defect worstGpu was introduced to fix, left behind when it was added. Two lines
+	// labelled the same way, describing different frames, one of which could not be correlated with
+	// the geometry counters beside it.
 
 	frames.clear();
 	windowStartMs = now;
@@ -358,7 +361,7 @@ CCMD(fpsdips)
 
 	double mins = (double)((uint64_t)I_msTime() - dipSinceMs) / 60000.0;
 	Printf("Dips below %.0f fps (>= %.1f ms): %llu of %llu frames (%.2f%%)\n",
-		(double)i_dipfps, 1000.0 / (double)i_dipfps,
+		(double)i_dipfps, (i_dipfps > 0.0f) ? 1000.0 / (double)i_dipfps : 0.0,
 		(unsigned long long)dipFrames, (unsigned long long)dipTotalFrames,
 		100.0 * (double)dipFrames / (double)dipTotalFrames);
 	Printf("Worst frame: %.1f ms (%.1f fps)   Load stalls excluded: %llu\n",

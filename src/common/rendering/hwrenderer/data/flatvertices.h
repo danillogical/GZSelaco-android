@@ -90,6 +90,10 @@ public:
 
 	unsigned int mMapStart;
 
+	// Largest index any single frame has ever needed. Never reset - see AllocVertices.
+	std::atomic<unsigned int> mPeakIndex { 0 };
+	unsigned int GetPeakIndex() const { return mPeakIndex.load(std::memory_order_relaxed); }
+
 	static const unsigned int BUFFER_SIZE = 2000000;
 	static const unsigned int BUFFER_SIZE_TO_USE = BUFFER_SIZE-500;
 

@@ -1012,12 +1012,24 @@ void VulkanRenderDevice::InitializeState()
 	// One BUFFER per frame in flight for everything hw_entrypoint.cpp rewinds each frame, using
 	// GZDoom's own mPipelineNbr mechanism rather than partitioning one buffer into regions.
 	//
-	// Separate buffers deliberately. A region overrun is a legal write into another in-flight
-	// frame's data, so nothing catches it - not the driver, not the validation layers - and it
-	// surfaces only as a one-frame flicker, which is the hardest symptom to attribute. An overrun
-	// of a separate buffer is out of bounds and can be caught. The two Vulkan-internal stream and
-	// matrix buffers keep regions, since they are simple bump allocators with a wrap check and
-	// UNIFORM_BUFFER_DYNAMIC exists precisely to address sub-ranges of one buffer.
+	// Separate buffers deliberately - but for a plainer reason than "it makes corruption catchable".
+	// GZDoom ALREADY has this mechanism: mPipelineNbr, mBufferPipeline[] and gl_pipeline_depth exist
+	// upstream for exactly this purpose (buffers.h), and GLES defaults the depth to 4. Reusing it is
+	// what keeps the Vulkan-side diff small. The regions alternative would have meant new offset
+	// arithmetic on every write path.
+	//
+	// The "catchable" argument is only half true and should not be leaned on: it holds for descriptor
+	// dynamic offsets, where offset + range > size is a real VUID violation, but NOT for a host memcpy
+	// through a persistent mapping - which is how all of these are actually written. These are VMA
+	// sub-allocations from shared device memory with no guard margin, so a memcpy past the end of
+	// buffer A lands in buffer B just as silently as it would land in region B of one buffer.
+	// FFlatVertexBuffer, which is 62% of the cost, is bound with vkCmdBindVertexBuffers and written by
+	// raw memcpy - entirely in the second category.
+	//
+	// The two Vulkan-internal stream and matrix buffers get one buffer PER FRAME like everything else;
+	// they keep a bump allocator with a wrap check WITHIN each, which is what
+	// UNIFORM_BUFFER_DYNAMIC's sub-ranges are for. (An earlier version of this comment said they
+	// "keep regions", i.e. the opposite of what the code does.)
 	//
 	// Costs ~98.7 MiB of ADDED memory at depth 2 - one extra copy of each - and nearly all of it is
 	// FFlatVertexBuffer, at 61 MB per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex). About
@@ -1203,12 +1215,23 @@ void VulkanRenderDevice::SetVSync(bool vsync)
 // and vulkanswapchain.cpp falls back to plain FIFO when it is unsupported - MoltenVK does not
 // expose it, so the macOS target lands here. Reading the mode we were actually given rather than
 // assuming the one we requested is the whole point.
-bool VulkanRenderDevice::PresentHoldsLateFrames()
+DFrameBuffer::EPresentPacing VulkanRenderDevice::GetPresentPacing()
 {
+	// Without vsync the limiter is the only thing pacing us, so late frames are not rounded to
+	// anything - same treatment as relaxed FIFO.
 	if (!mVSync || mFramebufferManager == nullptr)
-		return false;
+		return EPresentPacing::DropsLateFrames;
+
 	const auto& swapchain = GetFramebufferManager()->SwapChain;
-	return swapchain != nullptr && swapchain->PresentMode() == VK_PRESENT_MODE_FIFO_KHR;
+	if (swapchain == nullptr)
+		return EPresentPacing::Unknown;
+
+	// The mode actually GRANTED, not the one requested. vid_vsync asks for FIFO_RELAXED, but that mode
+	// is optional and vulkanswapchain.cpp falls back to plain FIFO when it is unsupported - MoltenVK
+	// does not expose it, so the macOS target lands there.
+	return swapchain->PresentMode() == VK_PRESENT_MODE_FIFO_KHR
+		? EPresentPacing::HoldsLateFrames
+		: EPresentPacing::DropsLateFrames;
 }
 
 void VulkanRenderDevice::PrecacheMaterial(FMaterial *mat, int translation)

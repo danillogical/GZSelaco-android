@@ -286,33 +286,31 @@ void DFrameBuffer::FPSLimit()
 	// because there a late present IS rounded up to the following vblank. This is why the limiter can
 	// now run with vsync on at all: the old code skipped it entirely, which made vid_maxfps silently
 	// inert in the configuration a handheld ships with.
+	// Shave the target only when a late present is ROUNDED UP to the next vblank. Under relaxed FIFO
+	// it is not, and shaving would just cap slightly fast: aiming 2 ms short measured 31.9 fps instead
+	// of 30 on an Ayn Thor. Under Unknown we do not shave either, which is upstream's behaviour.
+	const EPresentPacing pacing = GetPresentPacing();
 	uint64_t period = 1'000'000 / maxfps;
-	if (PresentHoldsLateFrames() && period > 2'000)
+	if (pacing == EPresentPacing::HoldsLateFrames && period > 2'000)
 		period -= 2'000;
 	uint64_t targetWakeTime = fpsLimitTime + period;
 
-	// How close to the deadline we stop sleeping and start spinning. Upstream's flat 2 ms is sized
-	// for the case where overshooting the deadline costs a whole vblank - which is only true on plain
-	// FIFO, and is exactly what the period shave above already compensates for.
+	// How close to the deadline we stop sleeping and start spinning.
 	//
-	// Under relaxed FIFO a late present is simply late, so precision buys nothing and the spin is pure
-	// waste. It matters because this limiter now runs with vsync ON, which upstream skipped: at
-	// vid_maxfps 30 with ~27 ms of frame work there is ~6 ms of slack every frame, so a flat 2 ms
-	// window means spinning 2 ms of every 33 ms - 60 ms/s, 6% of a core, indefinitely, on a
-	// thermally-governed handheld whose render thread and three BSP workers share the cluster.
+	// The narrow window is only correct when BOTH are true: a late present is cheap (relaxed FIFO, so
+	// precision buys nothing) AND the platform timer is fine-grained. Linux/Android with
+	// CONFIG_HIGH_RES_TIMERS wake within ~50-100 us, so 250 us is 3x margin; Windows' default timer
+	// resolution is 1-15.6 ms, which is what upstream's flat 2 ms was sized for.
 	//
-	// The tight window is gated on the PLATFORM as well as the present mode, because it is really a
-	// claim about timer resolution. Linux and Android with CONFIG_HIGH_RES_TIMERS wake within
-	// ~50-100 us, so 250 us is 3x margin. Windows' default timer resolution is 1-15.6 ms, which is
-	// what upstream's 2 ms was sized for - shaving it there would make a sleep routinely overshoot the
-	// deadline and the cap erratic. This fork does not ship Windows, but the file is shared and the
-	// change is a candidate for upstreaming, so it must not quietly regress it.
+	// Unknown gets the wide window deliberately. GL and GLES also call this function and cannot report
+	// their present mode, and GL under vid_vsync 1 DOES round a late present up - so a narrow window
+	// there would sleep past the vblank and halve the rate. That combination is exactly what the
+	// earlier single-bool version got wrong.
+	int64_t spinWindow = 2'000;
 #if defined(__linux__) || defined(__ANDROID__)
-	const int64_t tightSpinWindow = 250;
-#else
-	const int64_t tightSpinWindow = 2'000;
+	if (pacing == EPresentPacing::DropsLateFrames)
+		spinWindow = 250;
 #endif
-	const int64_t spinWindow = PresentHoldsLateFrames() ? 2'000 : tightSpinWindow;
 
 	while (true)
 	{

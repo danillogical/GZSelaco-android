@@ -33,6 +33,7 @@
 */
 
 #include "c_cvars.h"
+#include "c_dispatch.h"
 #include "flatvertices.h"
 #include "v_video.h"
 #include "cmdlib.h"
@@ -152,10 +153,41 @@ std::pair<FFlatVertex *, unsigned int> FFlatVertexBuffer::AllocVertices(unsigned
 	auto index = mCurIndex.fetch_add(count);
 	if (index + count >= BUFFER_SIZE_TO_USE)
 	{
-		// If a single scene needs 2'000'000 vertices there must be something very wrong. 
+		// If a single scene needs 2'000'000 vertices there must be something very wrong.
 		I_FatalError("Out of vertex memory. Tried to allocate more than %u vertices for a single frame", index + count);
 	}
+
+	// Track the real high-water mark, because BUFFER_SIZE is the single largest memory decision in the
+	// renderer and nothing measures it. 2,000,000 vertices is 61 MiB per pipeline copy - 96% of the
+	// memory that two frames in flight adds - and the static geometry alone is only ~102k, so the
+	// constant is provisioned roughly 20x above anything observed. It cannot be shrunk on a guess,
+	// because an overrun is I_FatalError rather than a wasted page. Print with `vertexpeak`.
+	unsigned int seen = index + count;
+	unsigned int prev = mPeakIndex.load(std::memory_order_relaxed);
+	while (seen > prev && !mPeakIndex.compare_exchange_weak(prev, seen, std::memory_order_relaxed))
+		;
+
 	return std::make_pair(p, index);
+}
+
+// Reports the largest vertex index any single frame has actually needed, against the compile-time
+// ceiling. Deliberately a CCMD rather than a stat: the number only means anything after a real play
+// session, and the point of it is to decide a constant, not to watch it live.
+CCMD(vertexpeak)
+{
+	if (screen == nullptr || screen->mVertexData == nullptr)
+	{
+		Printf("No vertex buffer yet.\n");
+		return;
+	}
+	FFlatVertexBuffer *fvb = screen->mVertexData;
+	unsigned int peak = fvb->GetPeakIndex();
+	Printf("Flat vertex high-water: %u of %u (%.1f%% of BUFFER_SIZE)\n",
+		peak, FFlatVertexBuffer::BUFFER_SIZE, 100.0 * peak / FFlatVertexBuffer::BUFFER_SIZE);
+	Printf("  static region (mIndex): %u\n", fvb->mIndex);
+	Printf("  per copy: %.2f MB, x%d pipeline copies = %.2f MB\n",
+		FFlatVertexBuffer::BUFFER_SIZE * sizeof(FFlatVertex) / 1048576.0, fvb->mPipelineNbr,
+		fvb->mPipelineNbr * FFlatVertexBuffer::BUFFER_SIZE * sizeof(FFlatVertex) / 1048576.0);
 }
 
 //==========================================================================

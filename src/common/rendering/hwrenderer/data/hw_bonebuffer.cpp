@@ -59,7 +59,11 @@ BoneBuffer::BoneBuffer(int pipelineNbr) : mPipelineNbr(pipelineNbr)
 
 BoneBuffer::~BoneBuffer()
 {
-	delete mBuffer;
+	// Every slot - see the note in HWViewpointBuffer's destructor. At 80000 x 64 B per copy this
+	// leaked ~5 MB per framebuffer teardown at two frames in flight.
+	for (int n = 0; n < mPipelineNbr; n++)
+		delete mBufferPipeline[n];
+	mBuffer = nullptr;
 }
 
 // Rotation driven by the frame slot rather than by Clear(); see HWViewpointBuffer::SetPipelinePos

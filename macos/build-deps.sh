@@ -147,6 +147,11 @@ build_zmusic() {
 	else
 		echo "  WARNING: no libsndfile in $PREFIX - ZMusic will have no audio decoder."
 		echo "           Run '$0 ogg vorbis flac sndfile' first, or the game will be silent."
+		# DYN_SNDFILE=OFF here too, matching android/deps/build-deps.sh. Left unset, ZMusic keeps the
+		# default ON and dlopen()s libsndfile.1.dylib at runtime - which package-macos.sh cannot
+		# satisfy, since it only copies dylibs out of $PREFIX. The result is a silently mute game
+		# instead of a build that says what is missing.
+		sndfile_args=( -DDYN_SNDFILE=OFF )
 	fi
 
 	# `${arr[@]+"${arr[@]}"}`: on bash 3.2 - which is /bin/bash on macOS, and what

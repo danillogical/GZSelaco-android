@@ -297,13 +297,23 @@ public:
 
 	void FPSLimit();
 
-	// Whether presentation will hold a late frame back until the next vblank.
+	// How presentation treats a frame that misses its deadline. FPSLimit needs THREE answers, not
+	// two, and collapsing them into one bool silently regressed the GL path:
 	//
-	// FPSLimit needs this because plain FIFO and relaxed FIFO want different targets: relaxed FIFO
-	// presents a late frame immediately, so aiming at the exact period is right, whereas plain FIFO
-	// rounds a late present up to the following vblank and halves the rate. Only the Vulkan backend
-	// can answer it, since only it knows which present mode the swapchain actually got.
-	virtual bool PresentHoldsLateFrames() { return false; }
+	//   Unknown          assume the worst - a late present costs a vblank, and the timer may be
+	//                    coarse. No period shave, wide spin window. This is upstream's behaviour and
+	//                    must stay the default, because GL and GLES also call FPSLimit and a
+	//                    `return false` default gave them "no shave" AND a narrow spin window - the
+	//                    exact combination the wide window existed to protect.
+	//   HoldsLateFrames  plain FIFO. A late present is rounded up to the next vblank, so shave the
+	//                    target to land inside the right one.
+	//   DropsLateFrames  relaxed FIFO. A late present is simply late, so precision buys nothing and
+	//                    spinning for it is pure waste.
+	//
+	// Only the Vulkan backend can distinguish the last two, since only it knows which present mode
+	// the swapchain was actually granted rather than which one was requested.
+	enum class EPresentPacing { Unknown, HoldsLateFrames, DropsLateFrames };
+	virtual EPresentPacing GetPresentPacing() { return EPresentPacing::Unknown; }
 
 	// Retrieves a buffer containing image data for a screenshot.
 	// Hint: Pitch can be negative for upside-down images, in which case buffer

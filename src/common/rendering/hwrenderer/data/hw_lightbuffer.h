@@ -27,8 +27,6 @@ class FLightBuffer
 	// See HWViewpointBuffer::SetPipelinePos - Clear() must not rotate when the frame slot does.
 	bool mExternalPipeline = false;
 
-	void CheckSize();
-
 public:
 	// Select the buffer for this frame in flight. Drives rotation instead of Clear().
 	void SetPipelinePos(int pos);
