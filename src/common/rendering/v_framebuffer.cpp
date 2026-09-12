@@ -273,22 +273,14 @@ void DFrameBuffer::FPSLimit()
 		return;
 	}
 
-	// Target the exact period even with vsync on. vid_vsync asks for
-	// VK_PRESENT_MODE_FIFO_RELAXED_KHR (ZVulkan/src/vulkanswapchain.cpp), and relaxed FIFO presents
-	// a late frame immediately instead of holding it for the next vblank. So the classic hazard -
-	// waking a hair late, missing the vblank, and halving the rate again (a 30 fps cap on a 60 Hz
-	// panel collapsing to 20) - does not arise, and shaving the target to avoid it would just cap
-	// slightly fast: aiming 2 ms short measured 31.9 fps instead of 30 on an Ayn Thor, because
-	// nothing rounded the present back up.
+	// Shave the target only when a late present is rounded up to the next vblank, which is plain FIFO.
+	// Relaxed FIFO presents a late frame immediately, so the classic hazard - waking a hair late and
+	// halving the rate, a 30 fps cap on a 60 Hz panel collapsing to 20 - does not arise there, and
+	// shaving would just cap slightly fast. Unknown does not shave, matching upstream.
 	//
-	// Relaxed FIFO is an OPTIONAL present mode, though, and plain FIFO is the mandatory one. Where we
-	// did not get it - MoltenVK, so the macOS target - the hazard is real and the shave is required,
-	// because there a late present IS rounded up to the following vblank. This is why the limiter can
-	// now run with vsync on at all: the old code skipped it entirely, which made vid_maxfps silently
-	// inert in the configuration a handheld ships with.
-	// Shave the target only when a late present is ROUNDED UP to the next vblank. Under relaxed FIFO
-	// it is not, and shaving would just cap slightly fast: aiming 2 ms short measured 31.9 fps instead
-	// of 30 on an Ayn Thor. Under Unknown we do not shave either, which is upstream's behaviour.
+	// Relaxed FIFO is optional and plain FIFO is the mandatory mode, so MoltenVK gets the shave and
+	// Adreno does not. The limiter runs with vsync on at all because skipping it made vid_maxfps
+	// silently inert in the configuration a handheld ships with.
 	const EPresentPacing pacing = GetPresentPacing();
 	uint64_t period = 1'000'000 / maxfps;
 	if (pacing == EPresentPacing::HoldsLateFrames && period > 2'000)

@@ -37,12 +37,6 @@ public:
 	// runtime is a use-after-free, because AdvanceFrameSlot stops retiring slots at the same moment
 	// FinishFrameWait starts clearing them, tearing down retained delete lists while a frame is still
 	// executing. A constant removes that whole class of bug.
-	//
-	// This comment used to cite a SIGABRT in scudo::reportInvalidChunkState from
-	// tu_FreeDescriptorSets as the evidence for that, and THAT ATTRIBUTION WAS WRONG - the crash
-	// still reproduced with this as a compile-time constant. Its real cause was destruction order in
-	// FinishFrameWait; see the comment there. A compile-time constant is still the right call, just
-	// not for the reason originally given.
 	enum { framesInFlight = 2 };
 
 	// The engine buffers this depth drives are fixed-size arrays of HW_MAX_PIPELINE_BUFFERS, and the

@@ -62,10 +62,8 @@ HWViewpointBuffer::~HWViewpointBuffer()
 }
 
 
-// Rotation driven by the frame slot rather than by Clear(). Separate buffers rather than regions
-// in one, deliberately: a region overrun is a legal write into another in-flight frame's data, so
-// it is silent and shows up only as a one-frame flicker, while an overrun of a separate buffer is
-// out of bounds and the validation layers and page protection can catch it.
+// Rotation driven by the frame slot rather than by Clear(); see VulkanRenderDevice::InitializeState
+// for why the Vulkan backend cannot use Clear()-driven rotation.
 void HWViewpointBuffer::SetPipelinePos(int pos)
 {
 	mExternalPipeline = true;
@@ -156,9 +154,7 @@ void HWViewpointBuffer::Clear()
 	//
 	// Bind() short-circuits on index == mLastMappedIndex, and that skips di.EnableClipDistance as well
 	// as BindRange - so a viewpoint re-bound at the same logical index after a rewind would keep stale
-	// clip-plane state. The reviewer flagged this as speculative rather than observed, so it was
-	// verified on device as a single-variable change against an otherwise identical build: no visual
-	// difference, so the extra rebind is in fact free here.
+	// clip-plane state.
 	if (needNewPipeline)
 	{
 		mLastMappedIndex = UINT_MAX;

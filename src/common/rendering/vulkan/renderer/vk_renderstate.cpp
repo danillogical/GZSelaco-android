@@ -39,8 +39,8 @@
 #include "hwrenderer/data/hw_viewpointbuffer.h"
 #include "hwrenderer/data/shaderuniforms.h"
 
-CVAR(Int, vk_submit_size, 1000, 0)
-CVAR(Bool, vk_check_offsets, false, 0);
+CVAR(Int, vk_submit_size, 1000, 0);
+CVAR(Bool, vk_check_offsets, false, 0)
 EXTERN_CVAR(Bool, r_skipmats)
 
 VkRenderState::VkRenderState(VulkanRenderDevice* fb) : fb(fb), mStreamBufferWriter(fb), mMatrixBufferWriter(fb)

@@ -994,47 +994,20 @@ void VulkanRenderDevice::InitializeState()
 	mRenderPassManager.reset(new VkRenderPassManager(this));
 	mRaytrace.reset(new VkRaytrace(this));
 
-	// NOTE: do NOT set mPipelineNbr here. GZDoom's per-frame buffer pipeline (mBufferPipeline[],
-	// rotated by Clear()) is a GL-backend mechanism and CANNOT work on Vulkan - which is why
-	// upstream only ever set it in gl_framebuffer.cpp. It was tried here and produced severe
-	// popping and flickering.
+	// One buffer per frame in flight for everything hw_entrypoint.cpp rewinds each frame, reusing
+	// GZDoom's own mPipelineNbr mechanism (mBufferPipeline[], see buffers.h) rather than partitioning
+	// one buffer into regions - upstream already uses it for the same purpose on GLES.
 	//
-	// GL rebinds the buffer at draw time, so a rotating handle is picked up for free. Vulkan bakes
-	// one VkBuffer handle into a descriptor set (VkDescriptorSetManager::UpdateHWBufferSet) and
-	// varies only a DYNAMIC OFFSET per draw, so a rotating handle never reaches the shader. Worse,
-	// VkBufferManager::CreateDataBuffer assigns ViewpointUBO/LightBufferSSO/BoneBufferSSO on every
-	// call, so N pipelined buffers leave those pointing at the LAST one - the descriptor set then
-	// reads buffer N-1 on every frame the engine writes buffer 0.
+	// Two things must differ from the GL path, and both are non-obvious. GL rebinds the buffer at draw
+	// time so a rotating handle is picked up for free; Vulkan bakes one VkBuffer into a descriptor set
+	// and varies only a dynamic offset, so the descriptor set has to bind whichever buffer is ACTIVE
+	// (VkDescriptorSetManager::UpdateHWBufferSet). And rotation must be driven from the frame slot, not
+	// from Clear(), which runs too late and too often - hence the mExternalPipeline suppression in each
+	// buffer class.
 	//
-	// Fixed by having the descriptor set bind whichever buffer is ACTIVE (see
-	// VkDescriptorSetManager::UpdateHWBufferSet) and by driving rotation from the frame slot
-	// rather than from Clear(), which runs too late and too often.
-	// One BUFFER per frame in flight for everything hw_entrypoint.cpp rewinds each frame, using
-	// GZDoom's own mPipelineNbr mechanism rather than partitioning one buffer into regions.
-	//
-	// Separate buffers deliberately - but for a plainer reason than "it makes corruption catchable".
-	// GZDoom ALREADY has this mechanism: mPipelineNbr, mBufferPipeline[] and gl_pipeline_depth exist
-	// upstream for exactly this purpose (buffers.h), and GLES defaults the depth to 4. Reusing it is
-	// what keeps the Vulkan-side diff small. The regions alternative would have meant new offset
-	// arithmetic on every write path.
-	//
-	// The "catchable" argument is only half true and should not be leaned on: it holds for descriptor
-	// dynamic offsets, where offset + range > size is a real VUID violation, but NOT for a host memcpy
-	// through a persistent mapping - which is how all of these are actually written. These are VMA
-	// sub-allocations from shared device memory with no guard margin, so a memcpy past the end of
-	// buffer A lands in buffer B just as silently as it would land in region B of one buffer.
-	// FFlatVertexBuffer, which is 62% of the cost, is bound with vkCmdBindVertexBuffers and written by
-	// raw memcpy - entirely in the second category.
-	//
-	// The two Vulkan-internal stream and matrix buffers get one buffer PER FRAME like everything else;
-	// they keep a bump allocator with a wrap check WITHIN each, which is what
-	// UNIFORM_BUFFER_DYNAMIC's sub-ranges are for. (An earlier version of this comment said they
-	// "keep regions", i.e. the opposite of what the code does.)
-	//
-	// Costs ~98.7 MiB of ADDED memory at depth 2 - one extra copy of each - and nearly all of it is
-	// FFlatVertexBuffer, at 61 MB per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex). About
-	// 0.5% of this device's RAM, in exchange for a whole class of silent corruption becoming
-	// impossible to express.
+	// Costs one extra copy of each: ~98.7 MiB at depth 2, nearly all of it FFlatVertexBuffer at 61 MiB
+	// per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex, provisioned ~20x above the observed peak -
+	// see the vertexpeak CCMD).
 	const int pipelineDepth = VkCommandBufferManager::framesInFlight;
 	mPipelineNbr = pipelineDepth;
 

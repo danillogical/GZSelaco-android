@@ -202,7 +202,7 @@ void FFlatVertexBuffer::Copy(int start, int count)
 	// including the current one - and let ReseedStaticIfNeeded do the write from SetPipelinePos,
 	// which runs at the top of BeginFrame after AdvanceFrameSlot has waited on that slot's fence.
 	//
-	// Writing "just the current slot" here is NOT safe on Vulkan, which an earlier version got wrong.
+	// Writing "just the current slot" here is NOT safe on Vulkan either.
 	// OutputResized reaches Copy via DFrameBuffer::Update, and VulkanRenderDevice::Update calls
 	// Super::Update() immediately after WaitForCommands(true) - which submits and presents WITHOUT
 	// waiting. The current slot is therefore precisely the one whose command buffers were submitted

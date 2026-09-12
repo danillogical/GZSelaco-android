@@ -527,14 +527,9 @@ void HWDrawInfo::RenderScene(FRenderState &state)
 	// so the entire cost sat somewhere nobody could see. Expect more than one entry each
 	// when portals or mirrors re-enter the scene draw; that is real, not double counting.
 	//
-	// NOTE these currently produce nothing on ANY backend, and are kept only because restoring them
-	// is cheap. On Vulkan, VkCommandBufferManager::UpdateGpuStats early-returns before reading any
-	// timestamp, because the query pools are per-device rather than per-frame-slot and cannot be read
-	// across two in-flight frames; giving each slot its own pool would restore them. On GL and GLES
-	// they never worked: FRenderState::PushGroup is a do-nothing virtual and VkRenderState is its only
-	// override, so nothing is recorded there either. (GL's FGLDebug::PushGroup is a different class,
-	// reached only from the postprocess path.) An earlier version of this comment claimed GL/GLES still
-	// recorded them - it did not.
+	// These record nothing today. On Vulkan UpdateGpuStats early-returns because the timestamp query
+	// pools are per-device rather than per-frame-slot; on GL and GLES FRenderState::PushGroup is a
+	// do-nothing virtual with VkRenderState as its only override. Per-slot pools would restore them.
 	state.PushGroup("opaque");
 
 	// Part 1: solid geometry. This is set up so that there are no transparent parts

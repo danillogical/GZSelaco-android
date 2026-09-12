@@ -245,7 +245,7 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 	//
 	// This ran the other way round (DeleteFrameObjects first, slots second), and that is a real crash
 	// rather than a theoretical one: `Scudo ERROR: invalid chunk state when deallocating` inside
-	// Turnip's tu_FreeDescriptorSets, twice in 13 minutes on an Adreno 740. Qualcomm's driver
+	// Turnip's tu_FreeDescriptorSets. Qualcomm's driver
 	// silently tolerates the same double free, which is why it only shows up on Turnip.
 	//
 	// It cannot happen at one frame in flight - AdvanceFrameSlot fills and clears the same slot in a

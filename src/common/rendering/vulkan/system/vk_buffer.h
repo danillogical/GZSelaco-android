@@ -61,12 +61,8 @@ public:
 	void Reset() { mStreamDataOffset = 0; }
 
 	// Select the buffer for this frame in flight. One buffer per frame rather than regions inside
-	// one, matching how the engine-level buffers do it (mPipelineNbr): a region overrun is a legal
-	// write into another in-flight frame's data, so nothing catches it and it surfaces only as a
-	// one-frame flicker. An overrun of a separate buffer is out of bounds and can be caught.
-	//
-	// Nothing downstream needs to change: UniformBuffer points at the active buffer, and both the
-	// descriptor write and the writers dereference it.
+	// One buffer per frame in flight, same mechanism and same reason as the engine-side buffers;
+	// see VulkanRenderDevice::InitializeState.
 	void SetPipelinePos(int pos);
 
 	// The buffer for the frame currently being recorded.
