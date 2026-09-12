@@ -917,6 +917,13 @@ VulkanRenderDevice::~VulkanRenderDevice()
 	delete mBones;
 	mShadowMap.Reset();
 
+	// Retained frames FIRST, then the managers, then the current list. The retained in-flight frame's
+	// delete list holds descriptor sets whose pools belong to mDescriptorSetManager, and that manager
+	// is declared after mCommands so it is destroyed first - leaving those sets to free themselves
+	// against destroyed pools when mFrameSlots finally goes away.
+	mCommands->DropRetainedFrames();
+	for (auto &cmds : mBGTransferCommands) cmds->DropRetainedFrames();
+
 	if (mDescriptorSetManager)
 		mDescriptorSetManager->Deinit();
 	if (mTextureManager)
@@ -1173,6 +1180,19 @@ void VulkanRenderDevice::SetVSync(bool vsync)
 {
 	Printf("Vsync changed to: %d\n", vsync);
 	mVSync = vsync;
+}
+
+// True only when the swapchain actually ended up on plain FIFO, which holds a late present until
+// the next vblank. vid_vsync ASKS for VK_PRESENT_MODE_FIFO_RELAXED_KHR, but that mode is optional
+// and vulkanswapchain.cpp falls back to plain FIFO when it is unsupported - MoltenVK does not
+// expose it, so the macOS target lands here. Reading the mode we were actually given rather than
+// assuming the one we requested is the whole point.
+bool VulkanRenderDevice::PresentHoldsLateFrames()
+{
+	if (!mVSync || mFramebufferManager == nullptr)
+		return false;
+	const auto& swapchain = GetFramebufferManager()->SwapChain;
+	return swapchain != nullptr && swapchain->PresentMode() == VK_PRESENT_MODE_FIFO_KHR;
 }
 
 void VulkanRenderDevice::PrecacheMaterial(FMaterial *mat, int translation)

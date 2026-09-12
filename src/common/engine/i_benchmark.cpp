@@ -28,7 +28,7 @@
 
 // The engine's geometry counters, defined in hw_clock.cpp:56. Declared here rather than
 // pulling a renderer header into common/engine - and note hw_clock.h's extern list omits
-// rendered_portals and rendered_commandbuffers, so it would not be sufficient anyway.
+// rendered_commandbuffers, so it would not be sufficient anyway.
 extern int rendered_lines, rendered_flats, rendered_sprites, rendered_decals;
 extern int render_vertexsplit, render_texsplit;
 extern int rendered_portals, rendered_commandbuffers;
@@ -53,8 +53,12 @@ CVAR(Int, i_benchmark_maxspikes, 3, CVAR_ARCHIVE)
 // that is not there. 0 disables the exclusion.
 CVAR(Float, i_benchmark_ignore, 500.0f, CVAR_ARCHIVE)
 
-// The Vulkan backend clears keepGpuStatActive every frame (vk_commandbuffer.cpp:290),
-// so it has to be re-armed each frame or GPU timings are never collected.
+// The Vulkan backend clears keepGpuStatActive every frame in
+// VkCommandBufferManager::UpdateGpuStats, so it has to be re-armed each frame or GPU timings are
+// never collected. NOTE that at two frames in flight UpdateGpuStats early-returns before reading
+// any timestamps, so on Vulkan the gpu line is currently always empty - the timestamp query pools
+// are per-device, not per-frame-slot, and reading them across two in-flight frames is what the
+// early return avoids. Restoring the gpu stat means giving each frame slot its own pool.
 extern bool keepGpuStatActive;
 extern FString gpuStatOutput;
 
@@ -110,9 +114,9 @@ namespace
 	FString worstGpu;
 
 	// CPU time between present and the next BeginFrame - the window in which the GPU has
-	// nothing queued (see vk_defer_frame_wait). Accumulated as window means rather than
-	// captured on the worst frame, for two reasons: the gap is a steady-state property, and
-	// I_BenchmarkCpuGap necessarily runs AFTER I_BenchmarkFrame has already captured that
+	// nothing queued (see VkCommandBufferManager::AdvanceFrameSlot). Accumulated as window means
+	// rather than captured on the worst frame, for two reasons: the gap is a steady-state property,
+	// and I_BenchmarkCpuGap necessarily runs AFTER I_BenchmarkFrame has already captured that
 	// frame's stats, so a worst-frame value would be attributed one frame late.
 	double gapSum = 0.0, tickSum = 0.0, gapMax = 0.0;
 	int gapSamples = 0;
@@ -187,7 +191,20 @@ void I_BenchmarkFrame(double frameMs)
 
 	if (i_benchmark <= 0)
 	{
-		if (!frames.empty()) frames.clear();
+		// Reset the WHOLE window, not just the frame list. CCMD(benchmark) is the documented way to
+		// switch this on, so leaving windowStartMs, worstInWindow and the worst-frame stats stale
+		// meant the first window after every enable mixed in a stale worst frame and reported an
+		// interval measured from whenever the benchmark was last running.
+		frames.clear();
+		windowStartMs = 0;
+		worstInWindow = 0.0;
+		spikeCount = 0;
+		spikesLogged = 0;
+		for (int i = 0; i < kNumStats; i++) worstStats[i] = FString();
+		worstGeometry = FString();
+		worstGpu = FString();
+		gapSum = tickSum = gapMax = 0.0;
+		gapSamples = 0;
 		return;
 	}
 
@@ -200,6 +217,12 @@ void I_BenchmarkFrame(double frameMs)
 	if (i_benchmark_ignore > 0 && frameMs >= i_benchmark_ignore)
 	{
 		Printf(kBenchPrint, "BENCH load/stall %.0f ms - excluded from percentiles\n", frameMs);
+		// Sample anyway before returning. GetStats() rolls each stat's own ring buffer as a side
+		// effect, so skipping it on a load frame leaves that frame's ~500 ms of Think sitting in
+		// slot 0, and the NEXT frame - which IS in the percentiles - inherits it and is reported as
+		// the worst frame of the window. This is the exact failure the comment on SampleEngineStats
+		// describes; the early return reintroduced it.
+		SampleEngineStats();
 		return;
 	}
 
@@ -299,6 +322,13 @@ void I_BenchmarkCpuGap(double tickMs, double gapMs)
 	// A map load or a stall is not a steady-state gap; use the same threshold that excludes
 	// those frames from the percentiles so one 1.3 s load cannot dominate the mean.
 	if (i_benchmark_ignore > 0 && gapMs >= i_benchmark_ignore)
+		return;
+
+	// Both must be validated, not just gapMs. These are deltas across the game tick, and the tick
+	// is where I_FreezeTime lands (PerformWipe on every level transition, cl_waitforsave inside
+	// TryRunTics), so a negative value here was reaching the mean and dragging "other" positive by
+	// the same amount. Cheap belt-and-braces now that both use the monotonic I_msTimeF clock.
+	if (tickMs < 0.0 || gapMs < 0.0)
 		return;
 
 	gapSum += gapMs;

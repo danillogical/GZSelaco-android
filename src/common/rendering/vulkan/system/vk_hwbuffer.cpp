@@ -32,6 +32,60 @@
 #include "vulkan/renderer/vk_descriptorset.h"
 #include "engineerrors.h"
 
+// Buffer allocation accounting, so "where did the memory go" is answered by an inventory rather
+// than by arithmetic. Records every VkHardwareBuffer allocation; print it with `vkbufmem`.
+//
+// Needed because comparing dumpsys meminfo between builds is not a controlled experiment: its
+// "Graphics" bucket lumps our allocations together with driver-side overhead, and the readings were
+// taken at a title screen whose contents differ run to run.
+//
+// READ THE STREAM ROWS AS CHURN, NOT AS AN INVENTORY. IShadowMap::UploadLights calls
+// SetData(Stream) every frame, so a Stream row climbs by megabytes per second and says nothing
+// about how much is resident - a session showed 4,265 MB across 47,623 allocations. The init-time
+// Persistent rows are one-shot and do mean what they look like, which is what makes this useful.
+//
+// Keyed on a POD pair, not a formatted string: the label used to be built with FString::Format and
+// looked up in a std::map<FString> on EVERY SetData - a heap allocation and a string compare per
+// call, in release builds, on a path that runs per frame. Labels are produced only when printing.
+//
+// Declared up here rather than next to the CCMD because Reset() below credits the freed counter.
+struct VkBufAllocStat { size_t bytes = 0; int count = 0; };
+static std::map<std::pair<int, size_t>, VkBufAllocStat> vkBufAllocs;   // key: (usage, bytes each)
+static size_t vkBufAllocTotal = 0;
+static size_t vkBufFreedTotal = 0;
+
+enum { kBufUsageStaging = 4 };
+static const char *const kBufUsageNames[] = { "Static", "Stream", "Persistent", "Mappable", "(staging)" };
+
+static void VkRecordBufAlloc(int usage, size_t bytes)
+{
+	auto& s = vkBufAllocs[{ usage, bytes }];
+	s.bytes += bytes;
+	s.count++;
+	vkBufAllocTotal += bytes;
+}
+
+CCMD(vkbufmem)
+{
+	Printf("Vulkan buffer allocations, largest first (CUMULATIVE over the session):\n");
+	TArray<std::pair<FString, VkBufAllocStat>> rows;
+	for (auto& kv : vkBufAllocs)
+	{
+		FString label;
+		label.Format("%-10s %8.2f MB each", kBufUsageNames[kv.first.first], kv.first.second / 1048576.0);
+		rows.Push({ label, kv.second });
+	}
+	std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.second.bytes > b.second.bytes; });
+	for (auto& r : rows)
+		Printf("  %9.2f MB  x%-4d  %s\n", r.second.bytes / 1048576.0, r.second.count, r.first.GetChars());
+	Printf("  ---------\n  %9.2f MB allocated in total, %.2f MB of that since handed to a delete list\n",
+		vkBufAllocTotal / 1048576.0, vkBufFreedTotal / 1048576.0);
+	// Spelled out because the obvious reading of these two numbers is wrong: a buffer on a delete
+	// list is not released until its frame retires, so the difference is an upper bound on what is
+	// resident, not a live total. Rows with a large x-count are per-frame churn, not footprint.
+	Printf("  Neither figure is a live total, and their difference is only an upper bound.\n");
+}
+
 VkHardwareBuffer::VkHardwareBuffer(VulkanRenderDevice* fb) : fb(fb)
 {
 	fb->GetBufferManager()->AddBuffer(this);
@@ -53,41 +107,18 @@ void VkHardwareBuffer::Reset()
 			map = nullptr;
 		}
 		if (mBuffer)
+		{
+			// Credited here too, not only in SetData: Reset is the teardown path, and skipping it
+			// meant a buffer destroyed rather than replaced never appeared on the release side.
+			vkBufFreedTotal += mBuffer->size;
 			fb->GetCommands()->DrawDeleteList->Add(std::move(mBuffer));
+		}
 		if (mStaging)
+		{
+			vkBufFreedTotal += mStaging->size;
 			fb->GetCommands()->TransferDeleteList->Add(std::move(mStaging));
+		}
 	}
-}
-
-// Buffer allocation accounting, so "where did the memory go" is answered by an inventory rather
-// than by arithmetic. Records every VkHardwareBuffer allocation; print it with `vkbufmem`.
-//
-// Needed because comparing dumpsys meminfo between builds is not a controlled experiment: its
-// "Graphics" bucket lumps our allocations together with driver-side overhead, and the readings were
-// taken at a title screen whose contents differ run to run.
-struct VkBufAllocStat { size_t bytes = 0; int count = 0; };
-static std::map<FString, VkBufAllocStat> vkBufAllocs;
-static size_t vkBufAllocTotal = 0;
-static size_t vkBufFreedTotal = 0;
-
-static void VkRecordBufAlloc(const char* label, size_t bytes)
-{
-	auto& s = vkBufAllocs[label];
-	s.bytes += bytes;
-	s.count++;
-	vkBufAllocTotal += bytes;
-}
-
-CCMD(vkbufmem)
-{
-	Printf("Vulkan buffer allocations, largest first:\n");
-	TArray<std::pair<FString, VkBufAllocStat>> rows;
-	for (auto& kv : vkBufAllocs) rows.Push({ kv.first, kv.second });
-	std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.second.bytes > b.second.bytes; });
-	for (auto& r : rows)
-		Printf("  %9.2f MB  x%-4d  %s\n", r.second.bytes / 1048576.0, r.second.count, r.first.GetChars());
-	Printf("  ---------\n  %9.2f MB total allocated, %.2f MB of that since freed\n",
-		vkBufAllocTotal / 1048576.0, vkBufFreedTotal / 1048576.0);
 }
 
 void VkHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType usage)
@@ -95,15 +126,10 @@ void VkHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType us
 	size_t bufsize = max(size, (size_t)16); // For supporting zero byte buffers
 
 	{
-		const char* u = usage == BufferUsageType::Static ? "Static"
-			: usage == BufferUsageType::Stream ? "Stream"
-			: usage == BufferUsageType::Persistent ? "Persistent" : "Mappable";
-		FString label;
-		label.Format("%-10s %8.2f MB each", u, bufsize / 1048576.0);
-		VkRecordBufAlloc(label.GetChars(), bufsize);
+		VkRecordBufAlloc((int)usage, bufsize);
 		// Static and Stream also allocate a same-sized staging buffer, which is real memory too.
 		if (usage == BufferUsageType::Static || usage == BufferUsageType::Stream)
-			VkRecordBufAlloc("(staging for Static/Stream)", bufsize);
+			VkRecordBufAlloc(kBufUsageStaging, bufsize);
 	}
 
 
@@ -115,6 +141,9 @@ void VkHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType us
 	}
 	if (mStaging)
 	{
+		// Credit the staging copy as well. It is charged on allocation above, so omitting it here
+		// made the freed figure understate the release side by exactly the staging half.
+		vkBufFreedTotal += mStaging->size;
 		fb->GetCommands()->TransferDeleteList->Add(std::move(mStaging));
 	}
 

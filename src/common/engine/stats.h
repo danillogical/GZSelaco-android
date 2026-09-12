@@ -155,7 +155,7 @@ public:
 
 private:
 	// Must be initialised here: cycle_t is routinely declared on the stack and
-	// then Clock()ed without a Reset() first (e.g. d_main.cpp:3864), so an
+	// then Clock()ed without a Reset() first (e.g. d_main.cpp's startupClock), so an
 	// uninitialised Sec accumulates onto stack garbage. That is what produced
 	// "Full startup in NaNms" and "Starting a sound cost 1.8e28!!!" on Android -
 	// undefined behaviour everywhere, but desktop stacks usually happen to be

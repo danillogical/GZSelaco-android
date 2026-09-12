@@ -16,11 +16,16 @@ cvars the full game has since renamed or removed — do not run them against the
 **Do not add graphics cvars to `thor.cfg`.** The full game owns its graphics through its
 own in-menu presets, and a graphics block here has silently overridden the player's
 choices three separate times. The reasoning, and the list of cvars that legitimately
-belong there, is in [../../CLAUDE.md](../../CLAUDE.md#config-model--read-this-before-adding-a-cvar).
+belong there, is in [../../TECHNICAL.md](../../TECHNICAL.md#the-shipped-config).
 
-Current performance measurements also live in CLAUDE.md rather than here, so there is one
-place to keep up to date. The numbers that used to be in this file predate two frames in
-flight and were misleading once that landed.
+Note that **none of these files ship**. The APK packages
+`android/app/src/main/assets/autoexec.cfg`, which the app extracts on first run — that is
+the only config a player or beta tester ever sees. Everything here is a dev profile pushed
+over it with `set-config.sh`, which needs adb.
+
+Current performance measurements live in [../../TECHNICAL.md](../../TECHNICAL.md#performance)
+rather than here, so there is one place to keep up to date. The numbers that used to be in
+this file predate two frames in flight and were misleading once that landed.
 
 ---
 

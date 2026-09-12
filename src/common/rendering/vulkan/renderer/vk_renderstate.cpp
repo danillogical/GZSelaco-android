@@ -467,8 +467,8 @@ void VkRenderState::ApplyHWBufferSet()
 
 		// Guard the three handles the driver dereferences. A null descriptor set or pipeline
 		// layout makes vkCmdBindDescriptorSets fault inside its own memcpy with a garbage
-		// address that names nothing - which is exactly the crash signature seen at
-		// vk_frames_in_flight 2, with vk_check_offsets confirming all three dynamic offsets
+		// address that names nothing - which is exactly the crash signature seen at two frames
+		// in flight, with vk_check_offsets confirming all three dynamic offsets
 		// were in range. Logging and skipping identifies which handle is bad AND keeps the
 		// frame alive, instead of dying in the driver.
 		auto hwSet = descriptors->GetHWBufferDescriptorSet();
@@ -541,8 +541,9 @@ void VkRenderState::BeginFrame()
 	mApplyCount = 0;
 
 	// Rewind the stream writers HERE rather than relying solely on EndFrame's reset, because the
-	// frame region may have just changed underneath them (see VkBufferManager::SetFrameRegion).
-	// A writer still holding the previous region's offset would allocate from the wrong half.
+	// buffer underneath them may have just been swapped for this frame's slot (see
+	// VkBufferManager::SetPipelinePos). A writer still holding the previous buffer's offset would
+	// allocate from the wrong place.
 	mMatrixBufferWriter.Reset();
 	mStreamBufferWriter.Reset();
 }

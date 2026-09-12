@@ -63,6 +63,10 @@ public:
 	int mPipelineNbr;
 	int mPipelinePos = 0;
 
+	// Which pipeline slots still owe a copy of the front-of-buffer static region. Copy() writes only
+	// the slot that is current; the others are brought up to date as each becomes current.
+	bool mPipelineReseed[HW_MAX_PIPELINE_BUFFERS] = {};
+
 	IVertexBuffer* mVertexBuffer;
 	IVertexBuffer *mVertexBufferPipeline[HW_MAX_PIPELINE_BUFFERS];
 	IIndexBuffer *mIndexBuffer;
@@ -102,6 +106,10 @@ public:
 
 	void Copy(int start, int count);
 
+	// Refresh the current slot's copy of the static region [0, mIndex) if Copy() has written another
+	// slot since this one was last current. NOT limited to NUM_RESERVED - see the definition.
+	void ReseedStaticIfNeeded();
+
 	FFlatVertex *GetBuffer(int index) const
 	{
 		FFlatVertex *ff = (FFlatVertex*)mVertexBuffer->Memory();
@@ -138,6 +146,7 @@ public:
 			mPipelinePos = next;
 			mVertexBuffer = mVertexBufferPipeline[mPipelinePos];
 		}
+		ReseedStaticIfNeeded();
 	}
 
 	void NextPipelineBuffer()
@@ -146,6 +155,7 @@ public:
 		mPipelinePos %= mPipelineNbr;
 
 		mVertexBuffer = mVertexBufferPipeline[mPipelinePos];
+		ReseedStaticIfNeeded();
 	}
 
 	void Map()

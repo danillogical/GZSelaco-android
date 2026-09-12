@@ -116,11 +116,20 @@ bool VulkanSwapChain::CreateSwapchain(int width, int height, int imageCount, boo
 	// which recreates the surface itself on Android before retrying).
 	if (caps.PresentModes.empty() || caps.Formats.empty())
 	{
+#ifdef __ANDROID__
 		if (swapchain)
 			vkDestroySwapchainKHR(device->device, swapchain, nullptr);
 		swapchain = VK_NULL_HANDLE;
 		lost = true;
 		return false;
+#else
+		// Android is the ONLY platform with a recovery path. Everywhere else nothing recreates the
+		// surface, so flagging it lost leaves Create() skipping image enumeration and AcquireImage
+		// returning -1 on every subsequent frame: an indefinite black screen with no message. A real
+		// surface loss (display disconnect, driver reset) is fatal there, which is at least
+		// diagnosable. This applies to the macOS/MoltenVK target as much as to Windows and Linux.
+		VulkanError("Vulkan surface query returned no present modes or formats - surface lost");
+#endif
 	}
 
 	bool supportsFifoRelaxed = std::find(caps.PresentModes.begin(), caps.PresentModes.end(), VK_PRESENT_MODE_FIFO_RELAXED_KHR) != caps.PresentModes.end();
@@ -267,14 +276,21 @@ int VulkanSwapChain::AcquireImage(VulkanSemaphore* semaphore, VulkanFence* fence
 	{
 		return imageIndex;
 	}
-	else if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)
-	{
+	else if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+#ifdef __ANDROID__
 		// VK_ERROR_SURFACE_LOST_KHR is what Android returns once the
 		// ANativeWindow behind the surface has been destroyed and recreated,
 		// which happens on every pause/resume. QueuePresent below already
 		// treats it as recoverable; without it here the first app switch is
 		// fatal ("Failed to acquire next image!"). Flagging the swapchain lost
 		// makes VkFramebufferManager::AcquireImage rebuild it on the next frame.
+		//
+		// Android ONLY, because Android is the only platform that recreates the surface. Elsewhere
+		// this would return -1 forever and show a permanent black screen instead of an error.
+		|| result == VK_ERROR_SURFACE_LOST_KHR
+#endif
+		)
+	{
 		lost = true;
 		return -1;
 	}

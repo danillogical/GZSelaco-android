@@ -76,7 +76,7 @@ uncleared buffer.
 
 **Do not assume `setdefault` is broken.** Selaco ships a `CVARINFO.defaults` lump (~65
 entries) that changes stock GZDoom defaults, and this engine implements it
-(`d_main.cpp:1738`). `cL_run = true` and `movebob = 0.0126` are in there — never set those
+(`d_main.cpp:1763`). `cL_run = true` and `movebob = 0.0126` are in there — never set those
 by hand. The engine's raw `movebob` default of 0.25 is ~20x Selaco's own maximum.
 
 **`nosave` does not mean "not saved".** In CVARINFO it maps to `CVAR_CONFIG_ONLY`, which per

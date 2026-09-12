@@ -216,8 +216,9 @@ target_link_libraries(zvulkan ${ZVULKAN_LIBS})
 if ( ANDROID )
 	# libadrenotools lets Android's Vulkan loader load a replacement GPU driver
 	# (Mesa/Turnip) while keeping libvulkan.so, so the loader still supplies WSI.
-	# Built by android/deps/build-deps.sh; ADRENOTOOLS_PREFIX comes from the top-level
-	# CMakeLists. Optional - without it the custom-driver path is compiled out.
+	# Built by android/deps/build-deps.sh; ADRENOTOOLS_PREFIX is passed as a -D on the
+	# cmake command line by android/build-android.sh. Optional - without it the
+	# custom-driver path is compiled out.
 	if ( ADRENOTOOLS_PREFIX AND EXISTS "${ADRENOTOOLS_PREFIX}/lib/libadrenotools.a" )
 		target_include_directories( zvulkan PRIVATE "${ADRENOTOOLS_PREFIX}/include" )
 		target_link_libraries( zvulkan

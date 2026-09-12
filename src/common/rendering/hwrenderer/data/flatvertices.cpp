@@ -166,17 +166,47 @@ std::pair<FFlatVertex *, unsigned int> FFlatVertexBuffer::AllocVertices(unsigned
 
 void FFlatVertexBuffer::Copy(int start, int count)
 {
-	IVertexBuffer* old = mVertexBuffer;
+	// The CURRENT slot only. These buffers are Persistent, permanently mapped, and Upload() is a
+	// no-op on Vulkan, so writing a non-current slot is a raw host write into memory a submitted
+	// command buffer may be reading as vertex data - reachable from OutputResized via
+	// DFrameBuffer::Update on any resize, vid_scalefactor change, or Android resume.
+	Map();
+	// &vbo_shadowdata[start], not [0]. OutputResized computes the new fullscreen quad into
+	// vbo_shadowdata[4..7] and then calls Copy(4, 4); a [0] source writes the QUAD_INDEX marker quad
+	// over it instead. Upstream GZDoom has the same line; worth upstreaming.
+	memcpy(GetBuffer(start), &vbo_shadowdata[start], count * sizeof(FFlatVertex));
+	Unmap();
+	mVertexBuffer->Upload(start * sizeof(FFlatVertex), count * sizeof(FFlatVertex));
 
 	for (int n = 0; n < mPipelineNbr; n++)
-	{
-		mVertexBuffer = mVertexBufferPipeline[n];
-		Map();
-		memcpy(GetBuffer(start), &vbo_shadowdata[0], count * sizeof(FFlatVertex));
-		Unmap();
-		mVertexBuffer->Upload(start * sizeof(FFlatVertex), count * sizeof(FFlatVertex));
-	}
+		if (n != mPipelinePos)
+			mPipelineReseed[n] = true;
+}
 
-	mVertexBuffer = old;
+// Bring the current slot's static region up to date. On Vulkan this runs from SetPipelinePos in
+// BeginFrame, after AdvanceFrameSlot has waited on this slot's fence - the only point at which
+// writing it is safe.
+//
+// THE RANGE IS [0, mIndex), NOT NUM_RESERVED. That distinction is the whole bug in the first
+// attempt at this. `mNumReserved` is 20 - the uniform quad, fullscreen quad, present quad and
+// stencil caps - but the front-of-buffer region Copy() maintains is `mIndex`, which
+// CreateVBO (hw_vertexbuilder.cpp:490) grows to the entire static sector geometry via
+// `Copy(0, fvb->mIndex)`; on a real level that is ~102k vertices. Refreshing only 20 left the other
+// slot with none of the level's static flats, which alternated every frame and looked exactly like
+// dynamic lights flickering while standing still.
+void FFlatVertexBuffer::ReseedStaticIfNeeded()
+{
+	if (!mPipelineReseed[mPipelinePos])
+		return;
+	mPipelineReseed[mPipelinePos] = false;
+
+	const unsigned int count = mIndex;
+	if (count == 0 || count > vbo_shadowdata.Size())
+		return;
+
+	Map();
+	memcpy(GetBuffer(0), &vbo_shadowdata[0], count * sizeof(FFlatVertex));
+	Unmap();
+	mVertexBuffer->Upload(0, count * sizeof(FFlatVertex));
 }
 

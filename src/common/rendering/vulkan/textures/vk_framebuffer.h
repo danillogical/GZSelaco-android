@@ -29,8 +29,10 @@ public:
 	// which the spec leaves undefined.
 	//
 	// They are indexed differently on purpose, because what makes each safe to reuse differs:
-	//  - image-available, by FRAME SLOT: reuse is gated by AdvanceFrameSlot having waited on that
-	//    slot's fences, so the submit that waited on it has definitely executed.
+	//  - image-available, by ACQUIRE SLOT: a private counter advanced once per AcquireImage, NOT
+	//    mCommands->FrameSlot(). The two alternate in step at two frames in flight, so the effect is
+	//    the same today, but the invariant that actually holds is the weaker one - reuse is gated by
+	//    having acquired twice since, and acquire is where the semaphore is waited on.
 	//  - render-finished, by SWAPCHAIN IMAGE INDEX: reuse requires having re-acquired that image,
 	//    which is itself proof its previous present completed. A frame-slot index would NOT prove
 	//    that, since the frame fence signals when rendering ends, not when presentation does.

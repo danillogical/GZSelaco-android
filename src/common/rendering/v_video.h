@@ -297,6 +297,14 @@ public:
 
 	void FPSLimit();
 
+	// Whether presentation will hold a late frame back until the next vblank.
+	//
+	// FPSLimit needs this because plain FIFO and relaxed FIFO want different targets: relaxed FIFO
+	// presents a late frame immediately, so aiming at the exact period is right, whereas plain FIFO
+	// rounds a late present up to the following vblank and halves the rate. Only the Vulkan backend
+	// can answer it, since only it knows which present mode the swapchain actually got.
+	virtual bool PresentHoldsLateFrames() { return false; }
+
 	// Retrieves a buffer containing image data for a screenshot.
 	// Hint: Pitch can be negative for upside-down images, in which case buffer
 	// points to the last row in the buffer, which will be the first row output.

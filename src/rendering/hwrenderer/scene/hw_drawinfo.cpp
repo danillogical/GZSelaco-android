@@ -524,9 +524,13 @@ void HWDrawInfo::RenderScene(FRenderState &state)
 	// Split the scene pass in the `gpu` stat. Before these groups the whole pass was a
 	// single unmeasured number that had to be inferred by subtracting the postprocess
 	// chain from the frame - which on a handheld is ~36 ms of a 47 ms explosion frame,
-	// so the entire cost sat somewhere nobody could see. Names appear in i_benchmark's
-	// gpu line. Expect more than one entry each when portals or mirrors re-enter the
-	// scene draw; that is real, not double counting.
+	// so the entire cost sat somewhere nobody could see. Expect more than one entry each
+	// when portals or mirrors re-enter the scene draw; that is real, not double counting.
+	//
+	// NOTE these produce nothing on Vulkan at present: VkCommandBufferManager::UpdateGpuStats
+	// early-returns before reading any timestamp, because the query pools are per-device rather
+	// than per-frame-slot and cannot be read across two in-flight frames. The groups are still
+	// recorded for GL/GLES, and giving each slot its own pool would restore them.
 	state.PushGroup("opaque");
 
 	// Part 1: solid geometry. This is set up so that there are no transparent parts

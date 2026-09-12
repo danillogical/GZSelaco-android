@@ -99,10 +99,12 @@ EXTERN_CVAR(Int, gl_max_transfer_threads)
 //
 //   vk_driver "/sdcard/Selaco/vulkan.purple.so"
 //
-// Android ships Vulkan drivers as HAL modules rather than ICDs, so ZVulkan walks the
-// HAL protocol by hand to load one - see LoadCustomDriver in vulkaninstance.cpp. Every
-// step there is validated and any failure silently falls back to the system driver, so
-// a bad path or an incompatible build costs a log line, not a black screen.
+// Android ships Vulkan drivers as HAL modules rather than ICDs, so a replacement driver is loaded
+// through libadrenotools, which hooks the loader's driver lookup while leaving libvulkan.so in
+// place so WSI still comes from the loader - see LoadCustomDriver in vulkaninstance.cpp, and
+// TECHNICAL.md, "Why adrenotools and not a direct load". Every step there is validated and any
+// failure silently falls back to the system driver, so a bad path or an incompatible build costs a
+// log line, not a black screen.
 CVAR(String, vk_driver, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 
 // Space-separated KEY=VALUE pairs exported before the driver loads, for tuning a

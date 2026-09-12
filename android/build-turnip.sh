@@ -239,7 +239,7 @@ LIB="$PREFIX/lib/libvulkan_freedreno.so"
 
 say "Done ($MODE)"
 ls -l "$LIB" | awk '{print "  " $5 " bytes  " $9}'
-"$NDKBIN/llvm-readelf" --dynamic "$LIB" | grep -i soname | sed 's/^/  /'
+"$NDKBIN/llvm-readelf" --dynamic "$LIB" | grep -i soname | sed 's/^/  /' || true
 printf '  has symbols: '
 "$NDKBIN/llvm-nm" --defined-only "$LIB" >/dev/null 2>&1 && echo yes || echo no
 printf '  has unwind info: '

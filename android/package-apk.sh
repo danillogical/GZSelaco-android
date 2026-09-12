@@ -45,7 +45,7 @@ install -m 644 "$ENGINE_BUILD/src/libSelaco.so" "$JNILIBS/libSelaco.so"
 
 # libsndfile carries static ogg/vorbis/FLAC/opus inside it and is a DT_NEEDED of
 # libzmusic.so. Without it there is no decoder for any compressed audio and the
-# game is completely silent - see TECHNICAL.md, Patches carried against upstream.
+# game is completely silent.
 # The four *_hook libs are libadrenotools'. They are never linked or dlopen'd by us -
 # adrenotools loads them itself out of nativeLibraryDir, which is why they only need to
 # be packaged. That also requires useLegacyPackaging = true in app/build.gradle, or
@@ -74,8 +74,10 @@ for pk3 in "$ENGINE_BUILD"/*.pk3; do
 	[ -e "$pk3" ] || continue
 	install -m 644 "$pk3" "$ASSETS/"
 done
-# assets/autoexec.cfg is checked in, not generated - it is the shipped Android
-# default config (skips the first-run dialog, sets the 1080p60 graphics profile).
+# assets/autoexec.cfg is checked in, not generated - it is the config the APK ships
+# and the app extracts on first run, so it is the ONLY config a tester ever sees.
+# android/configs/*.cfg are dev profiles pushed with set-config.sh and are not packaged.
+# It sets vsync, the 30 fps cap and the fps readout; graphics presets are chosen in-game.
 [ -f "$ASSETS/autoexec.cfg" ] && echo "  autoexec.cfg (shipped default config)"
 
 # ---- SDL's Java sources --------------------------------------------------
@@ -134,4 +136,6 @@ if [ -z "$APK" ]; then
 	exit 1
 fi
 echo "  $APK"
-unzip -l "$APK" | grep '\.so$' | awk '{print "    ", $1, $4}'
+# `|| true` because this is the success path's last command: under `set -euo pipefail` a grep that
+# matches nothing would fail the whole script after the APK was already built and reported.
+unzip -l "$APK" | grep '\.so$' | awk '{print "    ", $1, $4}' || true

@@ -903,8 +903,13 @@ static void DrawOverlays()
 
 // Wall time at which the last frame finished submitting and presenting. Everything between
 // here and the next screen->BeginFrame() is CPU-only work that the GPU could in principle be
-// overlapping - see vk_defer_frame_wait in vk_commandbuffer.cpp. Measured so the size of that
+// overlapping - see VkCommandBufferManager::AdvanceFrameSlot. Measured so the size of that
 // window is a number rather than an assumption.
+//
+// I_msTimeF throughout, never I_msTimeFS: the latter is integer milliseconds AND is measured from
+// FirstFrameStartTime, which I_FreezeTime and I_ResetFrameTime both ADVANCE. PerformWipe freezes
+// across every level transition and cl_waitforsave freezes inside TryRunTics, so an FS-based delta
+// goes sharply negative there - BenchTickMs was reaching about -1300 ms.
 static double BenchFrameEndMs = 0.0;
 static double BenchTickMs = 0.0;
 
@@ -913,7 +918,7 @@ static void End2DAndUpdate()
 	twod->End();
 	CheckBench();
 	screen->Update();
-	BenchFrameEndMs = I_msTimeFS();
+	BenchFrameEndMs = I_msTimeF();
 	twod->OnFrameDone();
 }
 
@@ -1048,11 +1053,16 @@ void D_Display ()
 	// actually perceives.
 	{
 		extern void I_BenchmarkFrame(double frameMs);
-		static uint64_t lastFrameStart = 0;
-		uint64_t nowMs = (uint64_t)screen->FrameTime;
-		if (lastFrameStart != 0 && nowMs > lastFrameStart)
-			I_BenchmarkFrame((double)(nowMs - lastFrameStart));
-		lastFrameStart = nowMs;
+		// Not screen->FrameTime: that is I_msTimeFS, which is integer ms and can jump backwards
+		// (see BenchFrameEndMs above). Sub-ms resolution also matters here for a second reason -
+		// with an integer clock the `>` test silently DROPPED every frame faster than 1 ms, which
+		// removed them from the dip counter's denominator and inflated the reported dip rate on
+		// exactly the machines that were performing best.
+		static double lastFrameStartMs = 0.0;
+		double nowMs = I_msTimeF();
+		if (lastFrameStartMs != 0.0 && nowMs > lastFrameStartMs)
+			I_BenchmarkFrame(nowMs - lastFrameStartMs);
+		lastFrameStartMs = nowMs;
 	}
 
 	TexAnim.UpdateAnimations(screen->FrameTime);
@@ -1060,7 +1070,7 @@ void D_Display ()
 
 	// The overlap window closes here: BeginFrame is where the deferred fence wait settles, so
 	// this is the last moment at which the GPU could still have been working on the previous
-	// frame. gap is the ceiling on what vk_defer_frame_wait can recover; tick is the part of it
+	// frame. gap is the ceiling on what frame pipelining can recover; tick is the part of it
 	// that is game simulation rather than loop and event overhead.
 	// Consumed, not just read: D_Display has three early returns above (nodrawers, !AppActive,
 	// !CanDisplay) that skip End2DAndUpdate, so a stale timestamp would otherwise report one
@@ -1068,7 +1078,7 @@ void D_Display ()
 	if (BenchFrameEndMs > 0.0)
 	{
 		extern void I_BenchmarkCpuGap(double tickMs, double gapMs);
-		I_BenchmarkCpuGap(BenchTickMs, I_msTimeFS() - BenchFrameEndMs);
+		I_BenchmarkCpuGap(BenchTickMs, I_msTimeF() - BenchFrameEndMs);
 		BenchFrameEndMs = 0.0;
 	}
 
@@ -1293,7 +1303,7 @@ void D_DoomLoop ()
 			I_SetFrameTime();
 
 			// process one or more tics
-			double benchTickStart = I_msTimeFS();
+			double benchTickStart = I_msTimeF();
 			if (singletics)
 			{
 				I_StartTic ();
@@ -1315,7 +1325,7 @@ void D_DoomLoop ()
 			{
 				TryRunTics (); // will run at least one tic
 			}
-			BenchTickMs = I_msTimeFS() - benchTickStart;
+			BenchTickMs = I_msTimeF() - benchTickStart;
 			// Update display, next frame, with current state.
 			I_StartTic ();
 			statDatabase.update();

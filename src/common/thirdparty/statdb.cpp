@@ -545,9 +545,12 @@ bool StatDatabase::readRPC(void* data, size_t size) {
 #include <sys/un.h>
 
 #ifdef __APPLE__
-// Darwin has no SOCK_NONBLOCK socket type flag; the equivalent is set on the
-// descriptor instead, and the value is compatible with how it is used here.
-#define SOCK_NONBLOCK O_NONBLOCK
+// Darwin has no SOCK_NONBLOCK socket type flag, and O_NONBLOCK must NOT be folded into the type
+// argument as a substitute: O_NONBLOCK is 0x4, so SOCK_STREAM | O_NONBLOCK asks for type 5, which is
+// SOCK_SEQPACKET. macOS AF_UNIX rejects that with EPROTOTYPE, socket() returns -1, and connectRPC
+// then fails on every call - the RPC path could never connect at all. Define it away and set the
+// flag on the descriptor with fcntl after creation instead (see connectRPC).
+#define SOCK_NONBLOCK 0
 #endif
 
 const std::string IN_FILENAME = "selacoStat1";
@@ -580,6 +583,15 @@ bool StatDatabase::connectRPC() {
         if(sock < 0) {
             return false;
         }
+
+#ifdef __APPLE__
+        // SOCK_NONBLOCK is defined to 0 on Darwin (see above), so the descriptor has to be switched
+        // to non-blocking here rather than at creation.
+        int sockFlags = fcntl(sock, F_GETFL, 0);
+        if(sockFlags != -1) {
+            fcntl(sock, F_SETFL, sockFlags | O_NONBLOCK);
+        }
+#endif
 
         struct hostent* hptr = gethostbyname("127.0.0.1");
         if (!hptr || (hptr->h_addrtype != AF_LOCAL && hptr->h_addrtype != AF_INET))  {

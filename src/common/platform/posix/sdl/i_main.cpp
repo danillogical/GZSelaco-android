@@ -193,10 +193,11 @@ int main (int argc, char **argv)
 			progdir += "/";
 	}
 
-	// Now that progdir is known, start persisting crashes there. This CHAINS to bionic's
-	// debuggerd rather than replacing it, so the tombstone and logcat dump are still produced -
-	// see i_crashlog.cpp. A beta tester can retrieve $PROGDIR/selaco-ea-crash.log over USB with
-	// no adb and no root, which is the whole point.
+	// Now that progdir is known, start persisting crashes. This CHAINS to bionic's debuggerd
+	// rather than replacing it, so the tombstone and logcat dump are still produced - see
+	// i_crashlog.cpp. progdir is only the last-resort fallback for the destination: it is
+	// MTP-invisible from Android 11 on and deleted on uninstall, so the handler prefers the public
+	// /sdcard/Selaco folder the tester already put the game data in. The chosen path is logged.
 	{
 		extern void I_InstallCrashLog();
 		I_InstallCrashLog();

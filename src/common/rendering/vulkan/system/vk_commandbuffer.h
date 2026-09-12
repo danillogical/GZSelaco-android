@@ -32,12 +32,16 @@ public:
 
 	// Frames in flight, fixed at 2 and NOT runtime settable.
 	//
-	// It was a cvar so the change could be A/B'd, and that is done: 35.7 -> 27.2 ms. But changing
-	// it at runtime is a use-after-free - AdvanceFrameSlot stops retiring slots at the same moment
-	// FinishFrameWait starts clearing them, tearing down retained delete lists while a frame is
-	// still executing. That showed up as SIGABRT in scudo::reportInvalidChunkState from
-	// tu_FreeDescriptorSets: a double free Qualcomm's driver silently tolerated and Turnip, built
-	// against the scudo heap checker, aborts on. A constant removes the whole class of bug.
+	// It was a cvar so the change could be A/B'd, and that is done: 35.7 -> 27.2 ms. Changing it at
+	// runtime is a use-after-free, because AdvanceFrameSlot stops retiring slots at the same moment
+	// FinishFrameWait starts clearing them, tearing down retained delete lists while a frame is still
+	// executing. A constant removes that whole class of bug.
+	//
+	// This comment used to cite a SIGABRT in scudo::reportInvalidChunkState from
+	// tu_FreeDescriptorSets as the evidence for that, and THAT ATTRIBUTION WAS WRONG - the crash
+	// still reproduced with this as a compile-time constant. Its real cause was destruction order in
+	// FinishFrameWait; see the comment there. A compile-time constant is still the right call, just
+	// not for the reason originally given.
 	enum { framesInFlight = 2 };
 
 	void PushGroup(const FString& name);
@@ -78,6 +82,13 @@ public:
 
 	void DeleteFrameObjects(bool uploadOnly = false);
 
+	// Drop the RETAINED in-flight frames' delete lists. DeleteFrameObjects only replaces the current
+	// list, so at two frames in flight the previous frame's list survives it - and at teardown that
+	// list outlives the descriptor pools (mDescriptorSetManager is destroyed before mCommands), so
+	// every descriptor set still in it frees itself against a destroyed pool. Call this before the
+	// managers go away. Safe only with the GPU idle.
+	void DropRetainedFrames();
+
 	bool IsUploadOnly() const { return mIsUploadOnly; }
 
 private:
@@ -94,7 +105,6 @@ private:
 	enum { maxConcurrentSubmitCount = 8 };
 	std::unique_ptr<VulkanSemaphore> mSubmitSemaphore[maxConcurrentSubmitCount];
 	std::unique_ptr<VulkanFence> mSubmitFence[maxConcurrentSubmitCount];
-	VkFence mSubmitWaitFences[maxConcurrentSubmitCount];
 	int mNextSubmit = 0;
 
 	// Whether each pool fence has been signalled by a submit and not yet waited on and reset.

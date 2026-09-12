@@ -145,12 +145,26 @@ void HWViewpointBuffer::Clear()
 	mUploadIndex = 0;
 	mClipPlaneInfo.Clear();
 
-	if (needNewPipeline && !mExternalPipeline)
+	// Reset mLastMappedIndex whenever the upload index rewinds, even when the frame slot drives
+	// rotation externally.
+	//
+	// Bind() short-circuits on index == mLastMappedIndex, and that skips di.EnableClipDistance as well
+	// as BindRange - so a viewpoint re-bound at the same logical index after a rewind would keep stale
+	// clip-plane state. The reviewer flagged this as speculative rather than observed, so it was
+	// verified on device as a single-variable change against an otherwise identical build: no visual
+	// difference, so the extra rebind is in fact free here.
+	if (needNewPipeline)
 	{
 		mLastMappedIndex = UINT_MAX;
 
-		mPipelinePos++;
-		mPipelinePos %= mPipelineNbr;
+		// The rotation itself IS external on Vulkan, where the slot comes from the frame in flight
+		// (see SetPipelinePos). Advancing here as well would double-advance and desynchronise from
+		// the slot whose fence AdvanceFrameSlot has waited on.
+		if (!mExternalPipeline)
+		{
+			mPipelinePos++;
+			mPipelinePos %= mPipelineNbr;
+		}
 	}
 
 	mBuffer = mBufferPipeline[mPipelinePos];

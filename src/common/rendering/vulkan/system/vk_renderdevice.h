@@ -229,6 +229,8 @@ public:
 	bool GetVSync() { return mVSync; }
 	void SetVSync(bool vsync) override;
 
+	bool PresentHoldsLateFrames() override;
+
 	void Draw2D() override;
 
 	void WaitForCommands(bool finish) override;

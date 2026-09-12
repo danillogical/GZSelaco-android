@@ -320,7 +320,8 @@ build_openal() {
 # libadrenotools: lets the Android Vulkan loader load a replacement GPU driver
 # (Mesa/Turnip) while keeping libvulkan.so in place, so window-system integration still
 # comes from the loader. Loading a driver HAL directly does NOT work - it advertises no
-# VK_KHR_surface, only VK_EXT_headless_surface - see CLAUDE.md.
+# VK_KHR_surface, only VK_EXT_headless_surface - see TECHNICAL.md, "Why adrenotools and
+# not a direct load".
 #
 # It has no install target unless GEN_INSTALL_TARGET is on, and its hooks must end up in
 # the app's nativeLibraryDir, so copy them out by hand rather than via --install.

@@ -54,9 +54,6 @@ VkCommandBufferManager::VkCommandBufferManager(VulkanRenderDevice* fb, VkQueue *
 	for (auto& fence : mSubmitFence)
 		fence.reset(new VulkanFence(fb->device.get()));
 
-	for (int i = 0; i < maxConcurrentSubmitCount; i++)
-		mSubmitWaitFences[i] = mSubmitFence[i]->fence;
-
 	if (!mIsUploadOnly && fb->device->GraphicsTimeQueries)
 	{
 		mTimestampQueryPool = QueryPoolBuilder()
@@ -238,16 +235,32 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 			mFenceOutstanding[i] = false;
 	}
 
-	DeleteFrameObjects(uploadOnly);
-
-	// The GPU is now idle, so nothing is owed on any slot. Dropping the retained lists here is
-	// what makes the on-demand sync paths a safe fallback while pipelining is enabled.
+	// ORDER IS LOAD-BEARING: the RETAINED slot lists must be destroyed BEFORE the current one.
+	//
+	// Destruction has to run oldest-first, matching the order things were retired, because a
+	// descriptor set is the one object in DeleteList with an intra-list dependency: it frees itself
+	// against its pool, and vkDestroyDescriptorPool ALREADY implicitly freed every set from that
+	// pool. A pool retired in frame N therefore must not be destroyed before frame N-1's list has
+	// freed the sets it holds from that pool - doing so makes each of those a double free.
+	//
+	// This ran the other way round (DeleteFrameObjects first, slots second), and that is a real crash
+	// rather than a theoretical one: `Scudo ERROR: invalid chunk state when deallocating` inside
+	// Turnip's tu_FreeDescriptorSets, twice in 13 minutes on an Adreno 740. Qualcomm's driver
+	// silently tolerates the same double free, which is why it only shows up on Turnip.
+	//
+	// It cannot happen at one frame in flight - AdvanceFrameSlot fills and clears the same slot in a
+	// single call, so no list is ever retained. The retained list is what two frames introduce.
+	//
+	// The GPU is idle by this point (all fences waited above), so this is purely CPU-side ordering.
 	for (auto& slot : mFrameSlots)
 	{
 		slot.FenceIndices.clear();
 		slot.TransferDeleteList.reset();
 		slot.DrawDeleteList.reset();
 	}
+
+	DeleteFrameObjects(uploadOnly);
+
 	mCurrentFrameFences.clear();
 	mNextSubmit = 0;
 }
@@ -374,6 +387,19 @@ void VkCommandBufferManager::DeleteFrameObjects(bool uploadOnly)
 	TransferDeleteList = std::make_unique<DeleteList>();
 	if (!uploadOnly)
 		DrawDeleteList = std::make_unique<DeleteList>();
+}
+
+// Oldest-first, and before the current list - same reason as in FinishFrameWait: a descriptor set
+// must be freed before the pool it came from is destroyed.
+void VkCommandBufferManager::DropRetainedFrames()
+{
+	for (auto& slot : mFrameSlots)
+	{
+		slot.FenceIndices.clear();
+		slot.TransferDeleteList.reset();
+		slot.DrawDeleteList.reset();
+	}
+	mCurrentFrameFences.clear();
 }
 
 void VkCommandBufferManager::PushGroup(const FString& name)

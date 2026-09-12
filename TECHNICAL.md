@@ -159,19 +159,31 @@ whole section and let the engine regenerate it.
 
 ## The shipped config
 
-`android/configs/thor.cfg` is the shipped autoexec and is deliberately tiny. **Do not add graphics
-settings to it** — see CLAUDE.md for why that has burned this project three times.
+There are **two** files and only one of them ships. Confusing them is easy and has already put a
+beta build out with the wrong frame cap.
 
-| cvar | why it is there |
+| file | who sees it |
 |---|---|
-| `vid_vsync 1` | not in `CVARINFO.defaults`; the engine default is false |
-| `vid_maxfps 30` | Selaco defaults 200. 30 divides a 60 Hz panel exactly; 35 gives 1.71 vblanks and judders |
-| `vid_fps 1` | on for the beta, so a tester reports a number rather than "choppy". Revisit for release |
-| `i_benchmark 0` | ours, `CVAR_ARCHIVE`, so it stays on across launches unless stated |
-| `con_notifylines 0` | `CVAR_ARCHIVE` — otherwise console text draws over the game |
-| `con_scale 0` | `CVAR_ARCHIVE` — benchmark profiles set 4, this puts it back to auto |
-| `vk_driver ""` | `CVAR_ARCHIVE` — otherwise the *shipped* profile keeps loading whatever driver was last set |
-| `vk_driver_env ""` | ditto |
+| `android/app/src/main/assets/autoexec.cfg` | **the one that ships.** Packaged into the APK by `package-apk.sh`; the app extracts it on first run (`SelacoActivity.extractAssets`) if absent. This is the only config a player or tester ever gets. |
+| `android/configs/thor.cfg` | a dev profile, pushed over the extracted copy by `set-config.sh`, which needs adb. Referenced by no build or packaging step. |
+
+Both are deliberately tiny. **Do not add graphics settings to either** — see CLAUDE.md for why that
+has burned this project three times.
+
+| cvar | shipped | thor.cfg | why it is there |
+|---|---|---|---|
+| `vid_vsync 1` | ✓ | ✓ | not in `CVARINFO.defaults`; the engine default is false |
+| `vid_maxfps 30` | ✓ | ✓ | Selaco defaults 200. 30 divides a 60 Hz panel exactly; 35 gives 1.71 vblanks and judders. Needs the relaxed floor in `v_video.cpp` — stock GZDoom clamps up to `GameTicRate` |
+| `vid_fps 1` | ✓ | ✓ | on for the beta, so a tester reports a number rather than "choppy". Revisit for release |
+| `i_benchmark 0` | ✓ | ✓ | ours, `CVAR_ARCHIVE`, so it stays on across launches unless stated |
+| `con_notifylines 0` | ✓ | ✓ | `CVAR_ARCHIVE` — otherwise console text draws over the game |
+| `vid_scalefactor 1.0` | | ✓ | `CVAR_ARCHIVE` — the A/B profiles sweep it |
+| `con_scale 0` | | ✓ | `CVAR_ARCHIVE` — benchmark profiles set 4, this puts it back to auto |
+| `vk_driver ""` | | ✓ | `CVAR_ARCHIVE` — otherwise a dev device keeps loading whatever driver was last set |
+| `vk_driver_env ""` | | ✓ | ditto |
+
+The last four are absent from the shipped file on purpose: they exist only to undo what the
+benchmark profiles set, and a tester never runs those.
 
 Note the pattern: apart from the first three, **every entry exists only because the cvar is
 `CVAR_ARCHIVE` and something else once set it.** An archived cvar left unset is not "default", it
@@ -415,6 +427,49 @@ shared between overlapping frames and reading it with `VK_QUERY_RESULT_WAIT_BIT`
 the GPU — reintroducing exactly the stall this removes. Restoring them means per-slot query
 pool ranges.
 
+### The static flat vertices are per-slot, and `mIndex` is the range that matters
+
+`FFlatVertexBuffer::Copy()` used to write into **all** `mPipelineNbr` buffers in a loop. That was
+safe when `mPipelineNbr` was 1 on Vulkan and every frame ended with a full `vkWaitForFences`; with
+two frames in flight it is neither. The buffers are `Persistent`, permanently mapped, and
+`Upload()` is a no-op on Vulkan, so seeding a non-current slot is a host write into memory a
+submitted command buffer is reading as vertex data. Reachable from `OutputResized()` →
+`Copy(4, 4)` via `DFrameBuffer::Update` on any resize, `vid_scalefactor`/`vid_scalemode` change, or
+Android resume.
+
+It now writes only the current slot and marks the others, each refreshed at its next
+`SetPipelinePos` — which on Vulkan is after `AdvanceFrameSlot` has waited on that slot's fence.
+
+**The range to refresh is `[0, mIndex)`, not `NUM_RESERVED`.** This is the whole trap, and it cost
+seven device builds. `mNumReserved` is 20 — the uniform quad, fullscreen quad, present quad and two
+stencil caps — so "reserved" reads like the entire front-of-buffer region. It is not.
+`CreateVBO` (`hw_vertexbuilder.cpp:490-496`) appends **all static sector geometry** to
+`vbo_shadowdata`, sets `mIndex = vbo_shadowdata.Size()`, and calls `Copy(0, fvb->mIndex)` — around
+**102,000 vertices** on a real level. That is the third caller of `Copy()`, it lives in a different
+file from the other two, and it is the only one whose range is not tiny.
+
+Refreshing only 20 vertices left the other slot holding none of the level's static flats. The two
+slots alternated every frame, which presents as **lit surfaces flickering while standing
+still** — it reads as a dynamic-light bug, and it is not.
+
+Four other explanations were investigated and falsified before the real one was found; recorded so
+nobody spends the builds again:
+
+- slot divergence on `FULLSCREEN_INDEX` — no, the flicker persisted with both write paths
+  producing byte-identical data
+- `Map()`/`Unmap()` disturbing the mapping — no, both are no-ops for `Persistent` buffers
+- `HWViewpointBuffer::mLastMappedIndex` — no, tested alone and clean
+- the act of writing a non-current slot from `BeginFrame` — no, tested with contents held correct
+  and a redundant write added, and that is clean
+
+**Also fixed here:** `Copy()` copied from `&vbo_shadowdata[0]` regardless of `start`, so
+`OutputResized`'s `Copy(4, 4)` wrote the `QUAD_INDEX` marker quad over the fullscreen quad it had
+just computed. Verified on device as a single-line change with no regression — though that is all
+it establishes, since the bug is latent. Upstream GZDoom carries the same line; worth upstreaming.
+
+If you touch this again: `Copy()` has **three** callers and one of them is in
+`hw_vertexbuilder.cpp`. Grep the whole tree, not just `flatvertices.*`.
+
 ---
 
 ## Performance
@@ -448,6 +503,11 @@ A static viewpoint **cannot** measure `r_particleIntensity`, `r_smokequality`, `
 `cl_maxdecals` or `r_rainquality`. Zero there means "not in this scene", not "free".
 
 ### Solid geometry is not fragment bound
+
+> These per-draw-list figures were measured at **one frame in flight**, before pipelining landed.
+> They are still the basis for the conclusion below, but the shipped code cannot reproduce them:
+> `UpdateGpuStats` early-returns at two frames in flight, so the `gpu` stat is empty on Vulkan. See
+> [The GPU profiler cannot be used with it](#the-gpu-profiler-cannot-be-used-with-it).
 
 `plainflats` (13.5 ms) and `plainwalls` (7.65 ms) dominate GPU time, and at the same viewpoint
 1920x1080 → 960x540 moved `plainwalls` only **1.19×** and `plainflats` **1.12×**, while `ssao`

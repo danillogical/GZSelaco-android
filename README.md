@@ -98,7 +98,8 @@ It is picked up automatically on the next launch. To go back, delete `vulkan.so`
 
 Build instructions, the Android storage and permission model, performance
 measurements and the patches carried against upstream are in
-**[CLAUDE.md](CLAUDE.md)**. Graphics profiles used for testing are in
+**[TECHNICAL.md](TECHNICAL.md)**. [CLAUDE.md](CLAUDE.md) covers the traps that bite
+while working in the tree. Graphics profiles used for testing are in
 `android/configs/`.
 
 ---

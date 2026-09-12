@@ -1476,6 +1476,15 @@ void FLevelLocals::DoLoadLevel(const FString &nextmapname, int position, bool au
 		FString mapname = nextmapname;
 		mapname.ToUpper();
 		Printf(PRINT_HIGH | PRINT_NONOTIFY, "\n" TEXTCOLOR_NORMAL "%s\n\n" TEXTCOLOR_BOLD "%s - %s\n\n", console_bar, mapname.GetChars(), LevelName.GetChars());
+
+#ifdef __ANDROID__
+		// Stamp the map into the crash log's context line. "Which level was it on" is the first
+		// question a crash report raises and the one a tester is least likely to remember.
+		{
+			extern void I_SetCrashContext(const char *text);
+			I_SetCrashContext(mapname.GetChars());
+		}
+#endif
 	}
 
 	// Set the sky map.

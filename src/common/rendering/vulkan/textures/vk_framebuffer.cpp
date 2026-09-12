@@ -96,7 +96,7 @@ void VkFramebufferManager::AcquireImage()
 
 	// Alternate unconditionally, not only when pipelining is on: with one frame in flight the
 	// pair used two frames ago has certainly completed, so this is correct either way and avoids
-	// the acquire path having to know about vk_frames_in_flight.
+	// the acquire path having to know how many frames are in flight.
 	AcquireSlot = (AcquireSlot + 1) % 2;
 	PresentImageIndex = SwapChain->AcquireImage(ImageAvailableSemaphore());
 	if (PresentImageIndex != -1)

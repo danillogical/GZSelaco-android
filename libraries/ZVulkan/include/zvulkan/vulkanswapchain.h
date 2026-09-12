@@ -37,6 +37,11 @@ public:
 	int Height() const { return actualExtent.height; }
 	VkSurfaceFormatKHR Format() const { return format; }
 
+	// The mode actually granted, which is not necessarily the one requested: relaxed FIFO is
+	// optional, so a vsync request can land on plain FIFO. The frame limiter has to distinguish them
+	// because only plain FIFO holds a late present until the next vblank.
+	VkPresentModeKHR PresentMode() const { return presentMode; }
+
 	int ImageCount() const { return (int)images.size(); }
 	VulkanImage* GetImage(int index) { return images[index].get(); }
 	VulkanImageView* GetImageView(int index) { return views[index].get(); }

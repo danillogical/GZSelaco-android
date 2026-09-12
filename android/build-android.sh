@@ -34,6 +34,7 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 if [ "${1:-}" = "--clean" ]; then
 	say "Removing $HOST_BUILD and $ANDROID_BUILD"
 	rm -rf "$HOST_BUILD" "$ANDROID_BUILD"
+	shift                       # anything left in "$@" is forwarded to cmake below
 fi
 
 [ -f "$PREFIX/lib/libSDL2.so" ] || {
