@@ -148,6 +148,17 @@ void VkStreamBuffer::SetPipelinePos(int pos)
 	{
 		mPipelinePos = next;
 		UniformBuffer = mPipeline[mPipelinePos];
+
+		// Rewind the bump allocator here, with the swap it belongs to.
+		//
+		// mStreamDataOffset indexes into UniformBuffer, so leaving it pointing at the old buffer's
+		// high-water mark while the buffer changes underneath is meaningless. It happened to be
+		// harmless only because VkRenderState::BeginFrame calls Reset() shortly afterwards - i.e. the
+		// invariant depended on the ORDER of two calls in a different file
+		// (VulkanRenderDevice::BeginFrame does GetBufferManager()->SetPipelinePos before
+		// mRenderState->BeginFrame). Swap those two lines and the new buffer's allocator would start
+		// wherever the old one left off. Resetting here makes it hold regardless of caller order.
+		Reset();
 	}
 }
 

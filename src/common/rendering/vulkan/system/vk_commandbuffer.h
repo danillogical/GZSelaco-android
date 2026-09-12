@@ -116,19 +116,13 @@ private:
 	std::unique_ptr<VulkanFence> mSubmitFence[maxConcurrentSubmitCount];
 	int mNextSubmit = 0;
 
-	// Whether each pool fence has been signalled by a submit and not yet waited on and reset.
-	//
-	// Needed because with two frames in flight there are two places that retire a fence - the
-	// reuse check in FlushCommands and AdvanceFrameSlot - and waiting on an already-reset fence
-	// with no pending signal operation deadlocks. Tracking it explicitly is robust no matter how
-	// many submits a frame makes, which the old `mNextSubmit >= maxConcurrentSubmitCount` test
-	// was not: it assumed a fixed submits-per-frame, and vk_submit_size and mid-frame
-	// WaitForStreamBuffers flushes both change that count.
-	bool mFenceOutstanding[maxConcurrentSubmitCount] = {};
-
 	// Which SUBMIT last used each fence, and how far each in-flight frame got.
 	//
-	// mFenceOutstanding alone cannot answer "whose fence is this". It records that an index is in use,
+	// A single representation answers both "is this fence in use" and "whose is it". Serials start at 1
+	// (pre-incremented), so 0 unambiguously means free - there is no separate outstanding flag, and so
+	// no way for the two to disagree.
+	//
+	// A bool alone could not answer "whose fence is this": it records that an index is in use,
 	// not which frame owns it - and there are only maxConcurrentSubmitCount fences for an unbounded
 	// number of submits per frame, so two consecutive frames' index sets overlap as soon as
 	// submits(N) + submits(N+1) > maxConcurrentSubmitCount. Retiring frame N then waited on fences

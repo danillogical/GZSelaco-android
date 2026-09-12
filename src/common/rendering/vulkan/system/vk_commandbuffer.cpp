@@ -114,11 +114,11 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
 	// Reclaim this fence if a previous submit still owns it. With two frames in flight this is
 	// also the throttle that stops the CPU running more than maxConcurrentSubmitCount submits
 	// ahead of the GPU.
-	if (mFenceOutstanding[currentIndex])
+	if (mFenceSerial[currentIndex] != 0)
 	{
 		vkWaitForFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
 		vkResetFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence);
-		mFenceOutstanding[currentIndex] = false;
+		mFenceSerial[currentIndex] = 0;
 	}
 
 	QueueSubmit submit;
@@ -175,7 +175,6 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
 	}
 
 	submit.Execute(fb->device.get(), *queue, mSubmitFence[currentIndex].get());
-	mFenceOutstanding[currentIndex] = true;
 	mFenceSerial[currentIndex] = ++mSubmitSerial;
 	mCurrentFrameLastSerial = mSubmitSerial;
 	mNextSubmit++;
@@ -223,7 +222,7 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 	VkFence waitFences[maxConcurrentSubmitCount];
 	int numWaitFences = 0;
 	for (int i = 0; i < maxConcurrentSubmitCount; i++)
-		if (mFenceOutstanding[i])
+		if (mFenceSerial[i] != 0)
 			waitFences[numWaitFences++] = mSubmitFence[i]->fence;
 
 	if (numWaitFences > 0)
@@ -233,7 +232,7 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 		vkResetFences(fb->device->device, numWaitFences, waitFences);
 		if (clockIt) GPUWait.Unclock();
 		for (int i = 0; i < maxConcurrentSubmitCount; i++)
-			mFenceOutstanding[i] = false;
+			mFenceSerial[i] = 0;
 	}
 
 	// ORDER IS LOAD-BEARING: the RETAINED slot lists must be destroyed BEFORE the current one.
@@ -253,12 +252,7 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 	// single call, so no list is ever retained. The retained list is what two frames introduce.
 	//
 	// The GPU is idle by this point (all fences waited above), so this is purely CPU-side ordering.
-	for (auto& slot : mFrameSlots)
-	{
-		slot.LastSerial = 0;
-		slot.TransferDeleteList.reset();
-		slot.DrawDeleteList.reset();
-	}
+	DropRetainedFrames();
 
 	DeleteFrameObjects(uploadOnly);
 
@@ -267,7 +261,7 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 	// mPrevSubmitSignalled is set; see the note further down.
 	const int orphanIndex = (mNextSubmit + maxConcurrentSubmitCount - 1) % maxConcurrentSubmitCount;
 
-	mCurrentFrameLastSerial = 0;
+	// mCurrentFrameLastSerial was already cleared by DropRetainedFrames above.
 	mNextSubmit = 0;
 
 	// Recreate ONLY the semaphore that can actually hold an orphaned signal, if any.
@@ -335,11 +329,13 @@ void VkCommandBufferManager::AdvanceFrameSlot()
 	int n = 0;
 	for (int idx = 0; idx < maxConcurrentSubmitCount; idx++)
 	{
-		if (!mFenceOutstanding[idx])
-			continue;
-		if (mFenceSerial[idx] > reusing.LastSerial)
-			continue;   // belongs to a later frame - not ours to wait on
-		mFenceOutstanding[idx] = false;
+		// One test, not two. This used to check an outstanding flag first and the serial second, and
+		// that ORDER was load-bearing: FinishFrameWait cleared the flag but left the serial stale, so
+		// reading the serial first would have waited on an already-reset fence - a permanent hang.
+		// With a single representation the hazard cannot be expressed.
+		if (mFenceSerial[idx] == 0 || mFenceSerial[idx] > reusing.LastSerial)
+			continue;   // free, or belongs to a later frame - not ours to wait on
+		mFenceSerial[idx] = 0;
 		waitFences[n++] = mSubmitFence[idx]->fence;
 	}
 	assert(n <= maxConcurrentSubmitCount);

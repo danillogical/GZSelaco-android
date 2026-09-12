@@ -301,8 +301,18 @@ void DFrameBuffer::FPSLimit()
 	// window means spinning 2 ms of every 33 ms - 60 ms/s, 6% of a core, indefinitely, on a
 	// thermally-governed handheld whose render thread and three BSP workers share the cluster.
 	//
-	// Linux/Android with CONFIG_HIGH_RES_TIMERS wakes within ~50-100 us, so 250 us is still 3x margin.
-	const int64_t spinWindow = PresentHoldsLateFrames() ? 2'000 : 250;
+	// The tight window is gated on the PLATFORM as well as the present mode, because it is really a
+	// claim about timer resolution. Linux and Android with CONFIG_HIGH_RES_TIMERS wake within
+	// ~50-100 us, so 250 us is 3x margin. Windows' default timer resolution is 1-15.6 ms, which is
+	// what upstream's 2 ms was sized for - shaving it there would make a sleep routinely overshoot the
+	// deadline and the cap erratic. This fork does not ship Windows, but the file is shared and the
+	// change is a candidate for upstreaming, so it must not quietly regress it.
+#if defined(__linux__) || defined(__ANDROID__)
+	const int64_t tightSpinWindow = 250;
+#else
+	const int64_t tightSpinWindow = 2'000;
+#endif
+	const int64_t spinWindow = PresentHoldsLateFrames() ? 2'000 : tightSpinWindow;
 
 	while (true)
 	{
