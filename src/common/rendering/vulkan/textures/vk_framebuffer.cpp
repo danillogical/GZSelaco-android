@@ -83,6 +83,18 @@ void VkFramebufferManager::AcquireImage()
 	bool exclusiveFullscreen = fb->IsFullscreen() && vk_exclusivefullscreen;
 	if (SwapChain->Lost() || fb->GetClientWidth() != CurrentWidth || fb->GetClientHeight() != CurrentHeight || fb->GetVSync() != CurrentVSync || CurrentHdr != vk_hdr || CurrentExclusiveFullscreen != exclusiveFullscreen)
 	{
+		// The GPU must be idle before anything below runs. Framebuffers.clear() calls
+		// vkDestroyFramebuffer immediately, and SwapChain->Create() destroys the old image views -
+		// and with no fence wait at frame end, the PREVIOUS frame's command buffer is still executing
+		// a render pass that references exactly those objects. Under one frame in flight the frame-end
+		// FinishFrameWait had already idled the GPU by the time we got here, which is why this was
+		// safe before and is not now.
+		//
+		// The Android surface-lost branch above idles for its own reasons; this covers every other way
+		// in - window resize, vid_scalefactor/vid_scalemode, a vid_vsync or vid_hdr toggle, exclusive
+		// fullscreen. A resize is rare enough that a full idle costs nothing measurable.
+		vkDeviceWaitIdle(fb->device->device);
+
 		Framebuffers.clear();
 
 		CurrentWidth = fb->GetClientWidth();

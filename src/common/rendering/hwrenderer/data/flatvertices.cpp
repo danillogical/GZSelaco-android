@@ -166,21 +166,48 @@ std::pair<FFlatVertex *, unsigned int> FFlatVertexBuffer::AllocVertices(unsigned
 
 void FFlatVertexBuffer::Copy(int start, int count)
 {
-	// The CURRENT slot only. These buffers are Persistent, permanently mapped, and Upload() is a
-	// no-op on Vulkan, so writing a non-current slot is a raw host write into memory a submitted
-	// command buffer may be reading as vertex data - reachable from OutputResized via
-	// DFrameBuffer::Update on any resize, vid_scalefactor change, or Android resume.
-	Map();
-	// &vbo_shadowdata[start], not [0]. OutputResized computes the new fullscreen quad into
-	// vbo_shadowdata[4..7] and then calls Copy(4, 4); a [0] source writes the QUAD_INDEX marker quad
-	// over it instead. Upstream GZDoom has the same line; worth upstreaming.
-	memcpy(GetBuffer(start), &vbo_shadowdata[start], count * sizeof(FFlatVertex));
-	Unmap();
-	mVertexBuffer->Upload(start * sizeof(FFlatVertex), count * sizeof(FFlatVertex));
+	// Defer ONLY when rotation is driven from the frame slot, i.e. Vulkan. Mark every slot -
+	// including the current one - and let ReseedStaticIfNeeded do the write from SetPipelinePos,
+	// which runs at the top of BeginFrame after AdvanceFrameSlot has waited on that slot's fence.
+	//
+	// Writing "just the current slot" here is NOT safe on Vulkan, which an earlier version got wrong.
+	// OutputResized reaches Copy via DFrameBuffer::Update, and VulkanRenderDevice::Update calls
+	// Super::Update() immediately after WaitForCommands(true) - which submits and presents WITHOUT
+	// waiting. The current slot is therefore precisely the one whose command buffers were submitted
+	// three lines earlier and are still fetching vertices from this Persistent, permanently mapped
+	// buffer, where Upload() is a no-op and nothing serialises the store.
+	//
+	// The reseed covers [0, mIndex), a superset of any (start, count) a caller can pass, so the range
+	// arguments only matter on the eager path below.
+	if (mExternalPipeline && mPipelineNbr > 1)
+	{
+		for (int n = 0; n < mPipelineNbr; n++)
+			mPipelineReseed[n] = true;
+		return;
+	}
+
+	// Eager path: every slot, written now. Used by GL/GLES, which rotate from Swap() AFTER drawing so
+	// there is no start-of-frame point to defer to, and by the constructor before any backend has
+	// claimed rotation. Safe for GL because writing a buffer the GPU may still be reading makes the
+	// driver rename it implicitly, and safe in the constructor because nothing is in flight yet.
+	//
+	// This is also the only path where the source offset matters - &vbo_shadowdata[start], not [0].
+	// OutputResized computes the new fullscreen quad into vbo_shadowdata[4..7] and calls Copy(4, 4);
+	// a [0] source writes the QUAD_INDEX marker quad over it instead. Upstream GZDoom has the same
+	// line. The deferred path above sidesteps it by rewriting the whole reserved region.
+	IVertexBuffer* old = mVertexBuffer;
 
 	for (int n = 0; n < mPipelineNbr; n++)
-		if (n != mPipelinePos)
-			mPipelineReseed[n] = true;
+	{
+		mVertexBuffer = mVertexBufferPipeline[n];
+		Map();
+		memcpy(GetBuffer(start), &vbo_shadowdata[start], count * sizeof(FFlatVertex));
+		Unmap();
+		mVertexBuffer->Upload(start * sizeof(FFlatVertex), count * sizeof(FFlatVertex));
+		mPipelineReseed[n] = false;
+	}
+
+	mVertexBuffer = old;
 }
 
 // Bring the current slot's static region up to date. On Vulkan this runs from SetPipelinePos in
@@ -198,11 +225,18 @@ void FFlatVertexBuffer::ReseedStaticIfNeeded()
 {
 	if (!mPipelineReseed[mPipelinePos])
 		return;
-	mPipelineReseed[mPipelinePos] = false;
 
+	// Validate BEFORE consuming the flag. Clearing it first and then bailing out would leave this slot
+	// holding stale static geometry indefinitely - until some later Copy() happened to re-mark it -
+	// which is the same wrong-geometry-every-other-frame symptom described above, except permanent
+	// instead of alternating. mIndex can legitimately exceed vbo_shadowdata.Size() in the window where
+	// CreateVertices has shrunk the array back to NUM_RESERVED but CreateVBO has not yet updated
+	// mIndex.
 	const unsigned int count = mIndex;
 	if (count == 0 || count > vbo_shadowdata.Size())
 		return;
+
+	mPipelineReseed[mPipelinePos] = false;
 
 	Map();
 	memcpy(GetBuffer(0), &vbo_shadowdata[0], count * sizeof(FFlatVertex));

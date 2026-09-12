@@ -295,6 +295,10 @@ private:
 	VkRenderBuffers *mActiveRenderBuffers = nullptr;
 
 	bool mVSync = false;
+
+	// Set by BeginFrame, consumed by Update. False means this frame bypassed BeginFrame, so nothing
+	// rotated and Update must do a full wait instead of the deferred one.
+	bool mFrameBegun = false;
 };
 
 class CVulkanError : public CEngineError

@@ -1100,6 +1100,22 @@ void VulkanRenderDevice::Update()
 
 	mCommands->WaitForCommands(true);
 
+	// A frame that never went through BeginFrame rotated NOTHING, so the deferred frame-end wait is
+	// not safe for it and we fall back to master's behaviour: a full wait here.
+	//
+	// PerformWipe (common/2d/wipe.cpp) is the case. It loops Begin/Run/End/screen->Update() with no
+	// BeginFrame in the loop, so AdvanceFrameSlot never runs, VkStreamBuffer::mPipelinePos never
+	// moves, and every iteration reuses the SAME matrix and stream UBO. mRenderState->EndFrame() just
+	// above rewinds both writers to offset 0, so the next iteration memcpys over exactly the bytes the
+	// previous iteration's submitted-and-still-executing command buffer is reading at its dynamic
+	// offsets. Symptom: garbled matrices, colours and texture modes on the wipe overlay and the HUD
+	// during every level-transition wipe.
+	//
+	// It also stops the delete lists growing for the whole wipe, since nothing retires them either.
+	if (!mFrameBegun)
+		mCommands->WaitForCommands(false);
+	mFrameBegun = false;
+
 	mCommands->UpdateGpuStats();
 
 	Super::Update();
@@ -1542,6 +1558,10 @@ TArray<uint8_t> VulkanRenderDevice::GetScreenshotBuffer(int &pitch, ESSType &col
 
 void VulkanRenderDevice::BeginFrame()
 {
+	// Recorded so Update() can tell a pipelined frame from one that bypassed BeginFrame entirely
+	// (PerformWipe) and therefore rotated nothing - see the note there.
+	mFrameBegun = true;
+
 	// Two frames in flight: retire the frame that ended and claim the slot of the frame two
 	// back, waiting only for THAT one. The frame in between keeps executing while this frame is
 	// recorded. Must precede everything that appends to the delete lists (the texture manager

@@ -3,6 +3,7 @@
 #include <zvulkan/vulkandevice.h>
 #include <zvulkan/vulkanobjects.h>
 #include "zstring.h"
+#include "hwrenderer/data/buffers.h"   // HW_MAX_PIPELINE_BUFFERS, for the static_assert below
 
 class VulkanRenderDevice;
 
@@ -43,6 +44,14 @@ public:
 	// FinishFrameWait; see the comment there. A compile-time constant is still the right call, just
 	// not for the reason originally given.
 	enum { framesInFlight = 2 };
+
+	// The engine buffers this depth drives are fixed-size arrays of HW_MAX_PIPELINE_BUFFERS, and the
+	// Vulkan path passes framesInFlight straight into them without clamping - unlike GL and GLES,
+	// which both clamp. HW_MAX_PIPELINE_BUFFERS is 2 on non-Android, so this currently sits exactly on
+	// the boundary and raising it would be an out-of-bounds write into four separate objects with no
+	// diagnostic. Fail the build instead.
+	static_assert(framesInFlight <= HW_MAX_PIPELINE_BUFFERS,
+		"framesInFlight exceeds HW_MAX_PIPELINE_BUFFERS - the rotated engine buffers would overflow");
 
 	void PushGroup(const FString& name);
 	void PopGroup();
@@ -117,16 +126,33 @@ private:
 	// WaitForStreamBuffers flushes both change that count.
 	bool mFenceOutstanding[maxConcurrentSubmitCount] = {};
 
+	// Which SUBMIT last used each fence, and how far each in-flight frame got.
+	//
+	// mFenceOutstanding alone cannot answer "whose fence is this". It records that an index is in use,
+	// not which frame owns it - and there are only maxConcurrentSubmitCount fences for an unbounded
+	// number of submits per frame, so two consecutive frames' index sets overlap as soon as
+	// submits(N) + submits(N+1) > maxConcurrentSubmitCount. Retiring frame N then waited on fences
+	// already reused by frame N+1, blocking until N+1 was nearly complete: two frames in flight
+	// silently degenerated to one, and kept the extra buffers. Four submits per frame is the default,
+	// so 4+4 sat exactly on the boundary and any extra flush tipped it over.
+	//
+	// A monotonic serial makes ownership explicit. A fence whose serial is newer than the retiring
+	// frame's last submit belongs to a later frame and is skipped - safely, because the reuse path in
+	// FlushCommands waits before reusing an index, so the retiring frame's work on it has already
+	// completed.
+	uint64_t mSubmitSerial = 0;
+	uint64_t mFenceSerial[maxConcurrentSubmitCount] = {};
+	uint64_t mCurrentFrameLastSerial = 0;
+
 	// Resources belonging to one in-flight frame, freed only once its fences have signalled.
 	struct FrameSlotData
 	{
-		std::vector<int> FenceIndices;
+		uint64_t LastSerial = 0;   // highest submit serial this frame produced; 0 = no submits
 		std::unique_ptr<DeleteList> TransferDeleteList;
 		std::unique_ptr<DeleteList> DrawDeleteList;
 	};
 	FrameSlotData mFrameSlots[framesInFlight];
 	int mFrameSlot = 0;
-	std::vector<int> mCurrentFrameFences;
 
 	// Whether the immediately preceding submit actually signalled its semaphore.
 	//

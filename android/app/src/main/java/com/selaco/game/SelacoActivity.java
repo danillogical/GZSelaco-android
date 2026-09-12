@@ -10,6 +10,8 @@ import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Toast;
 
@@ -192,9 +194,40 @@ public class SelacoActivity extends SDLActivity {
         // Draw into the display cutout as well, so a notch does not letterbox the
         // game. Set here rather than in the theme because the attribute needs API
         // 27 and minSdk is 26.
+        //
+        // setAttributes(), not just mutating the object getAttributes() returns: that
+        // returns the live LayoutParams and changing a field on it does not schedule the
+        // re-layout that makes the change take effect.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            getWindow().getAttributes().layoutInDisplayCutoutMode =
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+
+        // API 30+ MUST use WindowInsetsController. The SYSTEM_UI_FLAG_* constants and
+        // setSystemUiVisibility() below are deprecated as of API 30 and no longer reliably
+        // take effect - they appear to work at first launch only because the theme's
+        // windowFullscreen already gave us the whole screen, and then silently do nothing
+        // when re-applied after a resume.
+        //
+        // That is exactly what went wrong on an Android 13 device: after background ->
+        // foreground the system bar inset came back, so Android reported the app content
+        // area as 1920x1025 on a 1920x1080 display. The engine and the Vulkan swapchain
+        // were both still at 1920x1080 and consistent - the top 55 px was simply no longer
+        // presented, which read as "the fps counter disappeared" because that is where it
+        // draws.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController insets = getWindow().getInsetsController();
+            if (insets != null) {
+                insets.hide(WindowInsets.Type.systemBars());
+                // Sticky-immersive equivalent: a swipe shows the bars transiently instead of
+                // resizing the window, so the surface never changes size underneath us.
+                insets.setSystemBarsBehavior(
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+            return;
         }
 
         View decor = getWindow().getDecorView();

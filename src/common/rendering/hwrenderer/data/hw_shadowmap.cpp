@@ -137,8 +137,21 @@ void IShadowMap::UploadAABBTree()
 	}
 	else if (mAABBTree->Update())
 	{
-		mNodesBuffer->SetSubData(mAABBTree->DynamicNodesOffset(), mAABBTree->DynamicNodesSize(), mAABBTree->DynamicNodes());
-		mLinesBuffer->SetSubData(mAABBTree->DynamicLinesOffset(), mAABBTree->DynamicLinesSize(), mAABBTree->DynamicLines());
+		// SetData with the WHOLE tree, not SetSubData with just the dynamic part.
+		//
+		// SetSubData copies into the existing buffer, and that buffer is bound into the shadowmap
+		// postprocess pass's descriptor set - which the PREVIOUS frame recorded and may still be
+		// executing, because a frame no longer ends with a fence wait and the next frame's first
+		// submit has no dependency on it. That is a write-after-read hazard on the AABB nodes: one
+		// frame of wrong shadows or garbage light indices. It fires whenever the tree updates, i.e.
+		// any moving door, lift or platform.
+		//
+		// SetData allocates a fresh buffer and retires the old one through the frame-slot delete list,
+		// so the in-flight frame keeps reading the copy it was given - the same pattern UploadLights
+		// uses above. Kept as Static so the destination stays device-local for the per-frame read; the
+		// cost is re-uploading the full tree instead of the dynamic subrange while geometry moves.
+		mNodesBuffer->SetData(mAABBTree->NodesSize(), mAABBTree->Nodes(), BufferUsageType::Static);
+		mLinesBuffer->SetData(mAABBTree->LinesSize(), mAABBTree->Lines(), BufferUsageType::Static);
 	}
 }
 

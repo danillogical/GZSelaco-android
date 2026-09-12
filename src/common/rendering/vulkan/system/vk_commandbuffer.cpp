@@ -176,7 +176,8 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
 
 	submit.Execute(fb->device.get(), *queue, mSubmitFence[currentIndex].get());
 	mFenceOutstanding[currentIndex] = true;
-	mCurrentFrameFences.push_back(currentIndex);
+	mFenceSerial[currentIndex] = ++mSubmitSerial;
+	mCurrentFrameLastSerial = mSubmitSerial;
 	mNextSubmit++;
 }
 
@@ -254,15 +255,33 @@ void VkCommandBufferManager::FinishFrameWait(bool uploadOnly, bool clockIt)
 	// The GPU is idle by this point (all fences waited above), so this is purely CPU-side ordering.
 	for (auto& slot : mFrameSlots)
 	{
-		slot.FenceIndices.clear();
+		slot.LastSerial = 0;
 		slot.TransferDeleteList.reset();
 		slot.DrawDeleteList.reset();
 	}
 
 	DeleteFrameObjects(uploadOnly);
 
-	mCurrentFrameFences.clear();
+	mCurrentFrameLastSerial = 0;
 	mNextSubmit = 0;
+
+	// Recreate the inter-submit semaphores, and clear the flag with them.
+	//
+	// A binary semaphore can be left SIGNALLED WITH NO WAITER: a mid-frame flush with !lastsubmit
+	// signals mSubmitSemaphore[k], and if the next FlushCommands finds nothing recorded it does not
+	// submit, so nothing consumes it. Resetting mNextSubmit then loses the back-reference, and the
+	// `mNextSubmit > 0` guard suppresses the wait for good. The next time index k comes round, its
+	// submit signals an already-signalled binary semaphore - and from then on one wait consumes one
+	// signal and leaves it signalled, so every later wait on k passes instantly on a stale signal and
+	// the intra-frame "submit i finishes before submit i+1 starts" ordering silently stops holding.
+	//
+	// Clearing the flag alone does NOT fix that - it only stops the next submit waiting, which makes
+	// the orphan permanent. The GPU is idle here (every fence was just waited), and destroying a
+	// signalled semaphore with no pending operations is legal, so replacing them is what actually
+	// restores a known-unsignalled state. This path is the on-demand fallback, not per frame.
+	for (auto& semaphore : mSubmitSemaphore)
+		semaphore.reset(new VulkanSemaphore(fb->device.get()));
+	mPrevSubmitSignalled = false;
 }
 
 // Retire the frame that just ended into its own slot, then take ownership of the slot belonging
@@ -277,36 +296,40 @@ void VkCommandBufferManager::AdvanceFrameSlot()
 	// to keep it small - it no longer resets every frame and would otherwise grow without bound.
 	mNextSubmit %= maxConcurrentSubmitCount;
 
-	// Hand the just-finished frame's garbage and fences to the slot it was using.
+	// Hand the just-finished frame's garbage and its high-water submit serial to the slot it was using.
 	FrameSlotData& ending = mFrameSlots[mFrameSlot];
-	ending.FenceIndices = std::move(mCurrentFrameFences);
+	ending.LastSerial = mCurrentFrameLastSerial;
 	ending.TransferDeleteList = std::move(TransferDeleteList);
 	ending.DrawDeleteList = std::move(DrawDeleteList);
-	mCurrentFrameFences.clear();
+	mCurrentFrameLastSerial = 0;
 
 	mFrameSlot = (mFrameSlot + 1) % framesInFlight;
 
 	FrameSlotData& reusing = mFrameSlots[mFrameSlot];
 
-	// Clear each flag AS the fence is collected, not in a second pass afterwards.
+	// Wait for THIS frame's outstanding fences and no others, identified by submit serial.
 	//
-	// That ordering is load-bearing, not style. FenceIndices gets an entry per SUBMIT, so a frame
-	// with more than maxConcurrentSubmitCount submits repeats indices - and it can: 4 submits per
-	// frame at the default vk_submit_size, but mid-frame WaitForStreamBuffers flushes, the
-	// postprocess chain and shadowmap passes all add more, and vk_submit_size 50 measured 79.
-	// Testing the flag without clearing it let every repeat of an index pass, so n could exceed
-	// the array and smash the stack - a corruption that surfaces anywhere later, which is exactly
-	// how it presented: one crash inside tu_FreeDescriptorSets that looked like a double free, and
-	// one while standing still doing nothing.
+	// Scanning all the fences and testing ownership is what makes that possible. A per-submit list of
+	// indices cannot express it: there are only maxConcurrentSubmitCount fences for an unbounded
+	// number of submits, so the retiring frame's list may name an index that a LATER frame has since
+	// taken over, and waiting on it blocks until that later frame is nearly done - which quietly turns
+	// two frames in flight back into one. See the note on mSubmitSerial in the header.
 	//
-	// Clearing on collection makes each fence contribute at most once, which bounds n to
-	// maxConcurrentSubmitCount by construction since that is how many fences exist.
+	// Skipping a newer-serial fence is safe, not optimistic: the reuse path in FlushCommands waits and
+	// resets before handing an index to a new submit, so the retiring frame's work on that index has
+	// already completed. Skipping an already-cleared flag is safe for the same reason.
+	//
+	// n is bounded by construction here - one iteration per fence that exists, each contributing at
+	// most once - which the previous per-submit loop was not: repeated indices could push n past the
+	// array and smash the stack.
 	VkFence waitFences[maxConcurrentSubmitCount];
 	int n = 0;
-	for (int idx : reusing.FenceIndices)
+	for (int idx = 0; idx < maxConcurrentSubmitCount; idx++)
 	{
-		if (idx < 0 || idx >= maxConcurrentSubmitCount || !mFenceOutstanding[idx])
+		if (!mFenceOutstanding[idx])
 			continue;
+		if (mFenceSerial[idx] > reusing.LastSerial)
+			continue;   // belongs to a later frame - not ours to wait on
 		mFenceOutstanding[idx] = false;
 		waitFences[n++] = mSubmitFence[idx]->fence;
 	}
@@ -320,7 +343,7 @@ void VkCommandBufferManager::AdvanceFrameSlot()
 		vkResetFences(fb->device->device, n, waitFences);
 		GPUWait.Unclock();
 	}
-	reusing.FenceIndices.clear();
+	reusing.LastSerial = 0;
 
 	// Safe now: those fences signalled, so the GPU has finished reading everything this frame
 	// created two frames ago.
@@ -395,11 +418,11 @@ void VkCommandBufferManager::DropRetainedFrames()
 {
 	for (auto& slot : mFrameSlots)
 	{
-		slot.FenceIndices.clear();
+		slot.LastSerial = 0;
 		slot.TransferDeleteList.reset();
 		slot.DrawDeleteList.reset();
 	}
-	mCurrentFrameFences.clear();
+	mCurrentFrameLastSerial = 0;
 }
 
 void VkCommandBufferManager::PushGroup(const FString& name)

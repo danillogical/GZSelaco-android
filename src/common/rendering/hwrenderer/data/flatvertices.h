@@ -67,6 +67,16 @@ public:
 	// the slot that is current; the others are brought up to date as each becomes current.
 	bool mPipelineReseed[HW_MAX_PIPELINE_BUFFERS] = {};
 
+	// Whether rotation is driven externally from the frame slot (Vulkan) rather than by this class.
+	//
+	// This decides whether Copy() may DEFER its write. Deferring is only safe if the reseed happens
+	// at the START of a frame, before any draw - which is where Vulkan calls SetPipelinePos. GL and
+	// GLES rotate from NextPipelineBuffer() inside Swap(), i.e. AFTER the frame has been drawn and
+	// presented, so deferring there means the frame draws from a slot that was never filled: garbage
+	// on the first frame, and the previous level's static geometry on the first frame of every level.
+	// GLES is always >= 2 slots, so that is not hypothetical.
+	bool mExternalPipeline = false;
+
 	IVertexBuffer* mVertexBuffer;
 	IVertexBuffer *mVertexBufferPipeline[HW_MAX_PIPELINE_BUFFERS];
 	IIndexBuffer *mIndexBuffer;
@@ -139,6 +149,7 @@ public:
 	// changes - so switching the handle is all that is required.
 	void SetPipelinePos(int pos)
 	{
+		mExternalPipeline = true;
 		if (mPipelineNbr <= 1) return;
 		int next = pos % mPipelineNbr;
 		if (next != mPipelinePos)
@@ -149,13 +160,16 @@ public:
 		ReseedStaticIfNeeded();
 	}
 
+	// GL/GLES only, from Swap(). Deliberately does NOT reseed: this runs after the frame is drawn,
+	// and Copy() writes every slot eagerly when mExternalPipeline is false, so there is never
+	// anything owed here. It also sits one line before WaitSync(), so a large memcpy here would
+	// precede the fence that guarantees the GPU has finished with the slot.
 	void NextPipelineBuffer()
 	{
 		mPipelinePos++;
 		mPipelinePos %= mPipelineNbr;
 
 		mVertexBuffer = mVertexBufferPipeline[mPipelinePos];
-		ReseedStaticIfNeeded();
 	}
 
 	void Map()
