@@ -43,6 +43,35 @@ absent, run `build-macos.sh` explicitly.
 
 ---
 
+## adb commands that answer about the wrong thing
+
+Both of these return a confident, plausible answer to a question you did not ask. Neither errors.
+
+**`screencap` captures the wrong display.** This device has two: the game's internal panel is
+SurfaceFlinger display `4630946441858561667` (1920x1080), and there is a second at
+`4630946482288158084` (1240x1080) which `cocoonshell/.ExternalDisplayActivity` sits on. Bare
+`adb shell screencap -p` defaults to the **second** one, so you get a correctly-formed screenshot
+of the wrong screen. Use `-d 4630946441858561667`, and note `-d` wants a SurfaceFlinger id from
+`dumpsys SurfaceFlinger --display-id`, not the `0`/`4` that `dumpsys window displays` shows. Treat
+those ids as this device's current values rather than constants — re-derive them if a capture comes
+back the wrong size, and cross-check which one the game is on with
+`dumpsys window displays | grep -B2 mFocusedApp`.
+
+Second trap on top of that: if the panel is asleep, capturing the right display returns **pure
+black**. That reads as "the renderer is broken" rather than "the device is asleep" — check
+`dumpsys power | grep mWakefulness` before concluding anything, and `input keyevent KEYCODE_WAKEUP`
+first. Screenshots are also how the second screen bites you a second time; see the frame-time
+warning under Measuring performance.
+
+**`appops set <pkg> <op> deny` sets only the PACKAGE mode, and the framework reads the UID mode.**
+`Environment.isExternalStorageManager()` consults the uid mode, so a package-level deny changes
+nothing observable and the app behaves exactly as if the permission were still granted. Use
+`appops set --uid <pkg> <op> deny`, and confirm with `appops get` — it prints both, and the line
+you want is `Uid mode:`. This made a genuine first-launch crash look like it did not reproduce,
+which nearly got the finding dismissed as a misreading of the framework contract.
+
+---
+
 ## Do not do these
 
 **Do not add graphics cvars to `thor.cfg`.** It is the shipped autoexec. Three separate
