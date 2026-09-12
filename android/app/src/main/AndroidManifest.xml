@@ -24,6 +24,23 @@
          still runs from $PROGDIR if it is declined. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- MANAGE_EXTERNAL_STORAGE does not exist before API 30, and minSdk is 26. Without this
+         the 26-29 window has NO public-storage access at all: hasAllFilesAccess() returns true
+         there only because the check is inapplicable, so the app sails past the permission gate
+         and the engine then cannot see /sdcard/Selaco, failing with a generic "cannot find a
+         game IWAD" that points at nothing. maxSdkVersion keeps it out of the way on 30+, where
+         MANAGE_EXTERNAL_STORAGE is the mechanism. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
+    <!-- The vendored SDL calls Vibrator.vibrate() from SDLControllerManager whenever the engine
+         rumbles, and joy_feedback defaults to true (m_joy.cpp). Without this the first rumble
+         throws SecurityException; SDL catches the first call but its fallback and
+         SDLHapticHandler.run are unguarded, and Android_JNI_HapticRun does no ExceptionCheck, so
+         a pending exception is left at the JNI boundary. Cheap to declare, and it is a normal
+         (non-runtime) permission. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
         android:label="Selaco"
         android:icon="@mipmap/ic_launcher"

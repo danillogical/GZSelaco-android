@@ -149,7 +149,12 @@ build_zmusic() {
 		echo "           Run '$0 ogg vorbis flac sndfile' first, or the game will be silent."
 	fi
 
-	cmake_build ZMusic -DBUILD_SHARED_LIBS=ON "${sndfile_args[@]}"
+	# `${arr[@]+"${arr[@]}"}`: on bash 3.2 - which is /bin/bash on macOS, and what
+	# `#!/usr/bin/env bash` resolves to here - expanding an EMPTY array under `set -u` is an
+	# "unbound variable" error, not an empty list. So the warn-and-continue path above never
+	# actually continued: ZMusic was not built and the user got a bare bash error instead of the
+	# warning. build-macos.sh already documents this trap; this script did not.
+	cmake_build ZMusic -DBUILD_SHARED_LIBS=ON ${sndfile_args[@]+"${sndfile_args[@]}"}
 }
 
 patch_openal_loop_overrun() {

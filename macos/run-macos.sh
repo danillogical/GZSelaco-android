@@ -39,7 +39,11 @@ pick_dir() {
 }
 
 if [ -z "$WHICH" ]; then
-	WHICH="$(pick_dir full demo)"
+	# `|| true`: pick_dir ends on a failed `[ -f ]` when neither directory has the ipk3, so
+	# under `set -e` the assignment itself aborts the script - BEFORE the block below that
+	# exists to explain what to stage. The user got a silent exit 1 from the one message
+	# that would have helped.
+	WHICH="$(pick_dir full demo || true)"
 fi
 
 if [ -z "$WHICH" ]; then
@@ -77,7 +81,10 @@ set -e
 
 printf '\n\033[1m==> Exited (%s). Errors and warnings from the log:\033[0m\n' "$rc"
 if [ -f "$LOGFILE" ]; then
-	grep -inE "error|fail|cannot|unable|unsupported|not found" "$LOGFILE" | head -20 | sed 's/^/  /'
+	# `|| true`: a CLEAN log means grep matches nothing and exits 1, which pipefail propagates -
+	# so a successful run died right here, never printed the log path below, and returned 1 to
+	# the caller. Same class as the greps fixed in build-turnip.sh and package-apk.sh.
+	grep -inE "error|fail|cannot|unable|unsupported|not found" "$LOGFILE" | head -20 | sed 's/^/  /' || true
 	echo
 	echo "  Full log: $LOGFILE"
 else

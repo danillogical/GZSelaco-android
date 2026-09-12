@@ -97,7 +97,12 @@ say "Signing (identity: $CODESIGN_IDENTITY)"
 # CODESIGN_IDENTITY to produce something distributable (notarization is separate).
 # Nested code first, then the bundle - signing the main executable on its own
 # would give it a signature that disagrees with the bundle's resource seal.
-find "$FRAMEWORKS" -name '*.dylib' -exec codesign --force --sign "$CODESIGN_IDENTITY" {} \;
+#
+# xargs, not `find -exec`: BSD find returns 0 even when -exec fails, so a failing nested
+# signature was invisible - and `codesign` on the bundle does not recursively sign nested code,
+# so it succeeded regardless. The result was a bundle that looked signed and failed
+# `codesign -vvv --deep` and Gatekeeper. xargs propagates the failure and `set -e` stops.
+find "$FRAMEWORKS" -name '*.dylib' -print0 | xargs -0 -n1 codesign --force --sign "$CODESIGN_IDENTITY"
 codesign --force --sign "$CODESIGN_IDENTITY" "$APP"
 
 say "Verifying"

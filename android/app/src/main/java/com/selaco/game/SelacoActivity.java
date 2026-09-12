@@ -70,6 +70,13 @@ public class SelacoActivity extends SDLActivity {
         // declines is not trapped - they just get the engine's "cannot find a game
         // IWAD" dialog, which names the folders to use.
         if (!hasGameData() && !hasAllFilesAccess()) {
+            // super.onCreate() BEFORE finish(), and it is not optional. Activity.performCreate
+            // clears mCalled, calls onCreate, then throws SuperNotCalledException if mCalled is
+            // still false - and finish() does not set it. Returning from here without the super
+            // call crashed the process on the FIRST LAUNCH of every non-adb install, which is
+            // the one path a developer never sees: hasGameData() is true as soon as you have
+            // adb-pushed the ipk3.
+            super.onCreate(savedInstanceState);
             requestAllFilesAccess();
             finish();
             return;
@@ -87,8 +94,12 @@ public class SelacoActivity extends SDLActivity {
     }
 
     private boolean hasAllFilesAccess() {
-        // isExternalStorageManager() is API 30+. Below that the legacy storage
-        // permissions apply and public folders are readable without this dance.
+        // isExternalStorageManager() is API 30+, and MANAGE_EXTERNAL_STORAGE does not exist
+        // before it. Below 30 the legacy permission applies instead - see the
+        // READ_EXTERNAL_STORAGE entry in AndroidManifest.xml, which is declared with
+        // maxSdkVersion 29 for exactly this window. Without it this returning true would mean
+        // "no public storage access at all", and the engine would fail to find Selaco.ipk3 with
+        // nothing pointing at the cause.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true;
         return Environment.isExternalStorageManager();
     }
