@@ -56,11 +56,12 @@ VkCommandBufferManager::VkCommandBufferManager(VulkanRenderDevice* fb, VkQueue *
 
 	if (!mIsUploadOnly && fb->device->GraphicsTimeQueries)
 	{
+		// One range per frame slot, back to back - see MaxTimestampQueries.
 		mTimestampQueryPool = QueryPoolBuilder()
-			.QueryType(VK_QUERY_TYPE_TIMESTAMP, MaxTimestampQueries)
+			.QueryType(VK_QUERY_TYPE_TIMESTAMP, MaxTimestampQueries * framesInFlight)
 			.Create(fb->device.get());
 
-		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, MaxTimestampQueries);
+		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, MaxTimestampQueries * framesInFlight);
 	}
 }
 
@@ -100,11 +101,28 @@ std::unique_ptr<VulkanCommandBuffer> VkCommandBufferManager::CreateUnmanagedComm
 
 void VkCommandBufferManager::BeginFrame()
 {
-	if (mNextTimestampQuery > 0)
+	if (!mTimestampQueryPool)
+		return;
+
+	// Read and recycle this slot's PREVIOUS occupancy here, not at the end of the frame.
+	//
+	// AdvanceFrameSlot has just waited this slot's fence, so the timestamps its last frame wrote
+	// are complete and vkGetQueryPoolResults returns immediately. At the end of the frame the same
+	// read would be against a frame still executing, and VK_QUERY_RESULT_WAIT_BIT would block on
+	// the GPU - which is the stall pipelining exists to remove, and why this whole subsystem was
+	// switched off rather than fixed when frames in flight landed.
+	//
+	// The consequence is that the figures are two frames old: at framesInFlight = 2 a slot comes
+	// round every other frame. That is fine for a profiler and is labelled in the output.
+	FrameSlotData &slot = mFrameSlots[mFrameSlot];
+	if (slot.TimestampsUsed > 0)
 	{
-		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, mNextTimestampQuery);
-		mNextTimestampQuery = 0;
+		ReadFrameSlotTimestamps(mFrameSlot);
+		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), mFrameSlot * MaxTimestampQueries, slot.TimestampsUsed);
+		slot.TimeElapsedQueries.clear();
+		slot.TimestampsUsed = 0;
 	}
+	mNextTimestampQuery = 0;
 }
 
 void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_t count, VkQueue *queue, bool finish, bool lastsubmit)
@@ -461,13 +479,14 @@ void VkCommandBufferManager::PushGroup(const FString& name)
 
 	if (mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
 	{
+		FrameSlotData &slot = mFrameSlots[mFrameSlot];
 		TimestampQuery q;
 		q.name = name;
-		q.startIndex = mNextTimestampQuery++;
+		q.startIndex = mFrameSlot * MaxTimestampQueries + mNextTimestampQuery++;
 		q.endIndex = 0;
 		GetDrawCommands()->writeTimestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, mTimestampQueryPool.get(), q.startIndex);
-		mGroupStack.push_back(timeElapsedQueries.size());
-		timeElapsedQueries.push_back(q);
+		mGroupStack.push_back(slot.TimeElapsedQueries.size());
+		slot.TimeElapsedQueries.push_back(q);
 	}
 }
 
@@ -476,56 +495,60 @@ void VkCommandBufferManager::PopGroup()
 	if (!gpuStatActive || mGroupStack.empty())
 		return;
 
-	TimestampQuery& q = timeElapsedQueries[mGroupStack.back()];
+	TimestampQuery& q = mFrameSlots[mFrameSlot].TimeElapsedQueries[mGroupStack.back()];
 	mGroupStack.pop_back();
 
 	if (mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
 	{
-		q.endIndex = mNextTimestampQuery++;
+		q.endIndex = mFrameSlot * MaxTimestampQueries + mNextTimestampQuery++;
 		GetDrawCommands()->writeTimestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, mTimestampQueryPool.get(), q.endIndex);
 	}
 }
 
-void VkCommandBufferManager::UpdateGpuStats()
+// Read one slot's completed timestamps. Caller guarantees the slot's fence has been waited.
+void VkCommandBufferManager::ReadFrameSlotTimestamps(int slot)
 {
-	// With two frames in flight the timestamp pool is shared between a frame being recorded and
-	// one still executing, and reading it with VK_QUERY_RESULT_WAIT_BIT blocks on the GPU -
-	// reintroducing precisely the stall pipelining exists to remove, which would make the change
-	// measure as doing nothing. Per-group GPU timings are therefore unavailable in this mode.
-	// rendertimes, i_benchmark's cpu gap and frame times are all unaffected.
-	// Always, now that two frames in flight is unconditional.
-	{
-		gpuStatOutput = "";
-		timeElapsedQueries.clear();
-		mGroupStack.clear();
-		mNextTimestampQuery = 0;
-		gpuStatActive = false;
-		keepGpuStatActive = false;
+	FrameSlotData &data = mFrameSlots[slot];
+	if (data.TimestampsUsed == 0)
 		return;
-	}
+
+	const uint32_t base = slot * MaxTimestampQueries;
 
 	uint64_t timestamps[MaxTimestampQueries];
-	if (mNextTimestampQuery > 0)
-		mTimestampQueryPool->getResults(0, mNextTimestampQuery, sizeof(uint64_t) * mNextTimestampQuery, timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+	// WAIT_BIT is kept although the results are already available: it costs nothing on a completed
+	// range and turns any future mistake about which slot is safe to read into a visible stall
+	// rather than silently garbled numbers.
+	mTimestampQueryPool->getResults(base, data.TimestampsUsed, sizeof(uint64_t) * data.TimestampsUsed, timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 
 	double timestampPeriod = fb->device->PhysicalDevice.Properties.Properties.limits.timestampPeriod;
 
 	gpuStatOutput = "";
-	for (auto& q : timeElapsedQueries)
+	for (auto& q : data.TimeElapsedQueries)
 	{
 		if (q.endIndex <= q.startIndex)
 			continue;
 
-		int64_t timeElapsed = max(static_cast<int64_t>(timestamps[q.endIndex] - timestamps[q.startIndex]), (int64_t)0);
+		// Indices are absolute in the pool; the results buffer starts at this slot's base.
+		int64_t timeElapsed = max(static_cast<int64_t>(timestamps[q.endIndex - base] - timestamps[q.startIndex - base]), (int64_t)0);
 		double timeNS = timeElapsed * timestampPeriod;
 
 		FString out;
 		out.Format("%s=%04.2f ms\n", q.name.GetChars(), timeNS / 1000000.0f);
 		gpuStatOutput += out;
 	}
-	timeElapsedQueries.clear();
+
+	if (!gpuStatOutput.IsEmpty())
+		gpuStatOutput += "(2 frames behind)\n";
+}
+
+void VkCommandBufferManager::UpdateGpuStats()
+{
+	// Hand this frame's range to the slot. BeginFrame reads it back two frames from now, once
+	// AdvanceFrameSlot has waited the fence - see there for why the read cannot happen here.
+	mFrameSlots[mFrameSlot].TimestampsUsed = (uint32_t)mNextTimestampQuery;
 	mGroupStack.clear();
 
 	gpuStatActive = keepGpuStatActive;
 	keepGpuStatActive = false;
 }
+

@@ -481,10 +481,13 @@ The captures completed fine — 1.44 MB, full span — so this is wrong *data*, 
 tell is a trace reporting a few percent GPU busy for a scene known to be GPU bound. **To
 capture a GPU trace you must build with `framesInFlight = 1`.**
 
-Per-group GPU timings (the `gpu` stat) are also unavailable, because the timestamp pool is
-shared between overlapping frames and reading it with `VK_QUERY_RESULT_WAIT_BIT` would block on
-the GPU — reintroducing exactly the stall this removes. Restoring them means per-slot query
-pool ranges.
+Per-group GPU timings (the `gpu` stat) **do** work, but they were not free. The timestamp pool
+carries one range per frame slot, and a slot's results are read at the top of a frame, after
+`AdvanceFrameSlot` has waited that slot's fence — so the read never blocks. That was the whole
+problem: reading at the end of a frame means reading a pool a frame still executing is writing,
+and `VK_QUERY_RESULT_WAIT_BIT` there would stall on the GPU and give back exactly the time
+pipelining bought. The cost of doing it safely is that the figures are **two frames old**, since a
+slot comes round every other frame at `framesInFlight = 2`.
 
 ### The static flat vertices are per-slot, and `mIndex` is the range that matters
 
@@ -588,8 +591,9 @@ A static viewpoint **cannot** measure `r_particleIntensity`, `r_smokequality`, `
 ### Solid geometry is not fragment bound
 
 > These per-draw-list figures were measured at **one frame in flight**, before pipelining landed.
-> They are still the basis for the conclusion below, but the shipped code cannot reproduce them:
-> `UpdateGpuStats` early-returns at two frames in flight, so the `gpu` stat is empty on Vulkan. See
+> The shipped code can reproduce them again now that the `gpu` stat works at two frames in flight,
+> but the numbers are not directly comparable: they are two frames old, and the pipelining they
+> predate changed the frame's shape. Re-measure rather than diffing against this table. See
 > [The GPU profiler cannot be used with it](#the-gpu-profiler-cannot-be-used-with-it).
 
 `plainflats` (13.5 ms) and `plainwalls` (7.65 ms) dominate GPU time, and at the same viewpoint

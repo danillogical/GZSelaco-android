@@ -527,9 +527,10 @@ void HWDrawInfo::RenderScene(FRenderState &state)
 	// so the entire cost sat somewhere nobody could see. Expect more than one entry each
 	// when portals or mirrors re-enter the scene draw; that is real, not double counting.
 	//
-	// These record nothing today. On Vulkan UpdateGpuStats early-returns because the timestamp query
-	// pools are per-device rather than per-frame-slot; on GL and GLES FRenderState::PushGroup is a
-	// do-nothing virtual with VkRenderState as its only override. Per-slot pools would restore them.
+	// These record on Vulkan only. GL and GLES leave FRenderState::PushGroup a do-nothing virtual
+	// with VkRenderState as its only override, so the scene groups cost nothing and report nothing
+	// there. On Vulkan the timestamp pool carries one range per frame slot, and the results are read
+	// two frames later when that slot's fence has been waited - see VkCommandBufferManager.
 	state.PushGroup("opaque");
 
 	// Part 1: solid geometry. This is set up so that there are no transparent parts

@@ -82,10 +82,10 @@ CVAR(Float, i_benchmark_ignore, 500.0f, CVAR_ARCHIVE)
 
 // The Vulkan backend clears keepGpuStatActive every frame in
 // VkCommandBufferManager::UpdateGpuStats, so it has to be re-armed each frame or GPU timings are
-// never collected. NOTE that at two frames in flight UpdateGpuStats early-returns before reading
-// any timestamps, so on Vulkan the gpu line is currently always empty - the timestamp query pools
-// are per-device, not per-frame-slot, and reading them across two in-flight frames is what the
-// early return avoids. Restoring the gpu stat means giving each frame slot its own pool.
+// never collected. The figures it reports lag by two frames: the timestamp pool has one range per
+// frame slot, and a slot's results are only read once AdvanceFrameSlot has waited its fence, which
+// at two frames in flight is every other frame. Fine for a profiler, but do not line the gpu line
+// up against a same-frame rendertimes figure.
 extern bool keepGpuStatActive;
 extern FString gpuStatOutput;
 
