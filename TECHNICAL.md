@@ -155,6 +155,21 @@ If the `[Selaco.AutoExec]` section exists but is wrong, deleting the Path line i
 enough — `CreateStandardAutoExec` only populates the section when it is *absent*. Delete the
 whole section and let the engine regenerate it.
 
+**And the file itself is staged once, never refreshed.** `SelacoActivity` skips the copy when the
+target exists (`isConfig && target.exists()`), deliberately, so a player's own edits survive a
+reinstall — the pk3s beside it *are* refreshed on a size change, the config is not.
+
+The consequence bites when shipping a config fix: **a changed shipped autoexec reaches new installs
+only.** Existing users keep their staged copy. Changing an engine default does not reach them
+either, because these cvars are `CVAR_ARCHIVE` and their ini already records the old value. The
+escape hatch is deleting the staged file so the next launch re-stages it, which plain
+`adb shell rm /sdcard/Android/data/com.selaco.game/files/autoexec.cfg` can do — app-external
+storage is reachable by the shell user, so this works even on a non-debuggable release build. A
+normal user without adb has to reinstall or use a file manager.
+
+Worth knowing before treating an autoexec edit as a shipped fix: it is a fix for the next person to
+install, not for the people who already have it.
+
 ### Savegames live in the public folder, and `selaco.globals` needed a migration
 
 `M_GetSavegamesPath()` used to return the app-private *internal* dir. Android deletes that with
@@ -211,6 +226,7 @@ has burned this project three times.
 | `vid_vsync 1` | ✓ | ✓ | not in `CVARINFO.defaults`; the engine default is false |
 | `vid_maxfps 30` | ✓ | ✓ | Selaco defaults 200. 30 divides a 60 Hz panel exactly; 35 gives 1.71 vblanks and judders. Needs the relaxed floor in `v_video.cpp` — stock GZDoom clamps up to `GameTicRate` |
 | `vid_fps 1` | ✓ | ✓ | on for the beta, so a tester reports a number rather than "choppy". Revisit for release |
+| `con_scale 6` | ✓ | | the fps readout above scales by `GetConScale`, which is **1** at 1920x1080 with `con_scale`/`uiscale` unset — unreadable on a 7-inch panel. Not settable from Selaco's menus: `MENUDEF` exposes `ui_scaling`/`hud_scaling`, neither of which feeds this. Non-linear — `(con_scale+1)/2` clamped to 3 here, so 2 changes nothing and 6 is the maximum |
 | `con_notifylines 0` | ✓ | ✓ | `CVAR_ARCHIVE` — otherwise console text draws over the game |
 | `vid_scalefactor 1.0` | | ✓ | `CVAR_ARCHIVE` — the A/B profiles sweep it |
 | `con_scale 0` | | ✓ | `CVAR_ARCHIVE` — benchmark profiles set 4, this puts it back to auto |
