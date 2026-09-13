@@ -15,10 +15,17 @@ Tested on an **AYN Thor** (Snapdragon 8 Gen 2, Android 13) and on Apple Silicon 
 1. Download `Selaco-android-<version>.apk` from [Releases](../../releases) and install it.
 2. Find `Selaco.ipk3` in your Steam folder:
    `steamapps/common/Selaco/Selaco.ipk3` (~1.2 GB)
-3. Copy it to **`Internal storage/Selaco/`** on your device. USB, an SD card or a
-   download on the device all work.
-4. Launch Selaco. It asks for file access — tap **Allow access to manage all files**,
-   then reopen it.
+3. Copy it to **`Internal storage/Selaco/`** on your device — the folder your file manager
+   shows as "Internal storage", i.e. `/sdcard/Selaco/`. USB, an SD card or a download on the
+   device all work.
+4. Launch Selaco. It asks for file access — tap **Allow access to manage all files**, then
+   reopen it.
+
+   This is what lets the game read the `Selaco.ipk3` you just copied, since it sits outside
+   the app's own private folder, and it lets your savegames live in `Selaco/savegames/` where
+   they survive uninstalling or updating the app. Android has no narrower permission that
+   covers this: the media-only permission cannot read an `.ipk3`, and anything the app can
+   reach without asking is deleted along with the app.
 5. Pick your settings in the first-run dialog. **Steam Deck: Favour Performance** plus
    **Favour Spectacle (Steam Deck Optimized)** is the tested combination.
 
@@ -29,8 +36,11 @@ larger subtitles and aim assist that Selaco ships for Steam Deck.
 controls are not implemented, so a device with no physical buttons cannot play. Only
 the Thor has been tested; other hardware may need a lower preset.
 
-**Updating:** install the new APK *over* the old one. Do not uninstall first, or you
-lose your saves. Your `Internal storage/Selaco/` folder is safe either way.
+**Updating:** install the new APK *over* the old one — that keeps your settings and key
+bindings, which live in the app's private storage and are the one thing an uninstall does
+destroy. Your savegames are safer: they live in `Internal storage/Selaco/savegames/`
+alongside the `Selaco.ipk3`, so they survive uninstalling, reinstalling, or clearing the
+app's storage.
 
 ## Install on macOS
 
