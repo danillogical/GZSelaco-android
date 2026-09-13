@@ -342,8 +342,31 @@ void VkCommandBufferManager::AdvanceFrameSlot()
 	mNextSubmit %= maxConcurrentSubmitCount;
 
 	// Hand the just-finished frame's garbage and its high-water submit serial to the slot it was using.
+	// Submit pending transfer work before retiring the resources it references.
+	//
+	// Without this a staging buffer and the command buffer holding its copyBufferToImage end up in
+	// DIFFERENT slots' delete lists: the buffer is added at upload time, the command buffer only at
+	// the next flush. The buffer's slot then carries a LastSerial that does not describe the submit
+	// the copy actually rides, and when that slot is reused the fence loop below skips every fence
+	// and frees the buffers having waited on nothing.
+	//
+	// It needs a load to happen at all. FlushBackground drives UploadLoadedTextures outside the
+	// frame loop, so no end-of-frame flush intervenes, and the 64 MB path's DropRetainedFrames
+	// zeroes mCurrentFrameLastSerial - leaving the slot stamped 0, which is the value the loop
+	// treats as "nothing of mine outstanding". Measured on a title screen: 260 staging buffers
+	// retired with fencesWaited=0 and cmdbufs=0, and validation reporting
+	// VUID-vkDestroyBuffer-buffer-00922 against them.
+	//
+	// Flushing here restores the invariant the serial machinery assumes: everything in a delete
+	// list is referenced only by work that has been submitted, under a serial that slot records.
+	// In a normal frame mTransferCommands is already null - the end-of-frame flush submitted it -
+	// so this costs nothing outside loads.
+	if (mTransferCommands)
+		FlushCommands(false, false, true);
+
 	FrameSlotData& ending = mFrameSlots[mFrameSlot];
 	ending.LastSerial = mCurrentFrameLastSerial;
+
 	ending.TransferDeleteList = std::move(TransferDeleteList);
 	ending.DrawDeleteList = std::move(DrawDeleteList);
 	mCurrentFrameLastSerial = 0;
