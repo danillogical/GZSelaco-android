@@ -810,15 +810,31 @@ What the first run found, on a title screen and one loaded level:
 | `WRITE_AFTER_WRITE`, mipmap barrier access masks | 12 refs | fixed, now 0 |
 | `READ_AFTER_WRITE`, transfer→draw on `VkHardwareBuffer.Stream` | 7 | fixed, now 0 |
 | `WRITE_AFTER_WRITE`, PP renderpass `loadOp` vs layout transition | 4–5 | fixed, now 0 |
+| `VUID-vkDestroyBuffer-buffer-00922`, staging buffer freed unwaited | 9 | fixed, now 0 |
 
 All three were the same shape: a barrier or dependency that described a write as a read. **All
 synchronization hazard classes now report zero**, on a title screen, a loaded level and play.
 
-One core-validation error is still open and is NOT a sync hazard:
-`VUID-vkDestroyBuffer-buffer-00922`, nine per launch, destroying a
-`VkHardwareTexture.mStagingBuffer` while `mTransferCommands` still references it. Uninvestigated -
-the upload path does put staging buffers on `TransferDeleteList`, so the question is what frees
-that list while the current transfer buffer still holds a recorded `copyBufferToImage`.
+It also found a **use-after-free that was not a sync hazard**, and this one was in fork code:
+`VUID-vkDestroyBuffer-buffer-00922`, nine per launch, freeing a `VkHardwareTexture.mStagingBuffer`
+still referenced by `mTransferCommands`. A staging buffer joined `TransferDeleteList` at upload
+time while the command buffer recording its copy only joined at the next flush — so a slot rotation
+between the two split them across lists with independent fences, and the buffer's slot was stamped
+`LastSerial = 0` (the 64 MB path's `DropRetainedFrames` zeroes it), which the fence loop treats as
+"nothing of mine outstanding". Two slots freed 260 buffers each having waited on nothing. Fixed by
+flushing pending transfers before retiring their resources.
+
+Reaching it needs a load: `FlushBackground` drives `UploadLoadedTextures` outside the frame loop,
+so no end-of-frame flush puts the command buffer in the same list. Steady-state play never does it.
+
+**Two wrong turns worth remembering**, both caught only by instrumenting rather than reasoning:
+
+- The `LastSerial == 0` diagnosis was declared *falsified* on a `tail`-limited view of the log —
+  the load-time events had scrolled past, and a full grep found them. The theory was right; the
+  sampling was wrong.
+- After the fix, cumulative counts still showed 1 unwaited free and 9 destroy errors. Both were
+  the *previous* launch still in the buffer. Cut the log at the last `Creating Vulkan device` and
+  count per launch; `logcat -c` is forbidden here.
 
 **Nothing was reported against the frames-in-flight machinery** — no hazard on fences, semaphores,
 delete lists or slot rotation, during play or at teardown. Coverage gap worth closing: no
