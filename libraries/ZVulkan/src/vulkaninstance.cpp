@@ -242,6 +242,14 @@ void VulkanInstance::CreateInstance()
 				break;
 			}
 		}
+
+		// Say so when the layer was asked for but is not installed. Carrying on quietly makes a run
+		// that produced no validation output indistinguishable from a clean one - the run then looks
+		// like evidence of correctness while having tested nothing, which is worse than not running it.
+		if (debugLayerFound)
+			EnabledExtensions.insert(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+		else
+			VulkanPrintLog("error", "VK_LAYER_KHRONOS_validation requested but not installed - continuing WITHOUT validation");
 	}
 
 	// Enable optional instance extensions we are interested in
@@ -261,6 +269,19 @@ void VulkanInstance::CreateInstance()
 	for (const std::string& ext : EnabledExtensions)
 		enabledExtensionsCStr.push_back(ext.c_str());
 
+	// Synchronization validation is a layer FEATURE, not a consequence of loading the layer: enabling
+	// VK_LAYER_KHRONOS_validation alone gives core validation only, and the read-after-write and
+	// submit-ordering hazards this is run to find would go entirely unreported. VK_EXT_validation_features
+	// is deprecated in favour of VK_EXT_layer_settings, but it is still honoured and needs no settings
+	// file on the device, which VK_EXT_layer_settings effectively does.
+	const VkValidationFeatureEnableEXT enabledValidationFeatures[] = {
+		VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+	};
+	VkValidationFeaturesEXT validationFeatures = {};
+	validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+	validationFeatures.enabledValidationFeatureCount = (uint32_t)(sizeof(enabledValidationFeatures) / sizeof(enabledValidationFeatures[0]));
+	validationFeatures.pEnabledValidationFeatures = enabledValidationFeatures;
+
 	// Try get the highest vulkan version we can get
 	VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 	for (uint32_t apiVersion : ApiVersionsToTry)
@@ -275,6 +296,7 @@ void VulkanInstance::CreateInstance()
 
 		VkInstanceCreateInfo createInfo = {};
 		createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+		createInfo.pNext = debugLayerFound ? &validationFeatures : nullptr;
 		createInfo.pApplicationInfo = &appInfo;
 		createInfo.enabledExtensionCount = (uint32_t)EnabledExtensions.size();
 		createInfo.enabledLayerCount = (uint32_t)enabledValidationLayersCStr.size();
