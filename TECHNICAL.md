@@ -809,11 +809,16 @@ What the first run found, on a title screen and one loaded level:
 |---|---|---|
 | `WRITE_AFTER_WRITE`, mipmap barrier access masks | 12 refs | fixed, now 0 |
 | `READ_AFTER_WRITE`, transfer→draw on `VkHardwareBuffer.Stream` | 7 | fixed, now 0 |
-| `WRITE_AFTER_WRITE`, PP renderpass `loadOp` vs layout transition | 4–5 | **open**, upstream |
+| `WRITE_AFTER_WRITE`, PP renderpass `loadOp` vs layout transition | 4–5 | fixed, now 0 |
 
-The open one is `vkCmdBeginRenderPass` clearing the swapchain attachment in
-`VkPPRenderPassSetup.RenderPass`: the subpass dependency permits `COLOR_ATTACHMENT_READ` but must
-permit `COLOR_ATTACHMENT_WRITE` at `COLOR_ATTACHMENT_OUTPUT`.
+All three were the same shape: a barrier or dependency that described a write as a read. **All
+synchronization hazard classes now report zero**, on a title screen, a loaded level and play.
+
+One core-validation error is still open and is NOT a sync hazard:
+`VUID-vkDestroyBuffer-buffer-00922`, nine per launch, destroying a
+`VkHardwareTexture.mStagingBuffer` while `mTransferCommands` still references it. Uninvestigated -
+the upload path does put staging buffers on `TransferDeleteList`, so the question is what frees
+that list while the current transfer buffer still holds a recorded `copyBufferToImage`.
 
 **Nothing was reported against the frames-in-flight machinery** — no hazard on fences, semaphores,
 delete lists or slot rotation, during play or at teardown. Coverage gap worth closing: no
