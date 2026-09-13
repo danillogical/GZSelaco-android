@@ -12,8 +12,11 @@ android {
         // 26 is the floor for the NDK APIs used. The Ayn Thor is API 33.
         minSdk 30
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        // versionCode is derived from versionName as MAJOR*10000 + MINOR*100 + PATCH, so the two
+        // cannot drift apart. Android compares only versionCode when deciding whether an APK is an
+        // upgrade, and it must increase every release or the install is refused.
+        versionCode 100
+        versionName '0.1.0'
 
         ndk {
             // The only target that matters here; building 32-bit would double

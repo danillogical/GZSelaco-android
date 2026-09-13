@@ -12,7 +12,7 @@ Tested on an **AYN Thor** (Snapdragon 8 Gen 2, Android 13) and on Apple Silicon 
 
 ## Install on Android
 
-1. Download `Selaco-android.apk` from [Releases](../../releases) and install it.
+1. Download `Selaco-android-<version>.apk` from [Releases](../../releases) and install it.
 2. Find `Selaco.ipk3` in your Steam folder:
    `steamapps/common/Selaco/Selaco.ipk3` (~1.2 GB)
 3. Copy it to **`Internal storage/Selaco/`** on your device. USB, an SD card or a
