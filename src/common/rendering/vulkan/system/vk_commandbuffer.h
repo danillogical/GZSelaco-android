@@ -62,6 +62,19 @@ public:
 		std::vector<std::unique_ptr<VulkanImageView>> ImageViews;
 		std::vector<std::unique_ptr<VulkanFramebuffer>> Framebuffers;
 		std::vector<std::unique_ptr<VulkanAccelerationStructure>> AccelStructs;
+
+		// DECLARATION ORDER IS LOAD-BEARING: DescriptorPools must come before Descriptors.
+		//
+		// Members are destroyed in reverse declaration order, so this frees the sets first and the
+		// pools second. The other way round is a double free: vkDestroyDescriptorPool implicitly
+		// frees every set allocated from that pool, and ~VulkanDescriptorSet then frees itself
+		// against it again. Sorting these two lines, or inserting a new type between them, is enough
+		// to reintroduce it.
+		//
+		// It will not show up in testing on this device. Qualcomm's driver tolerates the double free
+		// silently; only Turnip reports it, as `Scudo ERROR: invalid chunk state when deallocating`
+		// inside tu_FreeDescriptorSets. See FinishFrameWait for the cross-list ordering, which is the
+		// same hazard between two DeleteLists rather than within one.
 		std::vector<std::unique_ptr<VulkanDescriptorPool>> DescriptorPools;
 		std::vector<std::unique_ptr<VulkanDescriptorSet>> Descriptors;
 		std::vector<std::unique_ptr<VulkanShader>> Shaders;
@@ -132,12 +145,25 @@ private:
 	uint64_t mFenceSerial[maxConcurrentSubmitCount] = {};
 	uint64_t mCurrentFrameLastSerial = 0;
 
+	struct TimestampQuery
+	{
+		FString name;
+		uint32_t startIndex;
+		uint32_t endIndex;
+	};
+
 	// Resources belonging to one in-flight frame, freed only once its fences have signalled.
 	struct FrameSlotData
 	{
 		uint64_t LastSerial = 0;   // highest submit serial this frame produced; 0 = no submits
 		std::unique_ptr<DeleteList> TransferDeleteList;
 		std::unique_ptr<DeleteList> DrawDeleteList;
+
+		// The groups this slot's frame recorded, kept until its timestamps are read two frames
+		// later. The names and index pairs belong to the frame that wrote them, so they cannot
+		// live in a single shared vector the way they did when the pool was per-device.
+		std::vector<TimestampQuery> TimeElapsedQueries;
+		uint32_t TimestampsUsed = 0;   // how much of this slot's range the frame consumed
 	};
 	FrameSlotData mFrameSlots[framesInFlight];
 	int mFrameSlot = 0;
@@ -153,21 +179,22 @@ private:
 
 	void FinishFrameWait(bool uploadOnly, bool clockIt);
 
-	struct TimestampQuery
-	{
-		FString name;
-		uint32_t startIndex;
-		uint32_t endIndex;
-	};
-
 	// Raised from 100. The scene pass now has ~10 groups (opaque plus its six draw lists,
 	// decals, tborder, translucent) at 2 timestamps each, and a frame with portals or
 	// mirrors re-enters RenderScene several times - three sets in one frame has been
 	// observed. Add the postprocess chain and 100 was close enough to the ceiling to start
 	// silently dropping groups, since PushGroup just stops recording when it runs out.
+	//
+	// This is the PER-SLOT count. The pool holds framesInFlight of these ranges back to back,
+	// so slot s owns [s * MaxTimestampQueries, (s+1) * MaxTimestampQueries) and a frame being
+	// recorded never writes indices a frame still executing is using. Sized from framesInFlight
+	// directly so the two cannot drift apart.
 	enum { MaxTimestampQueries = 256 };
 	std::unique_ptr<VulkanQueryPool> mTimestampQueryPool;
-	int mNextTimestampQuery = 0;
+	int mNextTimestampQuery = 0;         // offset WITHIN the current slot's range, not absolute
 	std::vector<size_t> mGroupStack;
-	std::vector<TimestampQuery> timeElapsedQueries;
+
+	// Read the timestamps the given slot recorded when it was last used, into gpuStatOutput.
+	// Only safe for a slot whose fence AdvanceFrameSlot has just waited on.
+	void ReadFrameSlotTimestamps(int slot);
 };
