@@ -756,3 +756,56 @@ retry, it is environmental rather than a device fault.
 Symbolizing a crash: the unstripped `.so` in `android/deps/prefix/arm64-v8a/lib/` matches the
 tombstone's BuildID. Use the NDK's `llvm-symbolizer --obj=<lib> 0x<pc offset>`. This is what turned
 "OpenAL crashes somewhere" into an exact line.
+
+### Running Vulkan validation
+
+`vk_debug 1` alone is close to useless, for three reasons that each fail silently.
+
+**The layer is not on the device and the NDK no longer ships one** (r21+ dropped it). Fetch the
+Android build from the Vulkan-ValidationLayers releases and drop the arm64 `.so` into
+`android/app/src/main/jniLibs/arm64-v8a/`, which the loader searches because the debug build is
+debuggable. That directory is gitignored, so nothing is committed; it adds ~26 MB to the APK, so
+take it back out when finished:
+
+    curl -sSL -o /tmp/vvl.zip https://github.com/KhronosGroup/Vulkan-ValidationLayers/releases/download/vulkan-sdk-1.4.357.0/android-binaries-1.4.357.0.zip
+    unzip -o -j /tmp/vvl.zip '*/arm64-v8a/libVkLayer_khronos_validation.so' -d android/app/src/main/jniLibs/arm64-v8a/
+
+**Synchronization validation is a layer feature, not the layer.** Enabling the layer gives core
+validation only. `vulkaninstance.cpp` now chains a `VkValidationFeaturesEXT` asking for it.
+
+**`vk_debug` lives in the ini, and the ini has more than one plausible home for it.** Console text
+input is unreachable over adb, so it must be set in `selaco-ea.ini` with the game **stopped** — a
+clean exit rewrites the ini from memory and undoes the edit. Set the existing `vk_debug=` line, the
+one next to `vk_debug_callstack` and `vk_driver`. Adding a second `vk_debug=` elsewhere in the file
+does nothing and looks exactly like it worked. Editing on the device is its own trap: toybox `sed`
+writes a literal `n` for `\n` and rejects the `a` command, so pull the file with
+`adb exec-out run-as … cat`, edit on the host, and copy it back via `/sdcard`.
+
+**Prove the layer loaded before believing any result.** Expect
+`added global layer 'VK_LAYER_KHRONOS_validation'` from the `vulkan` tag, and no
+`requested but not installed` line. Better, run a **positive control**: temporarily add
+`VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT` alongside sync validation. It fires on any real
+engine, so its output proves layer → messenger → callback → logcat works end to end. A silent run
+that has not been controlled this way is not evidence of anything — that mistake was made here
+twice, once from an unset `vk_debug` and once from a mangled `logcat -t` marker that returned zero
+for the hazards *and* the control.
+
+Count hazards as a **delta across exactly one extra launch** (`Creating Vulkan device` occurrences),
+not as an absolute: the logcat buffer rolls within minutes under validation, and `logcat -c` is
+forbidden here.
+
+What the first run found, on a title screen and one loaded level:
+
+| Hazard | Count/launch | Status |
+|---|---|---|
+| `WRITE_AFTER_WRITE`, mipmap barrier access masks | 12 refs | fixed, now 0 |
+| `READ_AFTER_WRITE`, transfer→draw on `VkHardwareBuffer.Stream` | 7 | fixed, now 0 |
+| `WRITE_AFTER_WRITE`, PP renderpass `loadOp` vs layout transition | 4–5 | **open**, upstream |
+
+The open one is `vkCmdBeginRenderPass` clearing the swapchain attachment in
+`VkPPRenderPassSetup.RenderPass`: the subpass dependency permits `COLOR_ATTACHMENT_READ` but must
+permit `COLOR_ATTACHMENT_WRITE` at `COLOR_ATTACHMENT_OUTPUT`.
+
+**Nothing was reported against the frames-in-flight machinery** — no hazard on fences, semaphores,
+delete lists or slot rotation, during play or at teardown. Coverage gap worth closing: no
+level-to-level map change has been run under validation, only title → `SE_01A`.
