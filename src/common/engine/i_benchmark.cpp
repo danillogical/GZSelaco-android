@@ -60,7 +60,18 @@ extern int rendered_lines, rendered_flats, rendered_sprites, rendered_decals;
 extern int render_vertexsplit, render_texsplit;
 extern int rendered_portals, rendered_commandbuffers;
 
-CVAR(Int, i_benchmark, 0, CVAR_ARCHIVE)
+// Deliberately NOT CVAR_ARCHIVE, unlike the tuning cvars below.
+//
+// This is the master switch for a diagnostic that writes to logcat every frame, and archiving it
+// meant switching it on once left it on forever - which is how a measurement run that was supposed
+// to be unlocked turned out to still be capped at 30 fps from a previous config. Three shipped
+// config files carried an explicit `i_benchmark 0` for no reason other than to undo that. Flags 0
+// is this codebase's idiom for a dev cvar (vk_check_offsets, i_debuginput, vk_submit_size); there
+// is no CVAR_DEBUG here.
+//
+// The tuning cvars keep CVAR_ARCHIVE: they are inert while this is 0, so they cannot surprise
+// anyone, and a measurement setup is worth keeping between launches.
+CVAR(Int, i_benchmark, 0, 0)
 // Frame rate below which a frame counts as a "dip". 26 rather than 30 so a frame that merely
 // grazes the 30 fps cap is not counted - vid_maxfps 30 means a perfectly capped frame is 33.3 ms,
 // and normal jitter around that would otherwise register as thousands of false dips.

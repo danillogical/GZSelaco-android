@@ -211,7 +211,6 @@ has burned this project three times.
 | `vid_vsync 1` | ✓ | ✓ | not in `CVARINFO.defaults`; the engine default is false |
 | `vid_maxfps 30` | ✓ | ✓ | Selaco defaults 200. 30 divides a 60 Hz panel exactly; 35 gives 1.71 vblanks and judders. Needs the relaxed floor in `v_video.cpp` — stock GZDoom clamps up to `GameTicRate` |
 | `vid_fps 1` | ✓ | ✓ | on for the beta, so a tester reports a number rather than "choppy". Revisit for release |
-| `i_benchmark 0` | ✓ | ✓ | ours, `CVAR_ARCHIVE`, so it stays on across launches unless stated |
 | `con_notifylines 0` | ✓ | ✓ | `CVAR_ARCHIVE` — otherwise console text draws over the game |
 | `vid_scalefactor 1.0` | | ✓ | `CVAR_ARCHIVE` — the A/B profiles sweep it |
 | `con_scale 0` | | ✓ | `CVAR_ARCHIVE` — benchmark profiles set 4, this puts it back to auto |
@@ -221,10 +220,16 @@ has burned this project three times.
 The last four are absent from the shipped file on purpose: they exist only to undo what the
 benchmark profiles set, and a tester never runs those.
 
-Note the pattern: apart from the first three, **every entry exists only because the cvar is
+Note the pattern: apart from the first two, **every entry exists only because the cvar is
 `CVAR_ARCHIVE` and something else once set it.** An archived cvar left unset is not "default", it
 is "whatever the last profile did" — which is how a measurement run came out silently locked at
 30 fps, and how the shipped profile nearly went out loading an experimental driver.
+
+`i_benchmark` used to be on this list for exactly that reason. It is no longer `CVAR_ARCHIVE`, so
+it cannot persist and needs no defensive line — which is the cheaper fix wherever a cvar is a pure
+diagnostic rather than a setting. The tuning cvars beside it (`i_benchmark_interval`,
+`i_benchmark_spike`, `i_dipfps`, …) stay archived deliberately: they are inert while `i_benchmark`
+is 0, so they cannot surprise anyone.
 
 ## Patches carried against upstream
 
