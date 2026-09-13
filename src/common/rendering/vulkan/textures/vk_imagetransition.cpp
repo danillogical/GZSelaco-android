@@ -114,7 +114,11 @@ void VkTextureImage::GenerateMipmaps(VulkanCommandBuffer *cmdbuffer)
 	{
 		PipelineBarrier()
 			.AddImage(Image.get(), Layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, i - 1)
-			.AddImage(Image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, i)
+			// Level i is the blit DESTINATION, so the access it is being made available for is a write.
+			// This said TRANSFER_READ, which does not match TRANSFER_DST_OPTIMAL and left the blit's
+			// write unordered against the layout transition - a WRITE_AFTER_WRITE hazard that
+			// synchronization validation reports on every mipmapped texture.
+			.AddImage(Image.get(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, i)
 			.Execute(cmdbuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 		Layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
@@ -144,8 +148,11 @@ void VkTextureImage::GenerateMipmaps(VulkanCommandBuffer *cmdbuffer)
 		mipHeight = nextHeight;
 	}
 
+	// The last level was the blit DESTINATION, so what has to be made available here is that write,
+	// not a read. TRANSFER_READ left the final blit unordered against this transition - the second
+	// half of the same WRITE_AFTER_WRITE hazard fixed in the loop above.
 	PipelineBarrier()
-		.AddImage(Image.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, i - 1)
+		.AddImage(Image.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, i - 1)
 		.Execute(cmdbuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
 	Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
