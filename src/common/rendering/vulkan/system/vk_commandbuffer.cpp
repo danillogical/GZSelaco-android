@@ -192,6 +192,30 @@ void VkCommandBufferManager::FlushCommands(bool finish, bool lastsubmit, bool up
 
 		if (mTransferCommands)
 		{
+			// Make the uploads visible to the draw commands submitted alongside them.
+			//
+			// The two command buffers go into ONE submit in order, but submission order only orders
+			// execution start - it is not a memory dependency, so a vkCmdCopyBuffer here and a
+			// vkCmdDrawIndexed reading the same buffer there may overlap with the write invisible to
+			// the read. Synchronization validation reports it as a READ_AFTER_WRITE hazard on
+			// VkHardwareBuffer.Stream: INDEX_READ at INDEX_INPUT against TRANSFER_WRITE at COPY.
+			//
+			// Upstream has the same gap and gets away with it at one frame in flight, where the
+			// preceding frame's wait happens to serialise things. At two it is live: frame N+1's
+			// uploads overlap frame N's draws by design, which is the entire point of pipelining.
+			//
+			// One global barrier rather than per-buffer ones: every buffer the transfer touched is
+			// covered, it costs a single pipeline barrier per submit, and it cannot go stale as new
+			// upload paths are added.
+			PipelineBarrier()
+				.AddMemory(VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+					VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT)
+				.Execute(mTransferCommands.get(),
+					VK_PIPELINE_STAGE_TRANSFER_BIT,
+					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
 			mTransferCommands->end();
 			commands[count++] = mTransferCommands.get();
 			TransferDeleteList->Add(std::move(mTransferCommands));
