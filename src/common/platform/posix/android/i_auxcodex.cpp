@@ -51,6 +51,7 @@
 #include <stdint.h>
 
 #include "actor.h"
+#include "c_cvars.h"
 #include "cmdlib.h"
 #include "d_player.h"
 #include "doomstat.h"
@@ -70,6 +71,12 @@
 #define RAPIDJSON_HAS_CXX11_RANGE_FOR 1
 #include "rapidjson/document.h"
 #include "rapidjson/rapidjson.h"
+
+// Dev override for the publish gate below. Flags 0, not CVAR_ARCHIVE: this is a diagnostic, and an
+// archived diagnostic is how this project ended up with three config files carrying a line whose only
+// job was to switch one back off. It also must not ship on - showing the codex at the menu displays a
+// stale unlock state.
+CVAR(Bool, aux_codex_anywhere, false, 0)
 
 // The schema this code was written against. Refuse anything else - see the spoiler note above.
 static const char *const SupportedVersion = "1.0";
@@ -291,6 +298,7 @@ static bool LoadManual()
 static bool ProbeBroken = false;
 static uint64_t LastMask = 0;
 static int LastVisible = -1;
+static bool LastPublish = false;
 static int LastState = -1;   // 0 no class, 1 no player, 2 no item, 3 bad field, 4 ok
 
 static bool ReadUnlockMask(uint64_t &mask, int &state)
@@ -398,8 +406,10 @@ void I_AuxCodexProbe()
 		return;
 	}
 
-	// Load the manual only once there is a game to read it from, so a title-screen frame does not
-	// pay for it. Gate names are discovered here, which is why the mask is read again below.
+	// Load the manual as soon as there is a game to read it from, even at the title screen. Parsing
+	// early is deliberate and is NOT the same decision as displaying early: it front-loads the 42 KB
+	// parse away from gameplay, and it means the tree can be exercised without loading a save.
+	// Whether the panel may SHOW any of it is decided separately, below.
 	if (state >= 2 && !ManualLoaded && !ManualRefused)
 	{
 		if (LoadManual())
@@ -410,12 +420,30 @@ void I_AuxCodexProbe()
 	if (ManualLoaded && RootNode >= 0)
 		CountVisible(RootNode, mask, bridgeOk, entries, sections);
 
+	// PUBLISH GATE: a real level only, not the title screen.
+	//
+	// This is a correctness rule, not presentation. TITLEMAP is GS_TITLELEVEL - "a combination of
+	// GS_LEVEL and GS_DEMOSCREEN" (common/engine/gamestate.h:15) - and it has its OWN player pawn
+	// with its own fresh ManualItem. So at the menu the mask reads 0 no matter what the player's
+	// save has unlocked, and a codex shown there would confidently display the wrong unlock state
+	// until a level loads. Showing nothing is better than showing stale progress.
+	//
+	// GS_LEVEL also stays true while the pause menu is open, so the panel does not blank when the
+	// player opens the menu mid-level, which is what you want.
+	const bool publish = (gamestate == GS_LEVEL) || aux_codex_anywhere;
+	if (!publish)
+	{
+		entries = 0;
+		sections = 0;
+	}
+
 	// Edge-triggered: silence unless the verdict actually changed.
-	if (state == LastState && mask == LastMask && entries == LastVisible)
+	if (state == LastState && mask == LastMask && entries == LastVisible && publish == LastPublish)
 		return;
 	LastState = state;
 	LastMask = mask;
 	LastVisible = entries;
+	LastPublish = publish;
 
 	switch (state)
 	{
@@ -423,8 +451,16 @@ void I_AuxCodexProbe()
 	case 1: Printf("AuxCodex: bridge=waiting (no player pawn yet)\n"); break;
 	case 2: Printf("AuxCodex: bridge=waiting (player has no ManualItem yet)\n"); break;
 	default:
-		Printf("AuxCodex: bridge=ok mask=0x%016llx visible=%d entries, %d sections\n",
-			(unsigned long long)mask, entries, sections);
+		if (!publish)
+		{
+			Printf("AuxCodex: bridge=ok mask=0x%016llx parsed, NOT published (gamestate %d is not a level)\n",
+				(unsigned long long)mask, (int)gamestate);
+		}
+		else
+		{
+			Printf("AuxCodex: bridge=ok mask=0x%016llx visible=%d entries, %d sections\n",
+				(unsigned long long)mask, entries, sections);
+		}
 		break;
 	}
 }
