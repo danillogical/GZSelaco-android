@@ -71,6 +71,7 @@ static bool AuxBroken = false;
 
 static jclass AuxClass = nullptr;
 static jmethodID AuxPushState = nullptr;
+static jmethodID AuxPushCodex = nullptr;
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_selaco_game_AuxPanel_nativeAuxEnable(JNIEnv *env, jclass cls, jboolean on)
@@ -105,7 +106,62 @@ static bool AuxResolve(JNIEnv *env)
 		AuxBroken = true;
 		return false;
 	}
+
+	AuxPushCodex = env->GetStaticMethodID(AuxClass, "pushCodex", "(Ljava/lang/String;)V");
+	if (env->ExceptionCheck() || AuxPushCodex == nullptr)
+	{
+		env->ExceptionClear();
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: pushCodex not found, second-screen panel disabled\n");
+		AuxBroken = true;
+		return false;
+	}
 	return true;
+}
+
+// Publish the codex table of contents, or an empty string to clear it.
+//
+// Called ONLY when the visible set changes - a gate opening, the publish gate flipping, a level
+// load - never per frame. That matters for two reasons. This is the engine thread's first JNI
+// OBJECT allocation (NewStringUTF), which is its first real interaction with ART's GC, and the
+// payload is a few hundred bytes; doing it at frame rate would be both wasteful and a new
+// suspension point in the render loop.
+//
+// Passing an empty string is how the panel is CLEARED, and it is deliberate rather than an
+// optimisation: Java holds no codex state of its own, so the last push is always the authority.
+// A gate closing pushes "" and the content is gone. Nothing on the Java side can outlive the
+// unlock state that justified it, which is the retention leak a design review found in an earlier
+// plan for this.
+void I_AuxPanelPushCodex(const char *toc)
+{
+	if (AuxBroken || !AuxLive.load(std::memory_order_relaxed))
+		return;
+
+	JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+	if (env == nullptr)
+		return;
+	if (AuxClass == nullptr && !AuxResolve(env))
+		return;
+
+	jstring js = env->NewStringUTF(toc != nullptr ? toc : "");
+	if (env->ExceptionCheck() || js == nullptr)
+	{
+		env->ExceptionClear();
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: NewStringUTF failed, codex push abandoned\n");
+		return;
+	}
+
+	env->CallStaticVoidMethod(AuxClass, AuxPushCodex, js);
+
+	// The engine thread's native frame never returns, so a leaked local ref would accumulate for
+	// the life of the process rather than being reclaimed at a frame boundary.
+	env->DeleteLocalRef(js);
+
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: pushCodex threw, second-screen panel disabled\n");
+		AuxBroken = true;
+	}
 }
 
 // Called once per frame from D_Display, before screen->BeginFrame().

@@ -3,7 +3,6 @@ package com.selaco.game;
 import android.app.Presentation;
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
@@ -42,7 +41,22 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
         sState = gametic;
     }
 
+    /**
+     * native -> Java: the visible codex table of contents, as "depth:title" lines.
+     *
+     * An EMPTY string means "show nothing" and is how the panel is cleared - when the player is at
+     * the menu, or the bridge cannot confirm unlock state. Java deliberately keeps no codex state of
+     * its own beyond this one reference, so the last push is always the authority and nothing here
+     * can outlive the unlock state that justified it.
+     *
+     * Called only when the visible set changes, never per frame.
+     */
+    static void pushCodex(String toc) {
+        sCodex = (toc == null) ? "" : toc;
+    }
+
     private static volatile int sState = 0;
+    private static volatile String sCodex = "";
 
     private final Context mContext;
     private final DisplayManager mDisplayManager;
@@ -202,21 +216,76 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
 
         private static final long REDRAW_MS = 66;
 
-        private final Paint mPaint = new Paint();
+        private static final int BG = 0xFF12161C;
+
+        private final Paint mTitle = new Paint();
+        private final Paint mBody = new Paint();
 
         AuxView(Context context) {
             super(context);
-            mPaint.setColor(Color.WHITE);
-            mPaint.setTextSize(96f);
-            mPaint.setAntiAlias(true);
+            mTitle.setTextSize(52f);
+            mTitle.setFakeBoldText(true);
+            mTitle.setAntiAlias(true);
+            mBody.setTextSize(34f);
+            mBody.setAntiAlias(true);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            canvas.drawColor(Color.DKGRAY);
-            canvas.drawText("gametic " + sState, 40f, 140f, mPaint);
+            canvas.drawColor(BG);
+
+            // Snapshot once: the game thread can replace it mid-draw, and a half-old, half-new
+            // frame would be worse than a frame that is one push behind.
+            final String toc = sCodex;
+
+            if (toc.isEmpty()) {
+                drawPlaceholder(canvas);
+            } else {
+                drawCodex(canvas, toc);
+            }
             postInvalidateDelayed(REDRAW_MS);
+        }
+
+        /** Shown whenever there is no codex to show - the menu, or an unconfirmed bridge. */
+        private void drawPlaceholder(Canvas canvas) {
+            mTitle.setColor(0xFF6E7A8A);
+            canvas.drawText("SELACO", 48f, 110f, mTitle);
+            mBody.setColor(0xFF54606E);
+            canvas.drawText("codex available in-game", 48f, 168f, mBody);
+        }
+
+        private void drawCodex(Canvas canvas, String toc) {
+            mTitle.setColor(0xFFDCE3EE);
+            canvas.drawText("CODEX", 48f, 86f, mTitle);
+
+            float y = 150f;
+            final float lineH = 46f;
+            final int h = getHeight();
+
+            int from = 0;
+            while (from < toc.length() && y < h - 12f) {
+                int nl = toc.indexOf('\n', from);
+                if (nl < 0) nl = toc.length();
+                final String rec = toc.substring(from, nl);
+                from = nl + 1;
+
+                // "depth:title" - malformed records are skipped rather than drawn raw, so a protocol
+                // mistake shows up as missing text instead of garbage on screen.
+                final int colon = rec.indexOf(':');
+                if (colon <= 0) continue;
+                int depth;
+                try {
+                    depth = Integer.parseInt(rec.substring(0, colon));
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                final String title = rec.substring(colon + 1);
+
+                mBody.setColor(depth <= 1 ? 0xFFBFC9D8 : 0xFF8A94A4);
+                canvas.drawText(title, 48f + depth * 34f, y, mBody);
+                y += lineH;
+            }
         }
 
         @Override

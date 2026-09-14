@@ -375,6 +375,27 @@ static bool NodeOpen(const CodexNode &node, uint64_t mask, bool bridgeOk)
 	return ((mask >> node.GateBit) & 1) != 0;
 }
 
+// Append the visible subtree as "depth:title" lines. Titles are short human strings and cannot
+// contain a newline, so newline-separated records need no escaping and stay readable in a log.
+//
+// Only TITLES go across, not "content" bodies. That is this milestone's scope: it keeps the payload
+// at a few hundred bytes, and it means the panel cannot display body text before the layout and
+// scrolling for it exist.
+static void BuildToc(int index, uint64_t mask, bool bridgeOk, int depth, FString &out)
+{
+	const CodexNode &node = Nodes[index];
+	if (!NodeOpen(node, mask, bridgeOk))
+		return;                            // prunes the subtree - the conjunction, same as CountVisible
+
+	if (index != RootNode)
+	{
+		out.AppendFormat("%d:%s\n", depth, node.Title.GetChars());
+	}
+
+	for (unsigned i = 0; i < node.Children.Size(); i++)
+		BuildToc(node.Children[i], mask, bridgeOk, depth + 1, out);
+}
+
 static void CountVisible(int index, uint64_t mask, bool bridgeOk, int &entries, int &sections)
 {
 	const CodexNode &node = Nodes[index];
@@ -444,6 +465,17 @@ void I_AuxCodexProbe()
 	LastMask = mask;
 	LastVisible = entries;
 	LastPublish = publish;
+
+	// Publish on exactly the edge we just logged, so the panel and the log can never disagree about
+	// what the player is being shown. An unpublished state pushes "" and the panel clears itself.
+	{
+		FString toc;
+		if (publish && ManualLoaded && RootNode >= 0)
+			BuildToc(RootNode, mask, bridgeOk, 0, toc);
+
+		extern void I_AuxPanelPushCodex(const char *toc);
+		I_AuxPanelPushCodex(toc.GetChars());
+	}
 
 	switch (state)
 	{
