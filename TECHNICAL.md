@@ -855,3 +855,83 @@ so no end-of-frame flush puts the command buffer in the same list. Steady-state 
 **Nothing was reported against the frames-in-flight machinery** — no hazard on fences, semaphores,
 delete lists or slot rotation, during play or at teardown. Coverage gap worth closing: no
 level-to-level map change has been run under validation, only title → `SE_01A`.
+
+---
+
+## The second screen, and reading Selaco's codex from C++
+
+The AYN Thor is a 3DS-style clamshell: both panels face the player, so a codex on the lower one is
+useful rather than decorative. Display 4 (`local:4630946482288158084`, 1240x1080, `FLAG_PRESENTATION`)
+is the target.
+
+### The panel does not involve the renderer at all
+
+`AuxPanel.java` shows an `android.app.Presentation` and draws an ordinary `View`; native pushes a few
+primitives to it over JNI. **Nothing Vulkan is created, submitted, presented or waited on**, so the
+renderer is bit-identical to a build without the feature — which is the entire safety argument. An
+optional screen must not be able to take the main one down.
+
+Two designs that *did* add a second Vulkan surface were built out on paper and both failed adversarial
+review: one on an illegal readback (the hardware canvas image is created `COLOR_ATTACHMENT | SAMPLED`
+at `vk_hwtexture.cpp:254`, with no `TRANSFER_SRC`), one on recording an aux blit outside the submit
+meant to synchronise it. Prior art confirms the hazard is real rather than theoretical — azahar's own
+secondary present thread can starve its frame pool and freeze the *main* screen, survived only by
+keeping a hidden `VirtualDisplay` permanently alive, which costs every single-screen user a full extra
+render and present per frame. Do not reopen that approach without reading those findings.
+
+**`FLAG_NOT_FOCUSABLE` is mandatory, for a reason specific to this engine.** If the panel takes focus,
+`SDL_WINDOWEVENT_FOCUS_LOST` sets `AppActive = false` (`sdlglvideo.cpp:1129-1131`) and `D_Display`
+then returns early (`d_main.cpp:945-948`) — freezing **both** screens while the process runs perfectly.
+`FLAG_NOT_TOUCHABLE` is a *separate* bit and is not set, so touch still works. `FLAG_KEEP_SCREEN_ON`
+must be on the Presentation's own window or the panel sleeps, and a sleeping panel screencaps pure
+black, which reads as a broken renderer.
+
+Verified on device: the Presentation composites **above** `rip.moth.cocoonshell`'s activity, which
+already owned display 4. Neither prior-art codebase handles a foreign owner, so this was inference
+until tested.
+
+### Reading ZScript state from C++ without shipping any ZScript
+
+Selaco's codex content is **not** code: `/MANUAL.json`, a 42,172-byte lump, read by ZScript through
+`Wads.CheckNumForFullName` — thin wrappers over the engine's own C++ file system. Unlock state is a
+`Map<Name, Int> unlocks` on `ManualItem : Inventory`, written by `Unlock()` as
+`insert(key, had ? 1 : 2)`.
+
+C++ can read that map directly, and it is an established in-tree pattern rather than a layout hack:
+`ZSMap` derives publicly from `TMap` (`scripting/core/maps.h:19`) and is placement-constructed into
+the field's storage (`types.cpp:2513`), and `vmnatives.cpp:63` already declares
+`static ZSMap<FName, DObject*> AllServices;` in C++ and hands the same bytes to ZScript as
+`Map<Name, Service>`. Field lookup follows `maploader.cpp:1256`. So no ZScript of ours ships, there is
+no pk3 competing with Selaco's, and a non-Selaco load degrades to a blank panel because every lookup
+returns null rather than erroring.
+
+**Use `CheckKey`, never `Map.Get`.** `Get` is the *inserting* accessor: calling it would mutate the
+player's unlock map, corrupt their save, and make Selaco's own codex print `???` for sections it should
+show.
+
+**The gate test is `!= 0`** — `manual.zs:105-109` and `:176-184`. Three other sites look like the
+visibility predicate and are not: `:86` (`> 1`) drives the NEW badge, `:121` feeds `showLocked`, and
+`:124` feeds the `???` teaser. Picking one of those is how you leak or over-hide.
+
+### The spoiler rules, which are the acceptance criterion
+
+Showing a locked entry is worse than showing nothing, so every branch resolves to LOCKED:
+
+- **Version gate.** The manual is refused outright unless `"version"` is exactly `1.0`.
+- **Key whitelist.** Sections carry `title`/`sections`/`entries`/`id`/`unlock`; entries carry
+  `title`/`content`/`unlock`/`noheader`. Any other key means Selaco may have added gating we do not
+  model, so that node *and its subtree* are locked. Without this, a new gate key such as `requires`
+  would read as "no gate" and publish locked content — the fail-open drift a review caught.
+- **Conjunctive visibility.** Three entries — Overview, Workbench, Safe Room Extension — carry no
+  unlock key of their own and are hidden solely by their section's `safesect` gate. Per-node filtering
+  leaks "Safe Room Extension", which names a mechanic the player has not found.
+- **Gate names come from the file**, never a hardcoded list. `safesect` is section-level and would be
+  missed by any list derived only from entry unlocks.
+
+Measured on the shipped file: **51 nodes, 17 gates, 21 of 40 entries and 9 of 10 sections visible with
+nothing unlocked**, rising to 22 entries with `keypad` open. Those numbers were predicted from the JSON
+before deploying and matched exactly — which is what caught a bug that did not crash:
+`Nodes[self].Children.Push(BuildNode(...))` evaluates the subscript into a reference before the
+recursive call reallocates the array, so every child link was written through a dangling reference. It
+reported `visible=0` against a correctly parsed tree, which reads as "the predicate is too strict"
+rather than "the tree is corrupt". **Predict the count before believing a run.**
