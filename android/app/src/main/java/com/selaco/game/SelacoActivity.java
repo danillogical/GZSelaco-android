@@ -84,6 +84,26 @@ public class SelacoActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // Second-screen panel, on hardware that has one. Started after the super call and after the
+        // early-return path above, so a launch that bounces to the storage-permission screen never
+        // touches it.
+        mAuxPanel = new AuxPanel(this);
+        mAuxPanel.start();
+    }
+
+    private AuxPanel mAuxPanel;
+
+    @Override
+    protected void onDestroy() {
+        // A Presentation must not outlive the activity that owns it, or the window leaks and the
+        // framework complains. Tear it down here rather than in onPause: finishing it on every pause
+        // would also tear it down when the user just glances at the notification shade.
+        if (mAuxPanel != null) {
+            mAuxPanel.stop();
+            mAuxPanel = null;
+        }
+        super.onDestroy();
     }
 
     /** True if Selaco.ipk3 is already in our own external files dir (the adb route). */

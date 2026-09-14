@@ -1082,6 +1082,16 @@ void D_Display ()
 		BenchFrameEndMs = 0.0;
 	}
 
+#ifdef __ANDROID__
+	// Push a frame of state to the second-screen panel, if one is up. Costs a relaxed atomic load
+	// and two bool tests when it is not, which is every single-screen device. Nothing Vulkan; see
+	// common/platform/posix/android/i_auxpanel.cpp for why that is the whole safety argument.
+	//
+	// Deliberately BEFORE screen->BeginFrame(): this must not sit between BeginFrame and the
+	// present, where a mistake could land inside the frame the main screen depends on.
+	{ extern void I_AuxPanelFrame(); I_AuxPanelFrame(); }
+#endif
+
 	screen->BeginFrame();
 	twod->ClearClipRect();
 	if ((gamestate == GS_LEVEL || gamestate == GS_TITLELEVEL) && gametic != 0)
