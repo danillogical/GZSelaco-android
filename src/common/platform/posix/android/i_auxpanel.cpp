@@ -115,6 +115,11 @@ static bool AuxResolve(JNIEnv *env)
 // shown a panel, so a device with one screen never gets past line one.
 void I_AuxPanelFrame()
 {
+	// M1 probe for the codex bridge. Runs regardless of whether a panel is up, because it publishes
+	// nothing and its whole purpose is to answer "can C++ read the unlock map" on real hardware.
+	// Remove this call once that question is settled.
+	{ extern void I_AuxCodexProbe(); I_AuxCodexProbe(); }
+
 	if (AuxBroken || !AuxLive.load(std::memory_order_relaxed))
 		return;
 
