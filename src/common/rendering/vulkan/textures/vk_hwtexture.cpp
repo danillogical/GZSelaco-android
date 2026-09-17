@@ -251,7 +251,11 @@ void VkHardwareTexture::CreateImage(FTexture *tex, int translation, int flags)
 		mImage->Image = ImageBuilder()
 			.Format(format)
 			.Size(w, h)
-			.Usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+			// TRANSFER_SRC lets a canvas be the source of a vkCmdCopyImageToBuffer, which is how the
+			// Android second screen gets its pixels; without it the copy is invalid usage. This is the
+			// isHardwareCanvas() branch of CreateImage, so the flag lands only on canvases rather than
+			// on every texture in the game.
+			.Usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
 			.DebugName("VkHardwareTexture.mImage")
 			.Create(fb->device.get());
 

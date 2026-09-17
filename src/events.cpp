@@ -40,6 +40,7 @@
 #include "d_net.h"
 #include "g_game.h"
 #include "info.h"
+#include "projectionscope.h"
 #include "utf8.h"
 
 EventManager staticEventManager;
@@ -382,6 +383,16 @@ bool EventManager::SendNetworkEvent(FString name, int arg1, int arg2, int arg3, 
 {
 	if (gamestate != GS_LEVEL && gamestate != GS_TITLELEVEL)
 		return false;
+
+	// A passive projection of the game's UI (projectionscope.h) has nobody asking for it, so nothing
+	// it does may be recorded in the player's savegame. Refused here rather than at the script native
+	// because this is the one funnel every caller passes through, and because refusing ahead of the
+	// first Net_Write is what guarantees no partial message is ever emitted.
+	if (FProjectionScope::Active())
+	{
+		++FProjectionScope::Suppressed;
+		return false;
+	}
 
 	Net_WriteInt8(DEM_NETEVENT);
 	Net_WriteString(name.GetChars());

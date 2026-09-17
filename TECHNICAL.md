@@ -864,17 +864,25 @@ The AYN Thor is a 3DS-style clamshell: both panels face the player, so a codex o
 useful rather than decorative. Display 4 (`local:4630946482288158084`, 1240x1080, `FLAG_PRESENTATION`)
 is the target.
 
-### The panel does not involve the renderer at all
+### The panel has no surface of its own, but it is no longer free
 
-`AuxPanel.java` shows an `android.app.Presentation` and draws an ordinary `View`; native pushes a few
-primitives to it over JNI. **Nothing Vulkan is created, submitted, presented or waited on**, so the
-renderer is bit-identical to a build without the feature — which is the entire safety argument. An
-optional screen must not be able to take the main one down.
+`AuxPanel.java` shows an `android.app.Presentation` and draws an ordinary `View`. There is **no second
+Vulkan surface, no second swapchain and no present queue**, and that is still the safety argument: an
+optional screen must not be able to take the main one down, and it cannot wedge a swapchain it does not
+share.
 
-Two designs that *did* add a second Vulkan surface were built out on paper and both failed adversarial
-review: one on an illegal readback (the hardware canvas image is created `COLOR_ATTACHMENT | SAMPLED`
-at `vk_hwtexture.cpp:254`, with no `TRANSFER_SRC`), one on recording an aux blit outside the submit
-meant to synchronise it. Prior art confirms the hazard is real rather than theoretical — azahar's own
+**It does now cost the main render path, and an earlier version of this section wrongly said it did
+not.** Getting engine 2D content onto the panel takes three things: `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`
+added to every hardware canvas image (`vk_hwtexture.cpp`, the `isHardwareCanvas()` branch), a
+`vkCmdCopyImageToBuffer` plus two layout transitions recorded into the frame's draw command buffer, and
+a `WaitForCommands(false)` that drains every outstanding fence. That last one measures **~30 ms in a
+real level and ~1 ms at the title screen** — a whole frame at `vid_maxfps 30`, which is exactly why the
+readback is edge-triggered rather than paced. Measure it in-level or the number is wrong by thirty.
+
+An earlier *second-surface* design was rejected partly on the grounds that the canvas image had no
+`TRANSFER_SRC`; that flag is now present, so only the second half of that argument still stands —
+recording an aux blit outside the submit meant to synchronise it. Prior art confirms the hazard is real
+rather than theoretical — azahar's own
 secondary present thread can starve its frame pool and freeze the *main* screen, survived only by
 keeping a hidden `VirtualDisplay` permanently alive, which costs every single-screen user a full extra
 render and present per frame. Do not reopen that approach without reading those findings.

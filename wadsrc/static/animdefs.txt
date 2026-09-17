@@ -405,3 +405,8 @@ animateddoor DORALN01
 	pic DORALN08 
 
 warp texture b@ckdrop 0.83445
+
+// Offscreen 2D surface for the Android second screen. Nothing in the world samples it; it exists
+// so the engine has somewhere to draw that is not the swapchain, and the Android port reads the
+// pixels back to the CPU from there. Sized to the AYN Thor's second panel.
+canvastexture AUXCANVAS 1240 1080

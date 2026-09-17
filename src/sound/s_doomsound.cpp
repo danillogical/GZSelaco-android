@@ -68,6 +68,7 @@
 #include "v_draw.h"
 #include "m_argv.h"
 #include "s_loader.h"
+#include "projectionscope.h"
 
 
 // PUBLIC DATA DEFINITIONS -------------------------------------------------
@@ -426,6 +427,18 @@ DEFINE_ACTION_FUNCTION(DObject, S_StartSound)
 	PARAM_FLOAT(attn);
 	PARAM_FLOAT(pitch);
 	PARAM_FLOAT(startTime);
+
+	// A passive projection of the game's UI (projectionscope.h) has nobody asking for it, so it must not
+	// be audible any more than it may be recorded. Refused on the SCRIPT NATIVE and only for CHANF_UI:
+	// this native is shared with gameplay code that omits flags entirely, and the shared S_SoundPitch
+	// helper below is also how S_PlaySoundPitch plays a CHANF_LOCAL actor sound, so a wider guard would
+	// put gameplay audio inside the projection's blast radius. Full reasoning in projectionscope.h.
+	if (FProjectionScope::Active() && (flags & CHANF_UI))
+	{
+		++FProjectionScope::SuppressedSounds;
+		ACTION_RETURN_INT(0);
+	}
+
 	ACTION_RETURN_INT(S_SoundPitch(channel, EChanFlags::FromInt(flags), id, static_cast<float>(volume), static_cast<float>(attn), static_cast<float>(pitch), static_cast<float>(startTime)));
 	return 1;
 }

@@ -2,8 +2,10 @@ package com.selaco.game;
 
 import android.app.Presentation;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
-import android.graphics.Paint;
+import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
 import android.util.Log;
@@ -11,17 +13,25 @@ import android.view.Display;
 import android.view.View;
 import android.view.WindowManager;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
 /**
  * Second-screen panel for dual-screen Android handhelds (the AYN Thor is a 3DS-style clamshell, so
  * both panels face the player).
  *
- * The engine knows nothing about this. No Vulkan surface, no swapchain, no renderer participation -
- * the panel is an ordinary Presentation drawing an ordinary View, and native only ever pushes a few
- * primitives into it. That is deliberate: an optional second screen must not be able to take the
- * main one down, and the cheapest guarantee is to give it no graphics resources to share.
+ * The engine knows nothing about this. No Vulkan surface, no swapchain, no present queue - the panel
+ * is an ordinary Presentation drawing an ordinary View, and native pushes it a finished RGBA readback
+ * of an offscreen canvas. An optional second screen must not be able to take the main one down, and
+ * sharing no long-lived graphics resource with the main swapchain is what guarantees that; the
+ * readback itself is not free, and i_auxcanvas.cpp documents what it costs.
  *
- * MILESTONE SCOPE: grey rectangle plus one number. It exists to falsify four structural
- * assumptions before any content is built - see i_auxpanel.cpp for the list.
+ * What the panel shows, in order: the codex readback if one has arrived, else Selaco's own STARTUP.png
+ * decoded out of the player's ipk3, else black.
  */
 public final class AuxPanel implements DisplayManager.DisplayListener {
 
@@ -31,32 +41,113 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
     private static native void nativeAuxEnable(boolean on);
 
     /**
-     * native -> Java, called from the GAME thread at frame rate.
+     * native -> Java: a completed canvas readback, called from the GAME thread when the canvas
+     * content changes (and on mode 4's publish interval), never at full frame rate - each readback
+     * costs a full device stall, see i_auxpanel.cpp.
      *
-     * It must never block, allocate or lock: a wait here would stall the render loop and freeze
-     * BOTH screens, which is the single failure route this whole design exists to avoid. A plain
-     * volatile store is all it is allowed to do. The panel picks the value up on its own clock.
+     * Buffer-safety discipline for the JNI side: {@code buffer} aliases the engine's persistent
+     * staging mapping. copyPixelsFromBuffer below completes synchronously, so by the time this
+     * method returns every byte has been copied out of native memory - the game thread is then free
+     * to start its next readback into that same native buffer, and the UI thread never touches
+     * native memory at all, only a Bitmap copy made here.
+     *
+     * That copy is double-buffered on purpose. A single reused Bitmap would let this call's
+     * copyPixelsFromBuffer mutate pixels that AuxView.onDraw is concurrently reading via drawBitmap
+     * on the other thread - a torn frame, not a crash, but the device-verification step for this
+     * transport reads a screencap to judge orientation and channel order, and a tear at that exact
+     * moment would be indistinguishable from a real transport bug. Writing into the buffer that is
+     * NOT currently published and then publishing it through the existing volatile store removes
+     * that ambiguity for a fixed extra ~5.3 MB.
      */
-    static void pushState(int gametic) {
-        sState = gametic;
+    static void pushPixels(ByteBuffer buffer, int w, int h) {
+        synchronized (sPixelsLock) {
+            // The panel went away between the engine deciding to push and this call arriving.
+            // nativeAuxEnable(false) is a relaxed store the game thread may not have observed yet, so
+            // this is the only test that actually orders against releasePresentation - without it the
+            // store below republishes a torn-down panel's last frame and the NEXT presentation opens on
+            // it instead of on the splash.
+            if (sView == null) {
+                return;
+            }
+
+            // Flip to the other slot before writing, so this write can never land on the Bitmap sPixels
+            // currently points at - that Bitmap may be mid-read on the UI thread right now.
+            final int back = sPixelsIndex ^ 1;
+            Bitmap bmp = sPixelsBuf[back];
+            if (bmp == null || bmp.getWidth() != w || bmp.getHeight() != h) {
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                sPixelsBuf[back] = bmp;
+            }
+            // rewind() is mandatory, not defensive. copyPixelsFromBuffer reads from the buffer's current
+            // position and advances it by the bytes consumed, and the native side hands us the SAME
+            // cached direct buffer every push - so without this the second push finds position at
+            // capacity, sees zero remaining, and throws "Buffer not large enough for pixels".
+            buffer.rewind();
+            bmp.copyPixelsFromBuffer(buffer);
+
+            sPixelsIndex = back;
+            sPixels = bmp;
+        }
+
+        final AuxView view = sView;
+        if (view != null) {
+            view.postInvalidate();
+        }
     }
 
     /**
-     * native -> Java: the visible codex table of contents, as "depth:title" lines.
+     * native -> Java, called once on level exit, best-effort. Not the AuxLastMode/AuxWasLive
+     * machinery the rest of this file uses for edge detection - the caller just notices gamestate
+     * leaving GS_LEVEL with a local flag, and a missed or doubled call here is a cosmetic frame or
+     * two, not a correctness bug worth more machinery.
      *
-     * An EMPTY string means "show nothing" and is how the panel is cleared - when the player is at
-     * the menu, or the bridge cannot confirm unlock state. Java deliberately keeps no codex state of
-     * its own beyond this one reference, so the last push is always the authority and nothing here
-     * can outlive the unlock state that justified it.
-     *
-     * Called only when the visible set changes, never per frame.
+     * Nulling sPixels is the entire effect: onDraw already prefers sStartupImage and then black once
+     * there is no codex frame to show, so clearing the stale one is all that is needed to fall
+     * through to whichever of those applies.
      */
-    static void pushCodex(String toc) {
-        sCodex = (toc == null) ? "" : toc;
+    static void clearPixels() {
+        sPixels = null;
+        // Snapshotted: sView is volatile and the UI thread nulls it in releasePresentation, so
+        // testing the field and then dereferencing it can see two different values.
+        final AuxView view = sView;
+        if (view != null) {
+            view.postInvalidate();
+        }
     }
 
-    private static volatile int sState = 0;
-    private static volatile String sCodex = "";
+    // Selaco's own startup splash, decoded once from the player's ipk3 and reused for the life of the
+    // process - see loadStartupImage. Shown by AuxView whenever there is no codex frame; never shipped
+    // in the APK, since Selaco is a commercial asset and this repo is public.
+    private static volatile Bitmap sStartupImage;
+    private static boolean sStartupLoadStarted = false;
+
+    // Two Bitmaps, alternated by pushPixels: one may be published (referenced by sPixels and
+    // possibly mid-read by onDraw) while the other is being written.
+    //
+    // Guarded by sPixelsLock rather than left to the game thread, because releasePresentation()
+    // clears them from the UI THREAD. These are plain fields, so without the lock the game thread
+    // has no happens-before against that teardown: it could miss the nulls entirely (retaining
+    // ~10 MB of Bitmaps) and, worse, finish a push that was already in flight and republish a
+    // dead panel's last frame into the next presentation. The lock is uncontended on every normal
+    // push and releasePresentation is rare, so the cost is nil.
+    private static final Object sPixelsLock = new Object();
+    private static final Bitmap[] sPixelsBuf = new Bitmap[2];
+    private static int sPixelsIndex = 0;
+    private static volatile Bitmap sPixels;
+
+    // Set by the currently-live AuxView so pushPixels has something to invalidate; cleared in
+    // releasePresentation so a push after teardown cannot touch a dismissed view.
+    //
+    // Safe against a stale clobber because AuxPanel's own bookkeeping (start/stop, and updateDisplay
+    // via the DisplayListener callbacks) all run on one Looper: registerDisplayListener(this, null)
+    // binds the callbacks to the calling thread's Looper, which is the same UI thread start()/stop()
+    // are called from (SelacoActivity.onCreate/onDestroy). Within updateDisplay(), releasePresentation()
+    // (which nulls sView) always runs to completion BEFORE the replacement AuxPresentation is
+    // constructed and shown - Presentation.show() calls onCreate(), and therefore the new AuxView's
+    // constructor, synchronously on the calling thread, not via a posted message. So there is no
+    // ordering in which a new AuxView's "sView = this" could run before the old one's "sView = null",
+    // and the null can never clobber a live reference.
+    private static volatile AuxView sView;
 
     private final Context mContext;
     private final DisplayManager mDisplayManager;
@@ -75,6 +166,66 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
         }
         mDisplayManager.registerDisplayListener(this, null);
         updateDisplay();
+        loadStartupImageAsync();
+    }
+
+    /**
+     * Kick off the STARTUP.png decode on a background thread. onCreate is on the critical path to
+     * the game window appearing, so this must never block it - the zip open and decode of a ~94 KB
+     * PNG only costs a few ms, but a few ms here is a few ms of a first frame that has nothing else
+     * to wait on.
+     */
+    private void loadStartupImageAsync() {
+        if (sStartupLoadStarted) {
+            return;     // decode once and reuse, even across a second AuxPanel on the same process
+        }
+        sStartupLoadStarted = true;
+
+        final Context context = mContext;
+        new Thread(() -> {
+            Bitmap bmp = loadStartupImage(context);
+            if (bmp != null) {
+                sStartupImage = bmp;
+                // Snapshotted: sView is volatile and the UI thread nulls it in releasePresentation.
+                final AuxView view = sView;
+                if (view != null) {
+                    view.postInvalidate();
+                }
+            }
+        }, "AuxStartupLoad").start();
+    }
+
+    /**
+     * Read STARTUP.png out of the player's own Selaco.ipk3. Never bundled in the APK - it is a
+     * commercial game asset and this repo is public - so if neither copy of the ipk3 exists yet, the
+     * panel simply has no splash to show, which is correct behaviour, not a failure to log.
+     */
+    private static Bitmap loadStartupImage(Context context) {
+        File extDir = context.getExternalFilesDir(null);
+        // The adb route (pushed into our own external files dir) and the public folder the README
+        // tells users to use - check both, prefer whichever exists.
+        File candidate1 = (extDir != null) ? new File(extDir, "Selaco.ipk3") : null;
+        File candidate2 = new File("/sdcard/Selaco/Selaco.ipk3");
+        File ipk3 = (candidate1 != null && candidate1.isFile()) ? candidate1
+                : (candidate2.isFile() ? candidate2 : null);
+        if (ipk3 == null) {
+            return null;
+        }
+
+        try (ZipFile zip = new ZipFile(ipk3)) {
+            // Plain "STARTUP.png" - no directory, and unlike most entries in this archive, no
+            // backslash separators to worry about.
+            ZipEntry entry = zip.getEntry("STARTUP.png");
+            if (entry == null) {
+                return null;
+            }
+            try (InputStream in = zip.getInputStream(entry)) {
+                return BitmapFactory.decodeStream(in);
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "AuxPanel: could not read STARTUP.png from " + ipk3, e);
+            return null;
+        }
     }
 
     void stop() {
@@ -163,8 +314,9 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
     }
 
     private void releasePresentation() {
-        // Tell native to stop BEFORE the window goes away, so no push can be in flight against a
-        // dismissed presentation.
+        // Tell native to stop first, so it stops asking. This is a hint rather than a barrier -
+        // AuxLive is a relaxed store the game thread may not see for a frame - so the actual
+        // ordering against an in-flight push is the sPixelsLock section below.
         nativeAuxEnable(false);
 
         if (mPresentation != null) {
@@ -172,6 +324,20 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
             mPresentation = null;
         }
         mDisplayId = -1;
+
+        // The Bitmaps and view reference must not outlive this Presentation: the next one starts
+        // from the startup image (or black) rather than one frame of a torn-down window's last pixels.
+        //
+        // Under sPixelsLock because pushPixels runs on the GAME thread and may be part way through a
+        // copy right now; nulling sView inside the same section is what makes its early return the
+        // authority on whether a panel is up.
+        synchronized (sPixelsLock) {
+            sPixelsBuf[0] = null;
+            sPixelsBuf[1] = null;
+            sPixelsIndex = 0;
+            sPixels = null;
+            sView = null;
+        }
     }
 
     /** The second-screen window. */
@@ -206,86 +372,87 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
     }
 
     /**
-     * Grey fill plus the pushed number.
+     * The codex readback if one has arrived, else Selaco's own startup splash if it has loaded,
+     * else black. No text path any more - black is the universal floor when neither has anything to
+     * show, rather than a placeholder or a table-of-contents overlay.
      *
-     * It redraws on its own ~15 Hz clock rather than being driven by the push, so the game thread
-     * never waits on view invalidation. A CHANGING number is the point: a static one cannot
-     * distinguish "presenting correctly" from "frozen on frame one".
+     * Pushes drive invalidation now (pushPixels calls postInvalidate() directly), not a self-arming
+     * redraw clock - the old ~15 Hz unconditional repaint was already pointless and would be
+     * actively harmful against a multi-megabyte Bitmap. onAttachedToWindow still schedules exactly
+     * one delayed redraw so the startup image or black floor appears before any push has happened.
      */
     private static final class AuxView extends View {
 
         private static final long REDRAW_MS = 66;
 
-        private static final int BG = 0xFF12161C;
+        private static final int BLACK = 0xFF000000;
 
-        private final Paint mTitle = new Paint();
-        private final Paint mBody = new Paint();
+        private final Rect mSrc = new Rect();
+        private final Rect mDst = new Rect();
 
         AuxView(Context context) {
             super(context);
-            mTitle.setTextSize(52f);
-            mTitle.setFakeBoldText(true);
-            mTitle.setAntiAlias(true);
-            mBody.setTextSize(34f);
-            mBody.setAntiAlias(true);
+
+            // Only one panel is ever live at a time, so a plain static back-reference is enough for
+            // pushPixels to reach the view it needs to invalidate.
+            sView = this;
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            canvas.drawColor(BG);
+            canvas.drawColor(BLACK);
 
-            // Snapshot once: the game thread can replace it mid-draw, and a half-old, half-new
-            // frame would be worse than a frame that is one push behind.
-            final String toc = sCodex;
-
-            if (toc.isEmpty()) {
-                drawPlaceholder(canvas);
-            } else {
-                drawCodex(canvas, toc);
+            // Snapshot once: the game thread can replace either reference mid-draw, and a half-old,
+            // half-new frame would be worse than a frame that is one push behind.
+            final Bitmap pixels = sPixels;
+            if (pixels != null) {
+                mDst.set(0, 0, getWidth(), getHeight());
+                // The engine stores render targets bottom-up, so the rows arrive in reverse order -
+                // the same reason CopyScreenToBuffer carries a vertical flip in its own conversion
+                // loop. Flipping here rather than in the native copy keeps it free: the compositor
+                // applies the scale, where a row-reversing memcpy would cost a ~5.3 MB pass on the
+                // game thread every readback.
+                canvas.save();
+                canvas.scale(1f, -1f, 0f, getHeight() / 2f);
+                canvas.drawBitmap(pixels, null, mDst, null);
+                canvas.restore();
+                return;
             }
-            postInvalidateDelayed(REDRAW_MS);
+
+            final Bitmap startup = sStartupImage;
+            if (startup != null) {
+                drawStartupImage(canvas, startup);
+            }
+            // else: nothing loaded yet, or no ipk3 found - the black floor drawn above stands as-is.
         }
 
-        /** Shown whenever there is no codex to show - the menu, or an unconfirmed bridge. */
-        private void drawPlaceholder(Canvas canvas) {
-            mTitle.setColor(0xFF6E7A8A);
-            canvas.drawText("SELACO", 48f, 110f, mTitle);
-            mBody.setColor(0xFF54606E);
-            canvas.drawText("codex available in-game", 48f, 168f, mBody);
-        }
-
-        private void drawCodex(Canvas canvas, String toc) {
-            mTitle.setColor(0xFFDCE3EE);
-            canvas.drawText("CODEX", 48f, 86f, mTitle);
-
-            float y = 150f;
-            final float lineH = 46f;
-            final int h = getHeight();
-
-            int from = 0;
-            while (from < toc.length() && y < h - 12f) {
-                int nl = toc.indexOf('\n', from);
-                if (nl < 0) nl = toc.length();
-                final String rec = toc.substring(from, nl);
-                from = nl + 1;
-
-                // "depth:title" - malformed records are skipped rather than drawn raw, so a protocol
-                // mistake shows up as missing text instead of garbage on screen.
-                final int colon = rec.indexOf(':');
-                if (colon <= 0) continue;
-                int depth;
-                try {
-                    depth = Integer.parseInt(rec.substring(0, colon));
-                } catch (NumberFormatException e) {
-                    continue;
-                }
-                final String title = rec.substring(colon + 1);
-
-                mBody.setColor(depth <= 1 ? 0xFFBFC9D8 : 0xFF8A94A4);
-                canvas.drawText(title, 48f + depth * 34f, y, mBody);
-                y += lineH;
+        /**
+         * Center-crop the startup splash to fill the panel: scale up by whichever axis needs more
+         * to cover it, then take a same-aspect slice out of the middle of the source rather than
+         * distorting or letterboxing. An ordinary Android bitmap, so unlike the codex path above it
+         * is NOT flipped.
+         */
+        private void drawStartupImage(Canvas canvas, Bitmap startup) {
+            final int viewW = getWidth();
+            final int viewH = getHeight();
+            final int imgW = startup.getWidth();
+            final int imgH = startup.getHeight();
+            if (viewW <= 0 || viewH <= 0 || imgW <= 0 || imgH <= 0) {
+                return;
             }
+
+            // Derived from the actual view size, never a hardcoded 1240x1080 - the framework does
+            // not guarantee this view gets exactly the panel's full reported resolution.
+            final float scale = Math.max((float) viewW / imgW, (float) viewH / imgH);
+            final int srcW = Math.min(imgW, Math.round(viewW / scale));
+            final int srcH = Math.min(imgH, Math.round(viewH / scale));
+            final int srcX = (imgW - srcW) / 2;
+            final int srcY = (imgH - srcH) / 2;
+
+            mSrc.set(srcX, srcY, srcX + srcW, srcY + srcH);
+            mDst.set(0, 0, viewW, viewH);
+            canvas.drawBitmap(startup, mSrc, mDst, null);
         }
 
         @Override

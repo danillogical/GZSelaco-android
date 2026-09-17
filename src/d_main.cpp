@@ -65,6 +65,7 @@
 #include "wi_stuff.h"
 #include "st_stuff.h"
 #include "am_map.h"
+#include "auxmenuredirect.h"
 #include "p_setup.h"
 #include "r_utility.h"
 #include "r_sky.h"
@@ -895,7 +896,16 @@ static void DrawOverlays()
 {
 	NetUpdate ();
 	C_DrawConsole ();
-	M_Drawer ();
+	{
+		// "Wii U mode": while Selaco's PDA is the current menu and aux_canvas_zscript is 4, this guard
+		// points twod at the second screen's offscreen canvas for the duration of M_Drawer, so the menu
+		// the engine is already ticking and feeding gamepad input to draws THERE instead of over the
+		// game. Scoped rather than a pair of assignments because a VM abort in a menu drawer unwinds
+		// past a manual restore, and a leaked swap would send the whole HUD, console and stat display
+		// to the canvas. Inert - and compiled to nothing - on every other platform and every other mode.
+		FAuxMenuRedirect auxmenuredirect;
+		M_Drawer ();
+	}
 	DrawRateStuff();
 	if (!hud_toggled)
 		FStat::PrintStat (twod);
@@ -1158,6 +1168,11 @@ void D_Display ()
 			case GS_FULLCONSOLE:
 				D_PageDrawer();
 				C_DrawConsole ();
+				// Deliberately NOT wrapped in FAuxMenuRedirect, unlike the call in DrawOverlays. RenderView
+				// is not called in this gamestate, so the AllCanvases loop never runs and a redirected menu
+				// would be rendered nowhere and read back never - invisible on BOTH screens. Drawing to the
+				// main screen is the correct behaviour here, and Selaco's PDA cannot be open in
+				// GS_FULLCONSOLE anyway.
 				M_Drawer ();
 				End2DAndUpdate ();
 				return;

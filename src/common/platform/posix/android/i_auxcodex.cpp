@@ -1,15 +1,19 @@
 /*
 ** i_auxcodex.cpp
-** Codex bridge for the second-screen panel: reads Selaco's manual and its unlock state.
+** Unlock bridge for the second-screen panel: reads Selaco's unlock state and exposes a generation
+** counter that bumps whenever it changes.
 **
-** This file publishes NOTHING to the panel. It resolves the unlock map, parses MANUAL.json,
-** evaluates which nodes the player is allowed to see, and logs one line when the answer changes.
-** No JNI, no Java, no UI. Content handling and the panel are separate steps, kept separate so a
-** failure can be attributed to one mechanism - three earlier designs died in review because they
-** bundled several unproven pieces together.
+** This file used to also parse MANUAL.json into a node tree and format a table of contents for
+** direct display (BuildToc/CountVisible), but nothing ever read that output - AuxPanel.sCodex was
+** write-only on the Java side, since the text overlay it fed was replaced by the readback/splash
+** path. That milestone is gone; what remains is the one piece i_auxcodexview.cpp actually consumes,
+** I_AuxCodexGeneration, as a rebuild trigger for the dashboard it bakes from the same unlock state.
 **
-** M1 (the unlock bridge) is PROVEN ON DEVICE: bridge=ok gates=17, mask tracked a real unlock.
-** M2 (this) adds the manual itself.
+** There is no longer a separate per-frame probe call: I_AuxCodexGeneration() re-checks the unlock
+** state itself on every call (see Probe(), below), because the reflection it does is memoised
+** against the item's class and therefore cheap enough to poll lazily. i_auxcodexview.cpp already
+** calls I_AuxCodexGeneration() at the cadence that needs to observe it move, so a second hook from
+** i_auxpanel.cpp would only be a second thing that could disagree about when to look.
 **
 ** WHY READING THE ZSCRIPT MAP DIRECTLY IS LEGITIMATE, not a layout hack:
 ** ZScript's Map<Name,Int> is ZSMap<uint32_t,uint32_t>, which derives PUBLICLY from TMap
@@ -23,287 +27,67 @@
 ** unlock map, corrupt their save, and make Selaco's own codex start printing '???' for sections it
 ** should show. The const non-inserting overload is mandatory (tarray.h:1319-1323).
 **
-** ===========================================================================================
-** SPOILER SAFETY IS THE ACCEPTANCE CRITERION, AND IT SHAPES EVERY DECISION BELOW.
-**
-** Selaco is a story game. Showing a locked codex entry is worse than showing nothing, so every
-** branch here resolves uncertainty to LOCKED. Specifically:
-**   - The manual is refused entirely unless "version" is exactly the schema this code was written
-**     against. A future Selaco that changes the format gets a blank panel, not a guess.
-**   - Every key on every node is checked against a whitelist. An unrecognised key means Selaco may
-**     have introduced a gating mechanism we do not understand, so that node and its whole subtree
-**     are treated as locked. This is the one defence against fail-OPEN drift: without it, a new
-**     gate key such as "requires" would read as "no gate" and publish locked content.
-**   - Visibility is CONJUNCTIVE: a node is visible only if it and every ancestor is open. Three
-**     entries in the shipped file (Overview, Workbench, Safe Room Extension) carry no unlock key of
-**     their own and are hidden solely by their section's 'safesect' gate. Filtering per-node would
-**     leak "Safe Room Extension", which names a mechanic the player has not found.
-**   - A failed or not-yet-available bridge yields an all-locked verdict, never an all-open one.
-**
-** The gate test is `!= 0`, matching Selaco's real predicate at manual.zs:105-109
-** (`hasSection = GetIfExists(section.unlock); if(!hasSection) return;` - an early cut BEFORE the
-** recursion) and :176-184 (`if(!entryUnlockStatus) continue;`). Three other sites look like the
-** predicate and are not: :86 (`> 1`) drives the NEW badge, :121 accumulates `hasEntries` for
-** `showLocked`, and :124 accumulates `sectionHasLockedItems` for the '???' teaser.
-** ===========================================================================================
+** SPOILER SAFETY: a failed or not-yet-available bridge yields a checksum of 0, never a guess. The strict
+** type validation below (isMap/Size/KeyType/ValueType) is not cosmetic - casting a field that is
+** NOT actually a Map<Name,Int> would read arbitrary object bytes as a hash table and could fabricate
+** open gates, so it runs every time the field is (re)resolved, never skipped as an optimisation.
 */
 
 #include <stdint.h>
 
 #include "actor.h"
-#include "c_cvars.h"
-#include "cmdlib.h"
 #include "d_player.h"
 #include "doomstat.h"
 #include "dobjtype.h"
-#include "filesystem.h"
 #include "printf.h"
 #include "vm.h"          // maps.h needs X_FORMAT_ERROR from here
 #include "maps.h"
 #include "symbols.h"
 #include "types.h"
-#include "zstring.h"
-
-// Match the tree's existing rapidjson configuration (see src/common/engine/serializer.cpp:35-38)
-// rather than inventing a second one.
-#define RAPIDJSON_48BITPOINTER_OPTIMIZATION 0
-#define RAPIDJSON_HAS_CXX11_RVALUE_REFS 1
-#define RAPIDJSON_HAS_CXX11_RANGE_FOR 1
-#include "rapidjson/document.h"
-#include "rapidjson/rapidjson.h"
-
-// Dev override for the publish gate below. Flags 0, not CVAR_ARCHIVE: this is a diagnostic, and an
-// archived diagnostic is how this project ended up with three config files carrying a line whose only
-// job was to switch one back off. It also must not ship on - showing the codex at the menu displays a
-// stale unlock state.
-CVAR(Bool, aux_codex_anywhere, false, 0)
-
-// The schema this code was written against. Refuse anything else - see the spoiler note above.
-static const char *const SupportedVersion = "1.0";
-
-// Every key that legitimately appears on a node in the shipped MANUAL.json. Anything else means
-// Selaco may have added semantics we do not model, so the node is treated as locked.
-//
-// Counts in the shipped 42,172-byte file, for reference: sections carry title(10) sections(2)
-// entries(10) id(9) unlock(1); entries carry title(40) content(40) unlock(16) noheader(3).
-static const char *const SectionKeys[] = { "title", "sections", "entries", "id", "unlock" };
-static const char *const EntryKeys[]   = { "title", "content", "unlock", "noheader" };
-
-static bool KeyAllowed(const char *key, const char *const *allowed, size_t count)
-{
-	for (size_t i = 0; i < count; i++)
-	{
-		if (strcmp(key, allowed[i]) == 0)
-			return true;
-	}
-	return false;
-}
-
-// ---------------------------------------------------------------------------------------------
-// The parsed manual. Gate names come from the FILE, never from a hardcoded list, so this cannot
-// drift from the player's own copy of the game.
-// ---------------------------------------------------------------------------------------------
-
-struct CodexNode
-{
-	FString Title;
-	int GateBit = -1;         // -1 = ungated; otherwise an index into Gates
-	bool IsEntry = false;
-	bool Trusted = true;      // false if this node had an unrecognised key
-	int ContentLen = 0;
-	TArray<int> Children;     // indices into Nodes
-};
-
-static TArray<CodexNode> Nodes;
-static TArray<FName> Gates;
-static int RootNode = -1;
-static bool ManualLoaded = false;
-static bool ManualRefused = false;   // latched; a manual we cannot trust is never retried
-
-// Returns the gate's bit index, allocating one on first sight. -1 means "ungated".
-static int GateBitFor(const char *name)
-{
-	if (name == nullptr || *name == '\0' || stricmp(name, "none") == 0)
-		return -1;
-
-	FName gate(name);
-	for (unsigned i = 0; i < Gates.Size(); i++)
-	{
-		if (Gates[i] == gate)
-			return (int)i;
-	}
-	if (Gates.Size() >= 64)
-		return -2;      // out of bits: caller treats this as permanently locked, never as open
-	Gates.Push(gate);
-	return (int)Gates.Size() - 1;
-}
-
-static int BuildNode(const rapidjson::Value &obj, bool isEntry)
-{
-	CodexNode node;
-	node.IsEntry = isEntry;
-
-	const char *const *allowed = isEntry ? EntryKeys : SectionKeys;
-	const size_t allowedCount = isEntry
-		? sizeof(EntryKeys) / sizeof(EntryKeys[0])
-		: sizeof(SectionKeys) / sizeof(SectionKeys[0]);
-
-	for (auto it = obj.MemberBegin(); it != obj.MemberEnd(); ++it)
-	{
-		if (!KeyAllowed(it->name.GetString(), allowed, allowedCount))
-		{
-			// Unrecognised key: this node might be gated by something we do not understand.
-			node.Trusted = false;
-		}
-	}
-
-	if (obj.HasMember("title") && obj["title"].IsString())
-		node.Title = obj["title"].GetString();
-
-	if (obj.HasMember("content") && obj["content"].IsString())
-		node.ContentLen = (int)strlen(obj["content"].GetString());
-
-	if (obj.HasMember("unlock"))
-	{
-		if (obj["unlock"].IsString())
-			node.GateBit = GateBitFor(obj["unlock"].GetString());
-		else
-			node.Trusted = false;   // an unlock we cannot read is not an absent unlock
-	}
-
-	const int self = (int)Nodes.Size();
-	Nodes.Push(node);
-
-	if (!isEntry)
-	{
-		if (obj.HasMember("sections") && obj["sections"].IsArray())
-		{
-			for (auto &child : obj["sections"].GetArray())
-			{
-				if (child.IsObject())
-				{
-					// The recursive call pushes into Nodes and can REALLOCATE it, so the child index
-					// must be computed into a local FIRST. Pushing the call's result directly would
-					// evaluate the Nodes[self] subscript into a reference before the argument runs,
-					// and that reference then dangles - which silently corrupted every child link
-					// instead of crashing, and showed up as visible=0 on device.
-					const int childIndex = BuildNode(child, false);
-					Nodes[self].Children.Push(childIndex);
-				}
-				else
-				{
-					Nodes[self].Trusted = false;
-				}
-			}
-		}
-		if (obj.HasMember("entries") && obj["entries"].IsArray())
-		{
-			for (auto &child : obj["entries"].GetArray())
-			{
-				if (child.IsObject())
-				{
-					const int childIndex = BuildNode(child, true);   // see the note above
-					Nodes[self].Children.Push(childIndex);
-				}
-				else
-				{
-					Nodes[self].Trusted = false;
-				}
-			}
-		}
-	}
-	return self;
-}
-
-// Parse MANUAL.json once. Any doubt refuses the whole manual rather than part of it.
-static bool LoadManual()
-{
-	if (ManualRefused)
-		return false;
-	if (ManualLoaded)
-		return true;
-
-	const int lump = fileSystem.CheckNumForFullName("MANUAL.json");
-	if (lump < 0)
-	{
-		Printf("AuxCodex: MANUAL.json not found - codex panel unavailable\n");
-		ManualRefused = true;
-		return false;
-	}
-
-	FString text = GetStringFromLump(lump);
-
-	// Default parse flags do not throw; errors surface through HasParseError. That matters because
-	// this must never take the process down over a data file we do not control.
-	rapidjson::Document doc;
-	doc.Parse(text.GetChars(), text.Len());
-	if (doc.HasParseError() || !doc.IsObject())
-	{
-		Printf("AuxCodex: MANUAL.json failed to parse (error %d) - codex panel unavailable\n",
-			(int)doc.GetParseError());
-		ManualRefused = true;
-		return false;
-	}
-
-	// Version gate. A format change is exactly when our assumptions about gating stop holding, so
-	// an unknown version means show nothing at all.
-	if (!doc.HasMember("version") || !doc["version"].IsString()
-		|| strcmp(doc["version"].GetString(), SupportedVersion) != 0)
-	{
-		Printf("AuxCodex: MANUAL.json version is not %s - refusing it rather than guessing\n",
-			SupportedVersion);
-		ManualRefused = true;
-		return false;
-	}
-
-	if (!doc.HasMember("sections") || !doc["sections"].IsArray())
-	{
-		Printf("AuxCodex: MANUAL.json has no sections array - codex panel unavailable\n");
-		ManualRefused = true;
-		return false;
-	}
-
-	// A synthetic ungated root so the conjunctive walk has a single entry point.
-	CodexNode root;
-	root.Title = "Manual";
-	RootNode = (int)Nodes.Size();
-	Nodes.Push(root);
-	for (auto &child : doc["sections"].GetArray())
-	{
-		if (child.IsObject())
-		{
-			const int childIndex = BuildNode(child, false);   // see the reallocation note in BuildNode
-			Nodes[RootNode].Children.Push(childIndex);
-		}
-		else
-		{
-			Nodes[RootNode].Trusted = false;
-		}
-	}
-
-	ManualLoaded = true;
-	int untrusted = 0;
-	for (unsigned i = 0; i < Nodes.Size(); i++)
-		if (!Nodes[i].Trusted) untrusted++;
-
-	Printf("AuxCodex: manual loaded version=%s nodes=%u gates=%u untrusted=%d\n",
-		SupportedVersion, Nodes.Size(), Gates.Size(), untrusted);
-	return true;
-}
 
 // ---------------------------------------------------------------------------------------------
 // The unlock bridge (M1, proven on device).
 // ---------------------------------------------------------------------------------------------
 
 static bool ProbeBroken = false;
-static uint64_t LastMask = 0;
-static int LastVisible = -1;
-static bool LastPublish = false;
+static uint64_t LastChecksum = 0;
 static int LastState = -1;   // 0 no class, 1 no player, 2 no item, 3 bad field, 4 ok
 
-static bool ReadUnlockMask(uint64_t &mask, int &state)
+// Memoised so the reflection below - FindActor, FindInventory, FindSymbol, and the isMap/Size/
+// KeyType/ValueType validation - runs once per class rather than every frame in a level. Keyed on
+// GetClass() rather than cached forever: a wrong cast fabricating unlock state is worse than a
+// once-per-class-change re-resolve, so a class we have not seen before still gets the full
+// validation, never a stale field pointer reused across classes.
+static PClass *CachedItemClass = nullptr;
+static PField *CachedUnlocksField = nullptr;
+static bool CachedFieldValid = false;
+
+// Bumped once whenever the unlock checksum changes. Published rather than the checksum itself
+// because no caller needs to know WHICH gate changed, only that something did.
+//
+// The consumer is i_auxcodexview.cpp, which bakes the unlock state into a widget tree at build
+// time and therefore has to rebuild when this moves.
+//
+// Frozen if ProbeBroken latches (a missing or wrong-typed unlocks field): the consumer then builds
+// once and never rebuilds, which is the correct degradation - we cannot read unlocks at all, so we
+// cannot know when they change.
+static unsigned CodexGeneration = 0;
+
+// Re-reads the unlock state and bumps CodexGeneration on any edge. Called from
+// I_AuxCodexGeneration() itself rather than from a per-frame hook: the reflection it does is
+// memoised (see CachedItemClass above), so there is no separate cost to pay for polling it lazily,
+// and every caller of I_AuxCodexGeneration() already runs at the cadence that needs to see it move.
+static void Probe();
+
+unsigned I_AuxCodexGeneration()
 {
-	mask = 0;
+	Probe();
+	return CodexGeneration;
+}
+
+static bool ReadUnlockChecksum(uint64_t &checksum, int &state)
+{
+	checksum = 0;
 
 	// noCreate: never add a name to the table just to look it up, and index 0 means Selaco has
 	// never registered it - the graceful "not this game" case.
@@ -324,99 +108,72 @@ static bool ReadUnlockMask(uint64_t &mask, int &state)
 	AActor *item = players[consoleplayer].mo->FindInventory(cls, true);
 	if (item == nullptr) { state = 2; return false; }
 
-	PField *field = dyn_cast<PField>(item->GetClass()->FindSymbol(FName("unlocks"), true));
-	if (field == nullptr || (field->Flags & (VARF_Native | VARF_Static))) { state = 3; return false; }
+	PClass *itemClass = item->GetClass();
+	if (itemClass != CachedItemClass)
+	{
+		// Class changed (or first resolve): redo the reflection and its validation from scratch.
+		CachedItemClass = itemClass;
+		CachedFieldValid = false;
+		CachedUnlocksField = nullptr;
 
-	// Strict type validation, and it is spoiler-critical: casting a field that is NOT a
-	// Map<Name,Int> would read arbitrary object bytes as a hash table and could fabricate open
-	// gates. NewMap() is deliberately NOT used as the comparison - it mutates the global type table
-	// (types.cpp:2849-2859), which must not happen from the render path.
-	PType *type = field->Type;
-	if (type == nullptr || !type->isMap() || type->Size != sizeof(ZSMap<uint32_t, uint32_t>))
-	{
-		state = 3;
-		return false;
+		PField *field = dyn_cast<PField>(itemClass->FindSymbol(FName("unlocks"), true));
+		if (field != nullptr && !(field->Flags & (VARF_Native | VARF_Static)))
+		{
+			// Strict type validation, and it is spoiler-critical: casting a field that is NOT a
+			// Map<Name,Int> would read arbitrary object bytes as a hash table and could fabricate
+			// open gates. NewMap() is deliberately NOT used as the comparison - it mutates the
+			// global type table (types.cpp:2849-2859), which must not happen from the render path.
+			PType *type = field->Type;
+			if (type != nullptr && type->isMap() && type->Size == sizeof(ZSMap<uint32_t, uint32_t>))
+			{
+				PMap *mapType = static_cast<PMap *>(type);
+				if (mapType->KeyType == TypeName && mapType->ValueType != nullptr && mapType->ValueType->isInt())
+				{
+					CachedUnlocksField = field;
+					CachedFieldValid = true;
+				}
+			}
+		}
 	}
-	PMap *mapType = static_cast<PMap *>(type);
-	if (mapType->KeyType != TypeName || mapType->ValueType == nullptr || !mapType->ValueType->isInt())
-	{
-		state = 3;
-		return false;
-	}
+
+	if (!CachedFieldValid) { state = 3; return false; }
 
 	// Straight-line from here: no allocation and nothing that can collect, so the map cannot be
 	// reconstructed underneath us mid-read.
 	const ZSMap<uint32_t, uint32_t> *unlocks = reinterpret_cast<const ZSMap<uint32_t, uint32_t> *>(
-		reinterpret_cast<const uint8_t *>(item) + field->Offset);
+		reinterpret_cast<const uint8_t *>(item) + CachedUnlocksField->Offset);
 
-	for (unsigned i = 0; i < Gates.Size() && i < 64; i++)
+	// A change-detection checksum, not a positional bitmask - there is no manual parse any more to
+	// hand out a fixed, small gate-name-to-bit assignment, and raw FName indices run into the
+	// thousands, far past what a 64-bit mask could hold. XOR of a per-key mix is order-independent
+	// (map iteration order is not a contract worth depending on) and reacts to a key's value crossing
+	// zero either way, which is all a caller comparing generations for inequality needs.
+	TMapConstIterator<uint32_t, uint32_t> it(*unlocks);
+	const ZSMap<uint32_t, uint32_t>::ConstPair *pair;
+	while (it.NextPair(pair))
 	{
-		const uint32_t *val = unlocks->CheckKey((uint32_t)Gates[i].GetIndex());
-		// Selaco stores 2 for newly-unlocked and 1 for seen (manual_handler.zs:30). Absent means
-		// locked. Test != 0 rather than presence, so a future version storing 0 still reads locked.
-		if (val != nullptr && *val > 0)
-			mask |= (uint64_t)1 << i;
+		// Selaco stores 2 for newly-unlocked and 1 for seen (manual_handler.zs:30). Test != 0 rather
+		// than presence, so a future version storing 0 still reads locked.
+		if (pair->Value > 0)
+		{
+			uint64_t h = (uint64_t)pair->Key * 0x9E3779B97F4A7C15ULL;
+			h ^= h >> 32;
+			checksum ^= h;
+		}
 	}
 
 	state = 4;
 	return true;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Visibility. Conjunctive, and closed on any doubt.
-// ---------------------------------------------------------------------------------------------
-
-static bool NodeOpen(const CodexNode &node, uint64_t mask, bool bridgeOk)
-{
-	if (!node.Trusted)  return false;    // unrecognised key: assume it might be a gate
-	if (node.GateBit == -2) return false; // more than 64 distinct gates
-	if (node.GateBit < 0)  return true;   // genuinely ungated
-	if (!bridgeOk)         return false;  // gated, and we cannot prove it is open
-	return ((mask >> node.GateBit) & 1) != 0;
-}
-
-// Append the visible subtree as "depth:title" lines. Titles are short human strings and cannot
-// contain a newline, so newline-separated records need no escaping and stay readable in a log.
-//
-// Only TITLES go across, not "content" bodies. That is this milestone's scope: it keeps the payload
-// at a few hundred bytes, and it means the panel cannot display body text before the layout and
-// scrolling for it exist.
-static void BuildToc(int index, uint64_t mask, bool bridgeOk, int depth, FString &out)
-{
-	const CodexNode &node = Nodes[index];
-	if (!NodeOpen(node, mask, bridgeOk))
-		return;                            // prunes the subtree - the conjunction, same as CountVisible
-
-	if (index != RootNode)
-	{
-		out.AppendFormat("%d:%s\n", depth, node.Title.GetChars());
-	}
-
-	for (unsigned i = 0; i < node.Children.Size(); i++)
-		BuildToc(node.Children[i], mask, bridgeOk, depth + 1, out);
-}
-
-static void CountVisible(int index, uint64_t mask, bool bridgeOk, int &entries, int &sections)
-{
-	const CodexNode &node = Nodes[index];
-	if (!NodeOpen(node, mask, bridgeOk))
-		return;                            // prunes the whole subtree - the conjunction
-
-	if (node.IsEntry) entries++;
-	else if (index != RootNode) sections++;
-
-	for (unsigned i = 0; i < node.Children.Size(); i++)
-		CountVisible(node.Children[i], mask, bridgeOk, entries, sections);
-}
-
-void I_AuxCodexProbe()
+static void Probe()
 {
 	if (ProbeBroken)
 		return;
 
-	uint64_t mask = 0;
+	uint64_t checksum = 0;
 	int state = -1;
-	const bool bridgeOk = ReadUnlockMask(mask, state);
+	ReadUnlockChecksum(checksum, state);
 
 	if (state == 3)
 	{
@@ -427,55 +184,15 @@ void I_AuxCodexProbe()
 		return;
 	}
 
-	// Load the manual as soon as there is a game to read it from, even at the title screen. Parsing
-	// early is deliberate and is NOT the same decision as displaying early: it front-loads the 42 KB
-	// parse away from gameplay, and it means the tree can be exercised without loading a save.
-	// Whether the panel may SHOW any of it is decided separately, below.
-	if (state >= 2 && !ManualLoaded && !ManualRefused)
-	{
-		if (LoadManual())
-			ReadUnlockMask(mask, state);   // re-read now that Gates is populated
-	}
-
-	int entries = 0, sections = 0;
-	if (ManualLoaded && RootNode >= 0)
-		CountVisible(RootNode, mask, bridgeOk, entries, sections);
-
-	// PUBLISH GATE: a real level only, not the title screen.
-	//
-	// This is a correctness rule, not presentation. TITLEMAP is GS_TITLELEVEL - "a combination of
-	// GS_LEVEL and GS_DEMOSCREEN" (common/engine/gamestate.h:15) - and it has its OWN player pawn
-	// with its own fresh ManualItem. So at the menu the mask reads 0 no matter what the player's
-	// save has unlocked, and a codex shown there would confidently display the wrong unlock state
-	// until a level loads. Showing nothing is better than showing stale progress.
-	//
-	// GS_LEVEL also stays true while the pause menu is open, so the panel does not blank when the
-	// player opens the menu mid-level, which is what you want.
-	const bool publish = (gamestate == GS_LEVEL) || aux_codex_anywhere;
-	if (!publish)
-	{
-		entries = 0;
-		sections = 0;
-	}
-
 	// Edge-triggered: silence unless the verdict actually changed.
-	if (state == LastState && mask == LastMask && entries == LastVisible && publish == LastPublish)
+	if (state == LastState && checksum == LastChecksum)
 		return;
 	LastState = state;
-	LastMask = mask;
-	LastVisible = entries;
-	LastPublish = publish;
+	LastChecksum = checksum;
 
-	// Publish on exactly the edge we just logged, so the panel and the log can never disagree about
-	// what the player is being shown. An unpublished state pushes "" and the panel clears itself.
-	{
-		FString toc;
-		if (publish && ManualLoaded && RootNode >= 0)
-			BuildToc(RootNode, mask, bridgeOk, 0, toc);
-
-		extern void I_AuxPanelPushCodex(const char *toc);
-		I_AuxPanelPushCodex(toc.GetChars());
-	}
+	// One bump per edge, so a consumer rebuilding off this counter always matches the log line
+	// about to be printed for the same edge.
+	CodexGeneration++;
 
 	switch (state)
 	{
@@ -483,16 +200,7 @@ void I_AuxCodexProbe()
 	case 1: Printf("AuxCodex: bridge=waiting (no player pawn yet)\n"); break;
 	case 2: Printf("AuxCodex: bridge=waiting (player has no ManualItem yet)\n"); break;
 	default:
-		if (!publish)
-		{
-			Printf("AuxCodex: bridge=ok mask=0x%016llx parsed, NOT published (gamestate %d is not a level)\n",
-				(unsigned long long)mask, (int)gamestate);
-		}
-		else
-		{
-			Printf("AuxCodex: bridge=ok mask=0x%016llx visible=%d entries, %d sections\n",
-				(unsigned long long)mask, entries, sections);
-		}
+		Printf("AuxCodex: bridge=ok checksum=0x%016llx\n", (unsigned long long)checksum);
 		break;
 	}
 }

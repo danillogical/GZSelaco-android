@@ -1,0 +1,394 @@
+/*
+** i_auxvmreflect.cpp
+** Resolve and prove the ZScript symbols the second-screen panel calls and writes.
+**
+**---------------------------------------------------------------------------
+** Copyright 2026 Selaco Android port contributors
+** All rights reserved.
+**
+** Redistribution and use in source and binary forms, with or without
+** modification, are permitted provided that the following conditions
+** are met:
+**
+** 1. Redistributions of source code must retain the above copyright
+**    notice, this list of conditions and the following disclaimer.
+** 2. Redistributions in binary form must reproduce the above copyright
+**    notice, this list of conditions and the following disclaimer in the
+**    documentation and/or other materials provided with the distribution.
+** 3. The name of the author may not be used to endorse or promote products
+**    derived from this software without specific prior written permission.
+**
+** THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+** IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+** OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+** IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+** INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+** NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+** DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+** THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+** (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+** THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+**---------------------------------------------------------------------------
+**
+** The safety argument for all of this is in i_auxvmreflect.h. What is here is the mechanism.
+*/
+
+// dobjtype.h and dobjgc.h are not self-contained (they lean on FName, FString and the DObject
+// declaration being in scope already), so dobject.h leads - it is the header that pulls that chain
+// in, and every engine translation unit that touches PClass reaches it the same way.
+#include "dobject.h"
+#include "dobjtype.h"
+#include "menu.h"        // DMenu, which Arg_Menu is checked against
+#include "printf.h"
+#include "symbols.h"
+#include "types.h"
+#include "v_2ddrawer.h"  // FCanvas, which Arg_Canvas and Field_CanvasPtr are checked against
+#include "vm.h"
+#include "vmintern.h"    // VMScriptFunction::NumArgs, the count VMFillParams actually reads
+#include "zstring.h"
+
+#include "i_auxvmreflect.h"
+
+// ZScript's `struct CVar native`, which is what UIMenu.ui_scaling (menu.zs:28) is a pointer to. Named
+// here because Field_CVarPtr compares against it by name; see the null store in BuildDesktopView.
+static const char *const CVarStructName = "CVar";
+
+namespace AuxView
+{
+
+// Returns false if the type is not the kind we mean; on success reports how many VM registers the
+// argument occupies, mirroring VMFunction::CreateRegUse (vmframe.cpp:88-96).
+//
+// argClass is read by Arg_ObjectOf and by nothing else: it is the class every instance we intend to pass
+// through that parameter has already been proved to be a kind of.
+static bool ArgMatches(PType *type, EArgKind kind, int &regs, PClass *argClass)
+{
+	regs = 0;
+	if (type == nullptr)
+		return false;
+
+	switch (kind)
+	{
+	case Arg_Vector2:
+		// A Vector2 is one declared argument but TWO registers (types.cpp:365), which is the whole
+		// reason the register count cannot be inferred from the argument count.
+		regs = 2;
+		return type == TypeVector2;
+
+	case Arg_Float:
+		regs = 1;
+		return type == TypeFloat64;
+
+	case Arg_Bool:
+		regs = 1;
+		return type == TypeBool;
+
+	case Arg_Int:
+		regs = 1;
+		return type == TypeSInt32;
+
+	case Arg_Canvas:
+		// ZScript's Canvas is the native FCanvas: DECLARE_CLASS registers it and PClass strips the
+		// leading letter (dobjtype.cpp:351), so RUNTIME_CLASS(FCanvas) IS the Canvas class script
+		// sees. Descendant rather than equal so a parameter declared as a base of Canvas still
+		// matches - the cast we perform is still provably valid.
+		regs = 1;
+		return type->isObjectPointer()
+			&& RUNTIME_CLASS(FCanvas)->IsDescendantOf(static_cast<PObjectPointer *>(type)->PointedClass());
+
+	case Arg_Menu:
+		// PDAMenu3.init takes a Menu parent, and ZScript's Menu is the native DMenu. We only ever pass
+		// null for it, so this proves the register layout rather than the validity of a cast.
+		regs = 1;
+		return type->isObjectPointer()
+			&& RUNTIME_CLASS(DMenu)->IsDescendantOf(static_cast<PObjectPointer *>(type)->PointedClass());
+
+	case Arg_ObjectOf:
+		// A script object pointer we pass a REAL instance through, so the direction of the test is the
+		// same as Arg_Canvas's: what has to hold is that the value is assignable to the declared
+		// parameter, i.e. that argClass derives from the declared pointee. Every call site pairs this
+		// with an IsKindOf(argClass) on the instance itself, which is what makes the pair a proof.
+		regs = 1;
+		return argClass != nullptr && type->isObjectPointer()
+			&& static_cast<PObjectPointer *>(type)->PointedClass() != nullptr
+			&& argClass->IsDescendantOf(static_cast<PObjectPointer *>(type)->PointedClass());
+	}
+	return false;
+}
+
+
+VMFunction *ResolveMethod(PClass *cls, const char *funcname,
+	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass)
+{
+	// noCreate: never add a name to the table just to look one up.
+	FName name(funcname, true);
+	if (name == NAME_None)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s does not exist, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	PFunction *sym = dyn_cast<PFunction>(cls->FindSymbol(name, true));
+	if (sym == nullptr || sym->Variants.Size() != 1)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a single-variant function, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	const PFunction::Variant &variant = sym->Variants[0];
+
+	// A ZScript "static" class method is identified by the ABSENCE of an implied self parameter, not
+	// by a positive flag: zcc_compile.cpp:2507 clears VARF_Method and sets VARF_Final for it, and
+	// never sets VARF_Static, which is only ever applied to fields (:1291, :1551, :1624). Testing
+	// VARF_Static here rejected ManualHandler.Instance on device even though it is declared static.
+	// Nothing in either mode calls a static, so the absence of a self is simply rejected.
+	const bool isMethod = !!(variant.Flags & VARF_Method);
+	if (!isMethod || (variant.Flags & VARF_Action))
+	{
+		// An action takes three implicit arguments instead of one, so it is rejected either way.
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a plain instance method, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	VMFunction *func = variant.Implementation;
+
+	// Dispatch a virtual through the instance's own vtable, exactly as IFVIRTUALPTR does
+	// (vm.h:818-826), so a subclass override is what actually runs. FindSymbol already returns the
+	// most-derived declaration for this class, so these agree - but the vtable is the authority.
+	if (func != nullptr && (func->VarFlags & VARF_Virtual) && func->VirtualIndex != ~0u
+		&& cls->Virtuals.Size() > func->VirtualIndex)
+	{
+		func = cls->Virtuals[func->VirtualIndex];
+	}
+
+	if (func == nullptr || (func->VarFlags & (VARF_Native | VARF_Abstract)))
+	{
+		// Native would mean a different calling convention and no NumArgs to check against;
+		// abstract aborts the VM on call (vmframe.cpp:317-320).
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is missing, native or abstract, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	// Register 0 is self, so the whole prototype is shifted by one against the declared argument list.
+	const unsigned selfArgs = 1u;
+
+	PPrototype *proto = func->Proto;
+	if (proto == nullptr || proto->ArgumentTypes.Size() != nargs + selfArgs)
+	{
+		// Note that an override which omits trailing optional arguments still reports the FULL list
+		// here: FindVirtualIndex extends the prototype to the base's argument list (dobjtype.cpp,
+		// "Extend the prototype"), which is why PDAAppWindow.layout declares two parameters and still
+		// takes three.
+		//
+		// The count is printed unsigned, so it is clamped rather than subtracted: a zero-argument
+		// prototype found where a self was expected would otherwise underflow to four billion.
+		const unsigned declared = proto != nullptr && proto->ArgumentTypes.Size() >= selfArgs
+			? proto->ArgumentTypes.Size() - selfArgs : 0u;
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s takes %u arguments, not %u, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname, declared, nargs);
+		return nullptr;
+	}
+
+	// The self pointer. Casting the instance to a self type it does not satisfy is the one mistake
+	// here that corrupts memory rather than misdraws. Read off the function we are ACTUALLY calling
+	// rather than off the symbol's variant, because a vtable entry may belong to a different class;
+	// ArgumentTypes[0] is where AddVariant reads self from too (symbols.cpp:98-102).
+	{
+		PPointer *selfPtr = proto->ArgumentTypes[0] != nullptr ? proto->ArgumentTypes[0]->toPointer() : nullptr;
+		PClassType *selfClass = selfPtr != nullptr ? PType::toClass(selfPtr->PointedType) : nullptr;
+		if (selfClass == nullptr || selfClass->Descriptor == nullptr || !cls->IsDescendantOf(selfClass->Descriptor))
+		{
+			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s is not a valid self for %s, desktop view disabled\n",
+				cls->TypeName.GetChars(), funcname);
+			return nullptr;
+		}
+	}
+
+	int regs = (int)selfArgs;
+	for (unsigned i = 0; i < nargs; i++)
+	{
+		int argregs = 0;
+		if (!ArgMatches(proto->ArgumentTypes[i + selfArgs], argkinds[i], argregs, argClass))
+		{
+			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s argument %u has an unexpected type, desktop view disabled\n",
+				cls->TypeName.GetChars(), funcname, i + 1);
+			return nullptr;
+		}
+
+		// An out parameter is passed as a POINTER to storage rather than by value (vmframe.cpp:81-84),
+		// so it would change the register layout under an argument type that still looks correct.
+		if (func->ArgFlags.Size() > i + selfArgs && (func->ArgFlags[i + selfArgs] & VARF_Out))
+		{
+			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s argument %u is an out parameter, desktop view disabled\n",
+				cls->TypeName.GetChars(), funcname, i + 1);
+			return nullptr;
+		}
+
+		regs += argregs;
+	}
+
+	// The decisive check. NumArgs is what VMFillParams loops over (vmexec.cpp:210) and what its own
+	// assert compares against (:204), so agreeing with it is exactly the guarantee that the callee
+	// reads no further than the array we pass.
+	const VMScriptFunction *sfunc = static_cast<const VMScriptFunction *>(func);
+	if (sfunc->NumArgs != regs)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s wants %d parameters, we would pass %d, desktop view disabled\n",
+			cls->TypeName.GetChars(), funcname, (int)sfunc->NumArgs, regs);
+		return nullptr;
+	}
+
+	*outRegs = regs;
+	return func;
+}
+
+PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls)
+{
+	// noCreate, for the same reason as in ResolveMethod: never add a name to the table to look one up.
+	FName name(fieldname, true);
+	PField *field = name != NAME_None ? dyn_cast<PField>(cls->FindSymbol(name, true)) : nullptr;
+	if (field == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a field, desktop view disabled\n",
+			cls->TypeName.GetChars(), fieldname);
+		return nullptr;
+	}
+
+	// A static or meta field's Offset is not an offset into the instance at all, which would make the
+	// store below write somewhere other than where it appears to.
+	//
+	// BitValue is deliberately NOT tested. PField's constructor (symbols.cpp:140-148) leaves it out of
+	// its initialiser list and assigns it only inside `if (bitvalue != 0)`, so for every non-bitfield
+	// it holds uninitialised garbage - testing it rejected PDAMenu3.mainView, an ordinary instance
+	// field, on device. It is also unnecessary: symbols.cpp:161 I_Errors on any bit field that is not
+	// internally declared, so no script-declared field is ever one.
+	if (field->Flags & (VARF_Native | VARF_Static | VARF_Meta))
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a plain instance field, desktop view disabled\n",
+			cls->TypeName.GetChars(), fieldname);
+		return nullptr;
+	}
+
+	bool ok = false;
+	switch (kind)
+	{
+	case Field_Bool:
+		ok = field->Type == TypeBool;
+		break;
+
+	case Field_Float:
+		ok = field->Type == TypeFloat64;
+		break;
+
+	case Field_ViewPtr:
+		// Declared as a UIView or a subclass of one, so the runtime check before each write below can
+		// be an IsKindOf against UIView and nothing wider.
+		ok = field->Type != nullptr && field->Type->isObjectPointer()
+			&& static_cast<PObjectPointer *>(field->Type)->PointedClass() != nullptr
+			&& static_cast<PObjectPointer *>(field->Type)->PointedClass()->IsDescendantOf(viewCls);
+		break;
+
+	case Field_CVarPtr:
+		// A pointer to the NATIVE STRUCT CVar, which is not an object pointer: a variable of a native
+		// struct type is always compiled to NewPointer(struct) (zcc_compile.cpp:2208). That distinction
+		// is what makes the null store below safe without a write barrier - the GC only traces object
+		// pointers, so this field is not a reference it can see and nulling it cannot orphan anything.
+		{
+			// noCreate on the comparison name too, and NAME_None rejected explicitly: without that a
+			// missing "CVar" in the name table would compare equal to any unnamed type.
+			const FName cvarName(CVarStructName, true);
+			PPointer *ptr = field->Type != nullptr ? field->Type->toPointer() : nullptr;
+			PStruct *pointee = ptr != nullptr && ptr->PointedType != nullptr && ptr->PointedType->isStruct()
+				? static_cast<PStruct *>(ptr->PointedType) : nullptr;
+			ok = ptr != nullptr && !field->Type->isObjectPointer() && cvarName != NAME_None
+				&& pointee != nullptr && pointee->isNative
+				&& pointee->TypeName == cvarName;
+		}
+		break;
+
+	case Field_CanvasPtr:
+		// ZScript's Canvas is the native FCanvas, the same identity Arg_Canvas relies on: DECLARE_CLASS
+		// registers it and PClass strips the leading letter (dobjtype.cpp:351). Descendant rather than
+		// equal so a field declared as a base of Canvas still matches - the pointer we store is still
+		// provably assignable to it.
+		ok = field->Type != nullptr && field->Type->isObjectPointer()
+			&& static_cast<PObjectPointer *>(field->Type)->PointedClass() != nullptr
+			&& RUNTIME_CLASS(FCanvas)->IsDescendantOf(static_cast<PObjectPointer *>(field->Type)->PointedClass());
+		break;
+
+	case Field_ObjArray:
+		// A FIXED, INLINE array of object pointers - ZScript `Thing things[N];`. Every clause here is a
+		// precondition of the pointer arithmetic that reads it, not decoration: an array read with a
+		// wrong stride or a wrong count walks off the end of the object, which is an out-of-bounds read
+		// rather than a misdraw.
+		{
+			// isArray() is set by PArray's constructor (types.cpp:1837) and NOT by PDynArray's
+			// (:2167-2172), so a dynamic array is already excluded. PStaticArray DERIVES from PArray and
+			// does set it, and has to be rejected explicitly: its storage is a pointer plus a count
+			// rather than N elements inline, so the same arithmetic would dereference the wrong thing.
+			PArray *arr = field->Type != nullptr && field->Type->isArray() && !field->Type->isStaticArray()
+				? static_cast<PArray *>(field->Type) : nullptr;
+
+			PClass *pointed = arr != nullptr && arr->ElementType != nullptr && arr->ElementType->isObjectPointer()
+				? static_cast<PObjectPointer *>(arr->ElementType)->PointedClass() : nullptr;
+
+			ok = arr != nullptr
+				&& arr->ElementCount > 0
+				// The stride and the extent the read below relies on, cross-checked against the type's
+				// own total size. PArray computes Size as ElementSize * ElementCount (types.cpp:1836), so
+				// this cannot disagree unless the layout is not what this code was written against.
+				&& arr->ElementSize == sizeof(DObject *)
+				&& (size_t)arr->ElementSize * arr->ElementCount == (size_t)arr->Size
+				// viewCls is reused here as the expected ELEMENT class, the same way Field_ViewPtr uses
+				// it as the expected pointee. Descendant so a base-typed array still matches; the runtime
+				// IsKindOf before each element is read is what makes the cast valid per element.
+				&& pointed != nullptr && viewCls != nullptr && pointed->IsDescendantOf(viewCls);
+		}
+		break;
+
+	case Field_MenuPtr:
+		// UIView.parentMenu (view.zs:124), declared as a UIMenu, and the one field here we store a MENU
+		// into rather than a view. viewCls is reused as the expected pointee ancestor exactly as
+		// Field_ObjArray reuses it as the expected element class: the menu we are about to store has to
+		// derive from whatever the field is declared as, or the store is not type-safe for script.
+		ok = field->Type != nullptr && field->Type->isObjectPointer()
+			&& static_cast<PObjectPointer *>(field->Type)->PointedClass() != nullptr
+			&& viewCls != nullptr
+			&& viewCls->IsDescendantOf(static_cast<PObjectPointer *>(field->Type)->PointedClass());
+		break;
+	}
+
+	if (!ok)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s has an unexpected type, desktop view disabled\n",
+			cls->TypeName.GetChars(), fieldname);
+		return nullptr;
+	}
+
+	return field;
+}
+
+DObject *ReadObjectField(DObject *obj, const PField *field)
+{
+	return *(DObject **)((uint8_t *)obj + field->Offset);
+}
+
+// The storage behind the cross-mode channel documented in i_auxvmreflect.h. It lives here, in neither
+// mode's translation unit, so that the one piece of shared state is not owned by either of them.
+static PClass *LastAppClass = nullptr;
+
+PClass *MenuLastAppClass()
+{
+	return LastAppClass;
+}
+
+void SetMenuLastAppClass(PClass *cls)
+{
+	LastAppClass = cls;
+}
+
+}   // namespace AuxView
