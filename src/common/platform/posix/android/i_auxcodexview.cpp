@@ -866,13 +866,26 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 // CVAR_ARCHIVE, UNLIKE THE OTHER SECOND-SCREEN CVARS, because this one is no longer a debug knob. It was
 // unarchived while it was only reachable from the console and only a developer would move it; it is now a
 // slider on the Handhelds options page, and a size the player picks in a menu has to still be there after
-// a restart or the setting reads as broken. The default is 1.75 because that is the smallest value that is
-// comfortably legible at arm's length on the Thor's panel.
+// a restart or the setting reads as broken.
 //
-// ARCHIVING MAKES 1.75 A DEFAULT ONLY FOR CONFIGS THAT HAVE NEVER SET IT. A config carrying the old 1.0
-// keeps loading 1.0, because that is what CVAR_ARCHIVE means - the saved value wins over the declaration.
-// That is expected rather than a bug: an existing profile keeps the size it was last seen at, and a fresh
-// one starts legible.
+// THIS DEFAULT IS COUPLED TO TabTextPaddingX AND CANNOT BE RAISED WITHOUT IT. At Selaco's own 42px tab
+// padding, 1.75 puts the tab strip wider than the 1097 box and cuts DATALOGS and MANUAL off the ends -
+// measured on the panel, not reasoned about. The strip is centre-pinned and sized to its contents, so it
+// overflows symmetrically and the FIRST tab is lost as readily as the last. Tightening the padding to 20px
+// recovers 264 design pixels and brings the whole strip, trigger icons included, inside that box. 1.5 was
+// the default while the padding was untouched, and it is the value to fall back to if the tightening is
+// ever removed.
+//
+// AND IT IS LOCALE-SENSITIVE FOR THE SAME REASON, which is worth knowing before raising it further. Each
+// tab is its label's width plus the padding, so the strip's natural width depends on the language. 1.75 was
+// confirmed on the panel in English; a locale with longer tab labels has less slack in the same box and
+// could clip where English does not. That is an argument for measuring rather than assuming after any
+// string change, not for keeping the panel small.
+//
+// ARCHIVING MAKES 1.75 A DEFAULT ONLY FOR CONFIGS THAT HAVE NEVER SET IT. A config carrying an earlier
+// value keeps loading that value, because that is what CVAR_ARCHIVE means - the saved value wins over the
+// declaration. That is expected rather than a bug: an existing profile keeps the size it was last seen at,
+// and a fresh one starts at the size the panel was tuned for.
 CVAR(Float, aux_dashboard_zoom, 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 
 // 0.5 - 2.0. The lower half is kept even though calcScale's floor swallows most of it, because a clamp
@@ -920,19 +933,29 @@ static PField *FldDesktopLastUIScale = nullptr;
 static int DesktopCalcScaleRegs = 0;
 static int DesktopViewLayoutRegs = 0;
 
+// The two classes the relayout hands TightenTabStrip, cached for the same reason as everything above: the
+// live retune re-runs the relayout with nothing but the two globals in scope, so it cannot look them up.
+static PClass *DesktopPdaClass = nullptr;
+static PClass *DesktopViewClass = nullptr;
+
 // The zoom the live desktop is laid out for. The seed is inert in practice - BuildDesktopView writes it
 // before anything the retune needs is non-null - and is the no-zoom value so a read before that says so.
 static double DesktopLayoutZoom = 1.0;
 
-// The relayout, factored out so the live retune re-runs EXACTLY what the build ran. Four steps: null the
-// menu's ui_scaling handle, calcScale with the zoomed baseline, then the remaining two lines of
-// layoutChange's body (pda_menu.zs:777-781).
+// The relayout, factored out so the live retune re-runs EXACTLY what the build ran. Five steps: narrow the
+// tab strip, null the menu's ui_scaling handle, calcScale with the zoomed baseline, then the remaining two
+// lines of layoutChange's body (pda_menu.zs:777-781).
 //
 // THE CALLER OWNS THE PROJECTION SCOPE AND THE TRY/CATCH. Every call here can reach script - mainView
 // .layout() reaches PDAAppWindow.layout -> savePos, which is a SendNetworkEvent into the player's savegame -
 // so there is no safe way to call this outside one, and both call sites are already inside theirs.
 static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
 {
+	// The tab strip goes first because it only writes fields and pins: it needs the layout below to take
+	// effect, and folding it in here is what keeps it from costing a second pass. Fails soft on its own and
+	// latches nothing, so its return value is not worth testing - a clipped strip beats no desktop.
+	TightenTabStrip(menu, DesktopPdaClass, DesktopViewClass);
+
 	// Force uscale to 1.0 by nulling the menu's own cvar handle. calcScale's read of it is
 	// `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS the 1.0 path. Left null
 	// rather than restored: the only other readers are UIMenu.calcScale and UIMenu.ticker (menu.zs:125,
@@ -1264,6 +1287,8 @@ static bool BuildDesktopView()
 	FldDesktopUIScaling = fldUIScaling;
 	DesktopCalcScaleRegs = calcScaleRegs;
 	DesktopViewLayoutRegs = viewLayoutRegs;
+	DesktopPdaClass = cls;
+	DesktopViewClass = viewCls;
 
 	// lastUIScale is where PDAMenu3.calcScale leaves the scale it settled on, and the only use made of it
 	// here is the log line - so it is resolved apart from the group above and its absence costs the accuracy

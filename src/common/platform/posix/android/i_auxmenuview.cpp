@@ -481,6 +481,29 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 		GC::WriteBarrier(menu, MenuCanvas);
 		*(bool *)((uint8_t *)menu + FldMenuIgnoreUIScaling->Offset) = true;
 
+		// NARROW THE TAB STRIP BEFORE THE RELAYOUT BELOW, AND NOWHERE ELSE. It only writes fields and
+		// pins, so it needs a layout pass to take effect - and the pass it needs is the one already three
+		// lines further down. Doing it after, or in its own pass, would mean a SECOND mainView.layout(),
+		// which in this mode reaches PDAAppWindow.layout -> savePos -> SendNetworkEvent("pdaAppPos:...")
+		// with no FProjectionScope to stop it, i.e. an extra event in the player's savegame per open.
+		//
+		// AND THE FLAG IT SETS IS CONSUMED BY THAT SAME PASS, which is what stops it costing a layout of
+		// its own later: setTextPadding sets requiresLayout on the tab and its label (button.zs:269-270),
+		// UIView.tick would act on that on the next tick (view.zs:497-505), but UIView.layout clears it
+		// unconditionally on the way out (view.zs:772) and mainView.layout() below reaches every tab -
+		// UIHorizontalLayout lays each managed view out by hand in Content_SizeParent mode
+		// (horizontal_layout.zs:97). So the flag is already false by the first tick.
+		//
+		// Even if it were not, it could not reach savePos: tick routes through parent.layoutChildChanged
+		// only while the parent has layoutWithChildren, which only UIViewManager sets (view_manager.zs:19),
+		// and the strip's parent innerView is a plain UIView (pda_menu.zs:99). The walk up stops at the
+		// strip and relays out the strip, never mainView.
+		//
+		// It fails soft and latches nothing, so there is no return value worth testing, and it swallows
+		// its own aborts - which matters here specifically, because the catch below this would otherwise
+		// read one as a failed tune and latch mode 4 off over a cosmetic nicety.
+		TightenTabStrip(menu, MenuPdaClass, MenuViewClass);
+
 		// calcScale's read is `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS
 		// the 1.0 path. Safe without a write barrier: a native struct pointer is not an object pointer
 		// (zcc_compile.cpp:2208), so the GC does not trace this field and nulling it orphans nothing.

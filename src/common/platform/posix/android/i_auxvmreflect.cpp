@@ -36,7 +36,9 @@
 // dobjtype.h and dobjgc.h are not self-contained (they lean on FName, FString and the DObject
 // declaration being in scope already), so dobject.h leads - it is the header that pulls that chain
 // in, and every engine translation unit that touches PClass reaches it the same way.
+#include <exception>     // std::exception, the base TightenTabStrip catches a VM abort through
 #include "dobject.h"
+#include "cmdlib.h"      // countof, for the tab field table
 #include "dobjtype.h"
 #include "menu.h"        // DMenu, which Arg_Menu is checked against
 #include "printf.h"
@@ -387,6 +389,133 @@ DObject *ReadObjectField(DObject *obj, const PField *field)
 FString *StringFieldAddr(DObject *obj, const PField *field)
 {
 	return (FString *)((uint8_t *)obj + field->Offset);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The tab strip. The argument for all of this is in i_auxvmreflect.h; what is here is the mechanism.
+// ---------------------------------------------------------------------------------------------
+
+// THE ONE NUMBER THIS IS ALL FOR: the horizontal text padding each tab gets, replacing Selaco's own 42
+// (pda_menu.zs:238 and once per tab after it). (42 - 20) * 2 * 6 = 264 design pixels handed back, which is
+// what brings the whole strip - trigger icons included - inside the narrower logical box the second screen
+// lays the desktop out against. Vertical padding stays 0 exactly as Selaco sets it; only the width is short.
+//
+// A NAMED CONSTANT because it is a figure to be judged by eye on the panel rather than derived, so moving
+// it has to stay a one-line change.
+static const double TabTextPaddingX = 20.0;
+
+// The six tabs, declared together at pda_menu.zs:41 and all constructed unconditionally in init.
+static const char *const TabFieldNames[] =
+{
+	"readerButt", "mapButt", "objectivesButt", "statsButt", "tiersButt", "manualButt"
+};
+
+// Resolved once per class and reused by both modes, which host the same PDAMenu3 and so share the resolve.
+//
+// KEYED ON THE CLASS rather than on a bare "already tried" flag: a script recompile builds new PClass and
+// PField objects and frees the old ones, so a stale PField here would be a write through a freed offset
+// rather than a missed nicety. One attempt per class either way - on failure the class is still recorded
+// and the symbols stay null, so the yellow line is said once and never per frame.
+static PClass *TabPaddingClass = nullptr;
+static PClass *TabPaddingTabClass = nullptr;
+static PField *TabPaddingFields[countof(TabFieldNames)] = {};
+static VMFunction *FuncSetTextPadding = nullptr;
+static int SetTextPaddingRegs = 0;
+
+// Resolve the six fields, the tab class and setTextPadding, leaving FuncSetTextPadding null on any miss.
+// Split out so the caller below reads as resolve-then-apply; it records nothing but this file's own cache.
+static void ResolveTabPadding(DObject *menu, PClass *menuCls, PClass *viewCls)
+{
+	for (unsigned i = 0; i < countof(TabFieldNames); i++)
+	{
+		TabPaddingFields[i] = ResolveField(menuCls, TabFieldNames[i], Field_ViewPtr, viewCls);
+		if (TabPaddingFields[i] == nullptr)
+			return;
+	}
+
+	// setTextPadding is resolved against the class of a REAL tab, not against a name looked up by hand,
+	// because ResolveMethod picks the entry out of that class's own vtable and the override that actually
+	// runs is the one this code has to be checked against. PDATab does not override it (tabs.zs:1) and
+	// UIButton's is what runs (button.zs:258) - but that is a fact about today's script, so it is proved
+	// rather than assumed, and every tab is then required to be exactly this class.
+	DObject *firstTab = ReadObjectField(menu, TabPaddingFields[0]);
+	if (firstTab == nullptr || !firstTab->IsKindOf(viewCls))
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxTabStrip: %s.%s is not a %s, the tab strip keeps Selaco's own padding\n",
+			menuCls->TypeName.GetChars(), TabFieldNames[0], viewCls->TypeName.GetChars());
+		return;
+	}
+
+	// setTextPadding(double left, double top, double right, double bottom) - four declared arguments, one
+	// register each, five with self. All four have defaults, which does not change NumArgs: the caller
+	// fills omitted ones in, so the callee still declares and reads five.
+	static const EArgKind PaddingArgs[] = { Arg_Float, Arg_Float, Arg_Float, Arg_Float };
+	PClass *tabCls = firstTab->GetClass();
+	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", PaddingArgs, 4, &SetTextPaddingRegs);
+	if (func == nullptr)
+		return;
+
+	TabPaddingTabClass = tabCls;
+	FuncSetTextPadding = func;
+}
+
+void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls)
+{
+	if (menu == nullptr || menuCls == nullptr || viewCls == nullptr)
+		return;
+
+	if (menuCls != TabPaddingClass)
+	{
+		// Recorded BEFORE the resolve, so a resolve that fails still counts as the one attempt for this
+		// class and cannot be retried every frame.
+		TabPaddingClass = menuCls;
+		TabPaddingTabClass = nullptr;
+		FuncSetTextPadding = nullptr;
+		SetTextPaddingRegs = 0;
+		for (unsigned i = 0; i < countof(TabFieldNames); i++)
+			TabPaddingFields[i] = nullptr;
+
+		ResolveTabPadding(menu, menuCls, viewCls);
+	}
+
+	if (FuncSetTextPadding == nullptr)
+		return;
+
+	// APPLIED EVERY CALL, not once: the resolve is per class but the padding is per INSTANCE, and mode 4
+	// gets a brand new PDAMenu3 every time the player opens their PDA. Writing the same four values again
+	// is idempotent apart from re-setting requiresLayout, which the layout the caller is about to run
+	// consumes anyway.
+	unsigned tightened = 0;
+	try
+	{
+		for (unsigned i = 0; i < countof(TabFieldNames); i++)
+		{
+			DObject *tab = ReadObjectField(menu, TabPaddingFields[i]);
+			if (tab == nullptr || tab->GetClass() != TabPaddingTabClass)
+			{
+				// Exactly the class setTextPadding was resolved against, not merely a kind of it: a
+				// subclass could override it with something this code has not read. Same rule, and the
+				// same reason, as both modes' "is not a plain UIView" checks on mainView.
+				Printf(TEXTCOLOR_YELLOW "AuxTabStrip: %s.%s is not a plain %s, the tab strip keeps the "
+					"padding it has\n", menuCls->TypeName.GetChars(), TabFieldNames[i],
+					TabPaddingTabClass->TypeName.GetChars());
+				return;
+			}
+
+			VMValue params[] = { tab, TabTextPaddingX, 0.0, TabTextPaddingX, 0.0 };
+			VMCall(FuncSetTextPadding, params, SetTextPaddingRegs, nullptr, 0);
+			tightened++;
+		}
+	}
+	catch (const std::exception &e)
+	{
+		// A partial application is left standing rather than unwound: some tabs tight and some wide is
+		// cosmetically odd but lays out and draws perfectly, whereas putting 42 back would be six more
+		// calls through the thing that just aborted. The count is printed because "some of them" is the
+		// one detail that makes an odd-looking strip legible as this rather than as a layout bug.
+		Printf(TEXTCOLOR_YELLOW "AuxTabStrip: setting the tab padding aborted after %u of %u tabs (%s), "
+			"the strip keeps the padding it has\n", tightened, (unsigned)countof(TabFieldNames), e.what());
+	}
 }
 
 // The storage behind the cross-mode channel documented in i_auxvmreflect.h. It lives here, in neither

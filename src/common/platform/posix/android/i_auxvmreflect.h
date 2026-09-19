@@ -195,6 +195,35 @@ DObject *ReadObjectField(DObject *obj, const PField *field);
 FString *StringFieldAddr(DObject *obj, const PField *field);
 
 // ---------------------------------------------------------------------------------------------
+// THE TAB STRIP, narrowed to fit a logical box the desktop was never designed for.
+//
+// PDAMenu3's tab strip is a UIHorizontalLayout pinned Pin_HCenter and sized to its contents
+// (pda_menu.zs:199-205), so when it is wider than the box it overflows SYMMETRICALLY: it loses the first
+// tab as readily as the last, and at the wider zooms it loses the LT/RT trigger icons before either.
+// Selaco gives each of the six tabs 42 pixels of padding on each side (pda_menu.zs:238, and once more per
+// tab after it), which is 84 per tab and just over 500 across the strip - by far the biggest thing that
+// can be handed back without touching anything the design depends on.
+//
+// SHARED BETWEEN BOTH MODES because both host the same PDAMenu3 against the same narrow canvas, and it
+// lives here rather than in either mode file for the reason MenuLastAppClass does: neither mode owns it.
+//
+// EACH CALLER FOLDS IT INTO THE RELAYOUT IT ALREADY RUNS, and that placement is a requirement rather
+// than a tidiness: this only writes fields and pins, so it needs a layout pass after it to take effect,
+// and in mode 4 a layout pass reaches PDAAppWindow.layout -> savePos -> SendNetworkEvent (app_window.zs
+// :170) with no FProjectionScope to catch it. An extra relayout there would be an extra event in the
+// player's savegame, so there must not be one.
+//
+// FAILS SOFT, AND LATCHES NOTHING OF THE CALLER'S. One yellow line and a return leaves every tab at
+// Selaco's own 42 and the strip exactly as wide as it shipped. The try/catch inside is therefore not
+// optional: both callers sit in a try whose catch DOES latch their mode off, so an abort from here has
+// to be swallowed before it can reach one. Tighter tabs are a nicety; a drawing panel is not.
+//
+// menuCls is what the tab fields are resolved against and viewCls the UIView they are proved to point
+// at; both callers have already proved menu is an instance of menuCls.
+// ---------------------------------------------------------------------------------------------
+void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls);
+
+// ---------------------------------------------------------------------------------------------
 // THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3, and the whole point of the feature: the class
 // of the app the player last switched to in their OWN PDA. Written by MenuSampleCurrentApp (mode 4,
 // i_auxmenuview.cpp) on every frame the real PDA is open, read by DashboardWantedIndex (mode 3,
