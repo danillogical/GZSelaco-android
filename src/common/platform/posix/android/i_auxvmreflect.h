@@ -65,6 +65,29 @@ class VMFunction;
 // units that call it cannot drift apart.
 FCanvas *GetTextureCanvas(const FString &texturename);
 
+// ---------------------------------------------------------------------------------------------
+// THE SECOND-SCREEN ZOOM, which BOTH modes lay their menu out against: one cvar, one clamp, two modes.
+//
+// aux_dashboard_zoom and the arithmetic table saying where its useful travel actually ends live in
+// i_auxcodexview.cpp, next to the mode-3 relayout they were written for. Mode 4 divides the same
+// baseline height by the same clamped value, so these two are the whole of what it needs from there.
+//
+// NOT a second cross-mode channel like MenuLastAppClass below: there is no state and no direction here,
+// only a read of one cvar through one clamp. Shared rather than re-derived because the clamp is
+// load-bearing for mode 4 in a way it is not for mode 3 - the value comes back inside 0.5 - 2.0 and
+// NEVER NaN, and a NaN would compare unequal to itself, which in mode 4 is a relayout every frame and a
+// network event with it.
+//
+// At global scope rather than inside AuxView for the same reason GetTextureCanvas is: they are defined
+// in a translation unit that does not open the namespace. Hence the Dashboard prefix on both names,
+// which is the cvar's own name rather than a claim that mode 3 owns them.
+double DashboardZoom();
+
+// Which of calcScale's own limits swallowed a zoom, as a phrase to append to a log line, or "" when the
+// zoom asked for is the zoom that comes back. calcScale is the same PDAMenu3 method in both modes, so
+// its floor and its snap band are dead zones in both.
+const char *DashboardZoomLimitNote(double zoom);
+
 // Everything below is in a namespace for one concrete reason: i_auxcanvas.cpp includes this header
 // for GetTextureCanvas and already has its own AuxCanvasName, AuxCanvasWidth and AuxCanvasHeight
 // with different types and meanings, which at file scope would be a redefinition. Both mode files
@@ -151,6 +174,7 @@ enum EFieldKind
 {
 	Field_Bool,
 	Field_Float,
+	Field_String,
 	Field_ViewPtr,
 	Field_CVarPtr,
 	Field_CanvasPtr,
@@ -163,6 +187,12 @@ enum EFieldKind
 PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls);
 
 DObject *ReadObjectField(DObject *obj, const PField *field);
+
+// A ZScript String field, addressed for reading or writing. DObject::StringVar does the same thing in
+// one call but I_Errors when the field is missing or the wrong type (dobject.cpp:624), which is exactly
+// the startup this fork's fail-soft rule refuses to cost the player - so the field is proved by
+// ResolveField first and only the arithmetic happens here.
+FString *StringFieldAddr(DObject *obj, const PField *field);
 
 // ---------------------------------------------------------------------------------------------
 // THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3, and the whole point of the feature: the class

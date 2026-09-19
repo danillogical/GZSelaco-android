@@ -8,6 +8,8 @@ import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Display;
 import android.view.View;
@@ -115,6 +117,29 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
         }
     }
 
+    /**
+     * native -> Java: the aux_panel cvar changed. Unlike the two above, this cannot do its work
+     * where it is received. A cvar callback runs on the GAME thread, and a Presentation may only be
+     * created or dismissed on the UI thread, so all this does is hand the decision to the main
+     * Looper - the same Looper updateDisplay() already runs on for display hotplug, which is what
+     * keeps a user toggle and a hotplug from racing each other without a lock of their own.
+     *
+     * Stopping the pushes is not enough on its own: the Presentation would stay on screen frozen on
+     * the last frame the engine gave it. The panel has to actually go away and come back.
+     */
+    static void setPanelEnabled(boolean enabled) {
+        sMainHandler.post(() -> {
+            sPanelEnabled = enabled;
+            // Null before start() or after stop(): nothing to do beyond remembering the state, which
+            // the next start() will honour. The engine can set the cvar from its config before this
+            // process has an AuxPanel, and can set it again after the activity is destroyed.
+            final AuxPanel panel = sInstance;
+            if (panel != null) {
+                panel.updateDisplay();
+            }
+        });
+    }
+
     // Selaco's own startup splash, decoded once from the player's ipk3 and reused for the life of the
     // process - see loadStartupImage. Shown by AuxView whenever there is no codex frame; never shipped
     // in the APK, since Selaco is a commercial asset and this repo is public.
@@ -149,10 +174,30 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
     // and the null can never clobber a live reference.
     private static volatile AuxView sView;
 
+    // The thread hop for setPanelEnabled, and the live panel it has to reach.
+    //
+    // sInstance is the static handle a static JNI entry point needs to get at the per-instance
+    // Presentation bookkeeping; it is set in start() and cleared in stop(), both on the UI thread,
+    // and volatile because the game thread does not read it but the posted Runnable does - which is
+    // the UI thread again, so the volatile is belt and braces rather than load-bearing.
+    //
+    // sPanelEnabled mirrors the aux_panel cvar, whose default is likewise true. It exists because
+    // releasing the Presentation is not a stable state on its own: any later display hotplug calls
+    // updateDisplay(), which would happily put back a panel the player turned off. Only ever touched
+    // on the UI thread - written in the posted Runnable, read in updateDisplay() - so it needs no
+    // synchronisation and deliberately is not volatile.
+    private static final Handler sMainHandler = new Handler(Looper.getMainLooper());
+    private static volatile AuxPanel sInstance;
+    private static boolean sPanelEnabled = true;
+
     private final Context mContext;
     private final DisplayManager mDisplayManager;
     private AuxPresentation mPresentation;
     private int mDisplayId = -1;
+
+    // Whether the "no second screen" line has already been said for the current dry spell. UI thread
+    // only, like the rest of this bookkeeping, so it needs no synchronisation.
+    private boolean mLoggedNoDisplay;
 
     AuxPanel(Context context) {
         mContext = context;
@@ -164,6 +209,10 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
             Log.i(TAG, "AuxPanel: no DisplayManager, second screen unavailable");
             return;
         }
+        // Before the first updateDisplay(), so a cvar toggle that arrives while we are still in here
+        // finds the instance it needs - the post cannot run until this returns, since we are on the
+        // Looper it posts to.
+        sInstance = this;
         mDisplayManager.registerDisplayListener(this, null);
         updateDisplay();
         loadStartupImageAsync();
@@ -232,6 +281,11 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
         if (mDisplayManager != null) {
             mDisplayManager.unregisterDisplayListener(this);
         }
+        // Cleared before the release, so a setPanelEnabled already queued behind us cannot resurrect
+        // a panel on an activity that is going away.
+        if (sInstance == this) {
+            sInstance = null;
+        }
         releasePresentation();
     }
 
@@ -251,11 +305,14 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
      * the panel goes away and native is told to stop.
      */
     private void updateDisplay() {
-        Display target = pickDisplay();
+        // aux_panel off is handled as "no display qualifies", so the player's choice and a real
+        // absence take the same path rather than being two states that can disagree.
+        Display target = sPanelEnabled ? pickDisplay() : null;
 
         if (target == null) {
             if (mPresentation != null) {
-                Log.i(TAG, "AuxPanel: target display gone, releasing panel");
+                Log.i(TAG, sPanelEnabled ? "AuxPanel: target display gone, releasing panel"
+                        : "AuxPanel: aux_panel turned off, releasing panel");
             }
             releasePresentation();
             return;
@@ -284,6 +341,8 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
 
         mPresentation = pres;
         mDisplayId = target.getDisplayId();
+        // Armed again, so a later disconnect gets its own line rather than being swallowed.
+        mLoggedNoDisplay = false;
         Log.i(TAG, "AuxPanel: panel up on display " + mDisplayId
                 + " (" + target.getName() + ")");
 
@@ -302,15 +361,40 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
     private Display pickDisplay() {
         Display[] candidates = mDisplayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
         if (candidates == null) {
+            logNoDisplay("getDisplays returned null");
             return null;
         }
+        // Built only on the failing path, so the normal case does no string work at all. Without this
+        // a missing panel is silent and indistinguishable from a single-screen device behaving
+        // correctly - which is the one thing you most want to know when the panel does not appear.
+        StringBuilder rejected = null;
         for (Display d : candidates) {
-            if (d.getDisplayId() == Display.DEFAULT_DISPLAY) continue;
-            if (!d.isValid()) continue;
-            if (d.getState() == Display.STATE_OFF) continue;
-            return d;
+            final String why;
+            if (d.getDisplayId() == Display.DEFAULT_DISPLAY) why = "is the default display";
+            else if (!d.isValid()) why = "is not valid";
+            else if (d.getState() == Display.STATE_OFF) why = "is off";
+            else return d;
+
+            if (rejected == null) rejected = new StringBuilder();
+            else rejected.append(", ");
+            rejected.append("id ").append(d.getDisplayId()).append(' ').append(why);
         }
+        logNoDisplay(candidates.length + " presentation display(s), none usable"
+                + (rejected == null ? "" : ": " + rejected));
         return null;
+    }
+
+    /**
+     * Said once per dry spell rather than on every call, because updateDisplay() runs on every hotplug
+     * event and a single-screen device would otherwise repeat this forever. Reset as soon as a panel
+     * comes up, so a later disconnect is reported again rather than swallowed as a duplicate.
+     */
+    private void logNoDisplay(String reason) {
+        if (mLoggedNoDisplay) {
+            return;
+        }
+        mLoggedNoDisplay = true;
+        Log.i(TAG, "AuxPanel: no second screen - " + reason);
     }
 
     private void releasePresentation() {

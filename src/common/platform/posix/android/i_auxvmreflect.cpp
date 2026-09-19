@@ -284,6 +284,13 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 		ok = field->Type == TypeFloat64;
 		break;
 
+	case Field_String:
+		// A ZScript String is an FString living inline in the object, constructed by the class's own
+		// special-inits, so the address below may be assigned to like any other FString. Equality
+		// against TypeString rather than a structural test because there is exactly one string type.
+		ok = field->Type == TypeString;
+		break;
+
 	case Field_ViewPtr:
 		// Declared as a UIView or a subclass of one, so the runtime check before each write below can
 		// be an IsKindOf against UIView and nothing wider.
@@ -375,6 +382,11 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 DObject *ReadObjectField(DObject *obj, const PField *field)
 {
 	return *(DObject **)((uint8_t *)obj + field->Offset);
+}
+
+FString *StringFieldAddr(DObject *obj, const PField *field)
+{
+	return (FString *)((uint8_t *)obj + field->Offset);
 }
 
 // The storage behind the cross-mode channel documented in i_auxvmreflect.h. It lives here, in neither

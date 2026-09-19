@@ -45,7 +45,7 @@
 ** readback is edge-triggered rather than paced.
 **
 ** WHAT CROSSES THE BOUNDARY. nativeAuxEnable(boolean) comes IN, from the Android UI thread,
-** telling native whether a panel is actually up. Two static Java methods on com.selaco.game.AuxPanel
+** telling native whether a panel is actually up. Three static Java methods on com.selaco.game.AuxPanel
 ** go OUT, resolved once and then latched (AuxResolve):
 **   pushPixels(ByteBuffer, int, int)      - the AUXCANVAS readback, edge-triggered on a content
 **                                           change (and paced in mode 4) because each readback stalls
@@ -54,6 +54,12 @@
 **                                           once and reused; Java copies it synchronously.
 **   clearPixels()                         - drops the last pushed frame on level exit, best-effort,
 **                                           so the panel falls through to Selaco's startup splash.
+**   setPanelEnabled(boolean)              - aux_panel changed, so the Presentation itself has to go
+**                                           away or come back. This is the only outbound call whose
+**                                           work cannot be done where it is received: a cvar callback
+**                                           runs on the game thread and a Presentation may only be
+**                                           touched on the UI thread, so Java posts it to the main
+**                                           Looper. See AuxPanelEnableChanged.
 **
 ** WHO OWNS THE CANVAS is decided here, in I_AuxPanelFrame, from aux_canvas_zscript. Exactly one
 ** drawer runs per interval, because all of them write the same texture: 0 draws the C++ test pattern
@@ -90,19 +96,45 @@
 #include <jni.h>
 
 #include "c_cvars.h"
+#include "dobject.h"     // must precede dobjtype.h, which refuses to be included on its own
+#include "dobjtype.h"
 #include "doomstat.h"
 #include "gamestate.h"
 #include "i_time.h"
+#include "menu.h"        // MenuDescriptors and DOptionMenuDescriptor, for the settings-menu item
 #include "printf.h"
+#include "symbols.h"
+#include "v_font.h"      // V_FindFontColor, to give the group heading Selaco's own OMNIBLUE
+#include "vm.h"
+#include "zstring.h"
 
-// User-facing toggle. Off must be genuinely inert - no probe, no canvas draw, no readback, no JNI -
-// not merely hidden, so a device that leaves it off pays nothing beyond the read of this bool.
-CVAR(Bool, aux_panel, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+#include "i_auxvmreflect.h"   // ResolveField, for the two Selaco menu items rewritten below
+
+// User-facing toggle, and live: 0 tears the Presentation down and 1 builds it again, because merely
+// stopping the pushes would leave Java's window on screen frozen on its last frame. Off must be
+// genuinely inert - no probe, no canvas draw, no readback, no JNI - not merely hidden, so a device
+// that leaves it off pays nothing beyond the read of this bool.
+static void AuxPanelEnableChanged(bool on);
+
+CUSTOM_CVAR(Bool, aux_panel, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+{
+	AuxPanelEnableChanged(self);
+}
 
 // Whether Java currently has a panel up. Written ONLY by nativeAuxEnable, from the Android UI
 // thread; read every frame by the game thread. Relaxed is sufficient: this is a pure hint, and a
 // push that races a teardown is harmless because the Java entry points only ever store a value.
 static std::atomic<bool> AuxLive{ false };
+
+// Whether a panel has EVER been up, which is how a single-screen device is told apart from one that
+// simply has its panel off right now - AuxLive cannot answer that, because aux_panel 0 turns it off
+// too, and gating the toggle on it would make the panel unrecoverable.
+//
+// The ordering is not a race despite the relaxed store. AuxPanel.start() runs inside
+// SelacoActivity.onCreate and calls nativeAuxEnable(true) synchronously, and SDL does not create the
+// game thread until it has a surface and focus - both delivered as later main-Looper messages - so on
+// a device with a second screen this is already set before the game thread exists to read a cvar.
+static std::atomic<bool> AuxEverLive{ false };
 
 // Latched on the first failure and never retried.
 //
@@ -114,6 +146,7 @@ static bool AuxBroken = false;
 static jclass AuxClass = nullptr;
 static jmethodID AuxPushPixels = nullptr;
 static jmethodID AuxClearPixels = nullptr;
+static jmethodID AuxSetPanelEnabled = nullptr;
 
 // Wraps the canvas readback's persistent staging mapping. Created once - the mapping's address
 // never moves - and kept as a global ref for the life of the process, same lifetime as AuxClass.
@@ -152,7 +185,10 @@ bool I_AuxPanelReadbackPending() { return AuxCanvasNeedsReadback; }
 extern "C" JNIEXPORT void JNICALL
 Java_com_selaco_game_AuxPanel_nativeAuxEnable(JNIEnv *env, jclass cls, jboolean on)
 {
-	AuxLive.store(on == JNI_TRUE, std::memory_order_relaxed);
+	const bool live = (on == JNI_TRUE);
+	if (live)
+		AuxEverLive.store(true, std::memory_order_relaxed);
+	AuxLive.store(live, std::memory_order_relaxed);
 }
 
 // Resolve the Java side once. Returns false and latches AuxBroken on any failure.
@@ -191,7 +227,59 @@ static bool AuxResolve(JNIEnv *env)
 		AuxBroken = true;
 		return false;
 	}
+
+	AuxSetPanelEnabled = env->GetStaticMethodID(AuxClass, "setPanelEnabled", "(Z)V");
+	if (env->ExceptionCheck() || AuxSetPanelEnabled == nullptr)
+	{
+		env->ExceptionClear();
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: setPanelEnabled not found, second-screen panel disabled\n");
+		AuxBroken = true;
+		return false;
+	}
 	return true;
+}
+
+// aux_panel changed. Ask Java to put the Presentation up or take it down, so that off actually means
+// gone rather than frozen on the last frame the engine pushed.
+//
+// THE THREAD HOP IS JAVA'S, deliberately. A cvar callback runs on the game thread - this is reached
+// from the console, the menu and the config load, all of which are game-thread - while a Presentation
+// may only be created or dismissed on the UI thread. setPanelEnabled is therefore static and does
+// nothing itself but post to the main Looper, which is the same Looper AuxPanel's own bookkeeping
+// already runs on (its DisplayListener callbacks are bound to it), so the teardown and rebuild stay
+// serialised against display hotplug with no lock of their own.
+//
+// A SINGLE-SCREEN DEVICE MUST PAY NOTHING, which is what AuxEverLive buys: no panel has ever been up,
+// so there is nothing to tear down or rebuild, and toggling the cvar there is one relaxed load and a
+// return - no JNI resolution, no global ref and no posted message. AuxLive would be the wrong test
+// here, because turning the cvar off is itself what makes AuxLive false, and the panel could then
+// never be turned back on.
+static void AuxPanelEnableChanged(bool on)
+{
+	// Force the next live frame to redraw. Turning the cvar off returns from I_AuxPanelFrame at its
+	// first line, ABOVE the place that clears AuxWasLive, so without this the frame after a re-enable
+	// sees an unchanged mode and an unchanged codex and queues no draw at all - and the rebuilt
+	// Presentation, which has no pixels of its own, would sit on the startup splash indefinitely.
+	// Written from the game thread, which is the only thread that ever touches it.
+	AuxWasLive = false;
+
+	if (AuxBroken || !AuxEverLive.load(std::memory_order_relaxed))
+		return;
+
+	JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+	if (env == nullptr)
+		return;
+	if (AuxClass == nullptr && !AuxResolve(env))
+		return;
+
+	env->CallStaticVoidMethod(AuxClass, AuxSetPanelEnabled, on ? JNI_TRUE : JNI_FALSE);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionDescribe();
+		env->ExceptionClear();
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: setPanelEnabled threw, second-screen panel disabled\n");
+		AuxBroken = true;
+	}
 }
 
 // Drop the last codex frame on level exit, best-effort, so the panel falls through to Selaco's
@@ -539,3 +627,307 @@ void I_AuxPanelFrame()
 
 	AuxCanvasReadbackPhase(env);
 }
+
+// ----------------------------------------------------------------------------------------------
+// The two Selaco menus this port rewrites, both from C++ because no lump of ours can reach them.
+//
+// Every MENUDEF parses in load order (menudef.cpp:1529) and our gzdoom.pk3 loads before the player's
+// Selaco.ipk3, so an AddOptionMenu of ours would run before the target menus exist - and Selaco.ipk3 is
+// the user's copy of a commercial game, which this port never modifies. So the already-parsed
+// descriptors are edited instead, from D_DoomMain once M_Init has read every lump.
+//
+// EVERY FAILURE HERE IS ONE LINE AND A RETURN. A different Selaco build, a renamed menu or no ipk3 at
+// all must not cost the player a startup, and aux_panel is still settable from the console either way.
+// The resolvers print their own line about which symbol failed and latch nothing (i_auxvmreflect.h), so
+// each step below adds one line of its own saying what the player will see instead.
+// ----------------------------------------------------------------------------------------------
+
+// The Options menu's section list, and the handheld page it links to. The handheld page is also where the
+// second-screen items go: a second display is a property of this port's handhelds rather than a video mode,
+// and unlike Selaco's video menu it ends with its last real setting, so appending is simply correct there.
+static const char *const AuxOptionsListName = "OptionsMenu2";
+static const char *const AuxHandheldMenuName = "SteamDeckMenu";
+
+// Selaco's list item for a section button. Its label is read straight off mText
+// (options_menu.zs:190, through StringTable.Localize, which passes a plain string through unchanged),
+// so writing that field renames this one entry and nothing else. The string table is deliberately not
+// used: $MENU_STEAMDECK comes from Selaco's own LANGUAGE lump, and SetOverrideStrings replaces the whole
+// table Dehacked also reads (d_dehacked.cpp:3746) rather than one entry of it.
+static const char *const AuxTextItemClassName = "ListMenuItemTextItem";
+static const char *const AuxTextItemFieldName = "mText";
+static const char *const AuxHandheldLabel = "Handhelds";
+
+// The group heading, in the exact shape SteamDeckMenu's own three groups use: a Space 30 then a StaticText
+// in OMNIBLUE. Two classes rather than one because they are not the same class here: StaticText is the
+// stock item, while Space is Selaco's own (options_items.zs:315).
+static const char *const AuxStaticTextClassName = "OptionMenuItemStaticText";
+static const char *const AuxSpaceClassName = "OptionMenuItemSpace";
+
+// A literal rather than a $KEY because there is no LANGUAGE entry for it and this port does not add one to
+// the player's ipk3. StringTable.Localize passes a string with no leading $ through unchanged, which is how
+// the "Handhelds" rename below already works. The colour is the one Selaco heads its own groups with, and
+// V_FindFontColor resolves it because TEXTCOLO was parsed long before this runs (d_main.cpp:3566 vs :3744).
+static const char *const AuxSecondScreenHeading = "SECOND SCREEN";
+static const char *const AuxSecondScreenHeadingColor = "OMNIBLUE";
+
+// The gap Selaco puts above each of its own headings on this page.
+static const int AuxSecondScreenHeadingSpace = 30;
+
+// The handheld page's descriptor, or null. Prints nothing: what a missing page means is the caller's to
+// say, because the toggle and the slider each report their own consequence.
+static DOptionMenuDescriptor *AuxHandheldDescriptor()
+{
+	DMenuDescriptor **descp = MenuDescriptors.CheckKey(AuxHandheldMenuName);
+	if (descp == nullptr || *descp == nullptr || !(*descp)->IsKindOf(RUNTIME_CLASS(DOptionMenuDescriptor)))
+		return nullptr;
+	return static_cast<DOptionMenuDescriptor *>(*descp);
+}
+
+// The "SECOND SCREEN" group heading, added by whichever of the two items below gets here first.
+//
+// SHARED RATHER THAN OWNED BY ONE OF THEM, which is what keeps the two insertions independent: either one
+// working on its own still produces a labelled group, and a heading with nothing under it is never left
+// behind because each caller only reaches this after its own item class has resolved. The latch is what
+// stops the second caller adding a second heading.
+//
+// Both items are decoration, so a missing class is one line and no heading rather than a return: the toggle
+// and the slider still go in, just without a title above them. OptionMenuItemSpace in particular is
+// Selaco's own class and simply does not exist on another game.
+static bool AuxHeadingAdded = false;
+static void AuxAddSecondScreenHeading(DOptionMenuDescriptor *desc)
+{
+	if (AuxHeadingAdded)
+		return;
+	AuxHeadingAdded = true;
+
+	// The gap first, then the title, matching the Space/StaticText order of SteamDeckMenu's own three groups.
+	//
+	// NOT searching parents, unlike the toggle and the slider below, and that is load-bearing here: this Init
+	// takes one int, while the OptionMenuItem.Init it would fall back to takes a String, a Name and a bool -
+	// so a build where OptionMenuItemSpace does not declare its own would be called with four registers' worth
+	// of arguments supplied as one, which is the read-past-the-array crash i_auxvmreflect.h opens with.
+	PClass *spaceCls = PClass::FindClass(AuxSpaceClassName);
+	PFunction *spaceInit = (spaceCls != nullptr)
+		? dyn_cast<PFunction>(spaceCls->FindSymbol("Init", false)) : nullptr;
+	if (spaceInit == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s.Init, the second-screen group has no gap above it\n",
+			AuxSpaceClassName);
+	}
+	else
+	{
+		// VMCallWithDefaults, not VMCall, so a build whose Init grew an optional argument keeps whatever
+		// value the declaration gives it - exactly how the MENUDEF parser builds this same item.
+		DMenuItemBase *space = (DMenuItemBase *)spaceCls->CreateNew();
+		TArray<VMValue> params;
+		params.Push(space);
+		params.Push(AuxSecondScreenHeadingSpace);
+		VMCallWithDefaults(spaceInit->Variants[0].Implementation, params, nullptr, 0);
+		desc->mItems.Push(space);
+	}
+
+	// CreateOptionMenuItemStaticText is the engine's own builder for exactly this item (menu.cpp:1146) and is
+	// used rather than a fourth hand-rolled CreateNew, but it dereferences the class and its Init without
+	// checking either - so both are proved here first, which is also this file's rule.
+	//
+	// The colour reaches mColor only through the 0x12340000 marker the MENUDEF parser sets on a colour name
+	// (menudef.cpp:1128, optionmenuitems.zs:604); without it Init reads any positive number as the "use the
+	// header colour" flag the older boolean form of this argument meant, and the heading comes out white.
+	PClass *textCls = PClass::FindClass(AuxStaticTextClassName);
+	PFunction *textInit = (textCls != nullptr)
+		? dyn_cast<PFunction>(textCls->FindSymbol("Init", false)) : nullptr;
+	if (textInit == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s.Init, the second-screen group has no heading\n",
+			AuxStaticTextClassName);
+		return;
+	}
+	const int color = (int)V_FindFontColor(FName(AuxSecondScreenHeadingColor)) | 0x12340000;
+	desc->mItems.Push(CreateOptionMenuItemStaticText(AuxSecondScreenHeading, color));
+}
+
+// The second-screen toggle, on the handheld page.
+//
+// Its own entries are Selaco's OptionMenuItemTooltipOption, a subclass of the stock OptionMenuItemOption
+// used here, and Selaco's builder dispatches on OptionMenuItemOptionBase (options_menu_base.zs:166) - so
+// a stock item is built as an ordinary dropdown and simply has no tooltip.
+static void AuxAddSecondScreenToggle()
+{
+	DOptionMenuDescriptor *desc = AuxHandheldDescriptor();
+	if (desc == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s option menu, second-screen toggle not added\n",
+			AuxHandheldMenuName);
+		return;
+	}
+
+	PClass *cls = PClass::FindClass("OptionMenuItemOption");
+	PFunction *init = (cls != nullptr) ? dyn_cast<PFunction>(cls->FindSymbol("Init", true)) : nullptr;
+	if (init == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no OptionMenuItemOption.Init, second-screen toggle not added\n");
+		return;
+	}
+
+	// Ahead of the CreateNew below so that no object is ever held only by a local across another allocation:
+	// the heading's own items are allocated in here, and the toggle does not exist yet.
+	AuxAddSecondScreenHeading(desc);
+
+	// APPENDED, not spliced. SteamDeckMenu ends with its aim-assist options and has no trailing reset or
+	// DEFAULTS block of its own (MENUDEF.zsc:64-88), so the end of the list is the end of the page - there is
+	// nothing below to land beneath by mistake, and the group above reads as a fourth group.
+	//
+	// VMCallWithDefaults, not VMCall, so Init's optional graycheck/center/graycheckVal keep the
+	// values the declaration gives them - exactly how the MENUDEF parser builds this same item.
+	DMenuItemBase *item = (DMenuItemBase *)cls->CreateNew();
+	FString label = "Second Screen";
+	TArray<VMValue> params;
+	params.Push(item);
+	params.Push(&label);
+	params.Push(FName("aux_panel").GetIndex());
+	params.Push(FName("OnOff").GetIndex());
+	VMCallWithDefaults(init->Variants[0].Implementation, params, nullptr, 0);
+
+	desc->mItems.Push(item);
+}
+
+// The second-screen size slider (aux_dashboard_zoom, i_auxcodexview.cpp) with its menu label, console cvar
+// name and slider range. The console clamp stays wider than this for a reason given at the declaration; the
+// slider is deliberately the narrower, useful band.
+//
+// A struct and a loop for one entry because this list has held three, and adding one back should not mean
+// rewriting the insertion.
+struct AuxDashboardSlider
+{
+	const char *label;
+	const char *cvarName;
+	double min, max, step;
+	int fracDigits;
+};
+static const AuxDashboardSlider AuxDashboardSliders[] = {
+	// Below 1.0 shrinks the panel, the opposite of the goal, so the slider starts at 1.0 rather than the
+	// cvar's own 0.5 floor. fracDigits is the DECIMAL COUNT the item hands DrawSlider's
+	// String.format("%%.%df", ...) (optionmenuitems.zs:751), not a boolean - two of them so 0.05 steps are
+	// distinguishable (1.05, not a rounded 1).
+	{ "Second Screen Size", "aux_dashboard_zoom", 1.0, 2.0, 0.05, 2 },
+};
+
+// The second-screen size slider, on the handheld page, directly below the toggle above.
+//
+// A SEPARATE FUNCTION FROM THE TOGGLE, and called separately, so that one failing to resolve still leaves
+// the other on the page. aux_dashboard_zoom stays settable from the console whatever happens here.
+static void AuxAddDashboardSliders()
+{
+	DOptionMenuDescriptor *desc = AuxHandheldDescriptor();
+	if (desc == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s option menu, second-screen size slider not added\n",
+			AuxHandheldMenuName);
+		return;
+	}
+
+	PClass *cls = PClass::FindClass("OptionMenuItemSlider");
+	PFunction *init = (cls != nullptr) ? dyn_cast<PFunction>(cls->FindSymbol("Init", true)) : nullptr;
+	if (init == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no OptionMenuItemSlider.Init, second-screen size slider not added\n");
+		return;
+	}
+
+	// A no-op when the toggle already added it, and the reason this runs even though the toggle normally
+	// gets there first: the slider must still be headed when the toggle's own class did not resolve.
+	AuxAddSecondScreenHeading(desc);
+
+	for (const AuxDashboardSlider &slider : AuxDashboardSliders)
+	{
+		// VMCallWithDefaults, not VMCall, so Init's optional command/graycheck/graycheckVal keep the
+		// values the declaration gives them - exactly how the MENUDEF parser builds this same item.
+		DMenuItemBase *item = (DMenuItemBase *)cls->CreateNew();
+		FString label = slider.label;
+		TArray<VMValue> params;
+		params.Push(item);
+		params.Push(&label);
+		params.Push(FName(slider.cvarName).GetIndex());
+		params.Push(slider.min);
+		params.Push(slider.max);
+		params.Push(slider.step);
+		params.Push(slider.fracDigits);
+		VMCallWithDefaults(init->Variants[0].Implementation, params, nullptr, 0);
+
+		desc->mItems.Push(item);
+	}
+}
+
+// "Steam Deck" -> "Handhelds" on the Options menu's section list, because this port's handhelds are not
+// Steam Decks and the page is what both have in common. Only this entry: Selaco's own copy that happens
+// to mention the Steam Deck - the reset button on that page and its description - is left alone.
+static void AuxRenameHandheldEntry()
+{
+	// noCreate, and NAME_None rejected: never add a name to the table merely to look one up, and a
+	// missing "SteamDeckMenu" would otherwise compare equal to every item with no action at all.
+	const FName handheld(AuxHandheldMenuName, true);
+	if (handheld == NAME_None)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s menu, its Options entry keeps its name\n",
+			AuxHandheldMenuName);
+		return;
+	}
+
+	DMenuDescriptor **descp = MenuDescriptors.CheckKey(AuxOptionsListName);
+	if (descp == nullptr || *descp == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s menu, the %s entry keeps its name\n",
+			AuxOptionsListName, AuxHandheldMenuName);
+		return;
+	}
+
+	PClass *textCls = PClass::FindClass(AuxTextItemClassName);
+	PField *fldText = textCls != nullptr
+		? AuxView::ResolveField(textCls, AuxTextItemFieldName, AuxView::Field_String, nullptr) : nullptr;
+	if (fldText == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s.%s, the %s entry keeps its name\n",
+			AuxTextItemClassName, AuxTextItemFieldName, AuxHandheldMenuName);
+		return;
+	}
+
+	// Matched on the page the entry opens, not on its position: the entry sits inside an IfOption(Unix)
+	// block and its neighbours carry MustHave/MustNotHave conditionals, so the index moves.
+	DMenuItemBase *entry = nullptr;
+	for (auto item : (*descp)->mItems)
+	{
+		if (item != nullptr && item->mAction == handheld && item->IsKindOf(textCls))
+		{
+			entry = item;
+			break;
+		}
+	}
+	if (entry == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s entry in %s, it keeps its name\n",
+			AuxHandheldMenuName, AuxOptionsListName);
+		return;
+	}
+
+	*AuxView::StringFieldAddr(entry, fldText) = AuxHandheldLabel;
+
+	// THE PAGE'S OWN HEADING, deliberately a separate statement that can be deleted on its own. The ask
+	// was the Options list entry; this is here because SteamDeckMenu's Title is the literal "Steam Deck"
+	// rather than a $KEY, so without it the page the renamed entry opens is still headed with the old
+	// name - which reads as a bug rather than a choice. Seen in the in-game options popup
+	// (options_prompt.zs:231) and in the stock option-menu drawer (HoveringTooltipMenu.txt:62).
+	DMenuDescriptor **subp = MenuDescriptors.CheckKey(handheld);
+	if (subp != nullptr && *subp != nullptr && (*subp)->IsKindOf(RUNTIME_CLASS(DOptionMenuDescriptor)))
+		static_cast<DOptionMenuDescriptor *>(*subp)->mTitle = AuxHandheldLabel;
+	else
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s option menu, its title keeps the old name\n", AuxHandheldMenuName);
+}
+
+// Three independent steps, each fail-soft on its own: any one of them failing still leaves the other two.
+void I_AuxPanelInitMenu()
+{
+	AuxAddSecondScreenToggle();
+	AuxAddDashboardSliders();
+	AuxRenameHandheldEntry();
+}
+

@@ -109,6 +109,13 @@ using namespace AuxView;
 // 4. THE MENU RELAYOUTS ITSELF AGAINST WHATEVER Screen.GetWidth() SAYS, and mode 4 makes that answer
 //    change depending on where in the frame you ask. See MenuTune.
 //
+// AND ONE THING THAT IS NOT ABOUT CORRECTNESS AT ALL: aux_dashboard_zoom, the same cvar and the same
+// clamp mode 3 uses, because 1240x1080 at arm's length is too small to read whichever mode put it there.
+// The arithmetic is free - it divides the baseline height MenuTune hands calcScale, nothing more - but it
+// is the one player-facing value here that can move while the menu is LIVE, and in a mode with no
+// FProjectionScope a relayout is a real write to the player's savegame. So WHEN it is applied is the
+// delicate part rather than what it computes: see the compare in FAuxMenuRedirect's constructor.
+//
 // THE FRAME ORDERING, which is the single most likely thing to make this draw nothing. Within
 // D_Display: the AllCanvases flush lives in RenderView (hw_entrypoint.cpp:362-375), called at
 // d_main.cpp:1115; DrawOverlays -> M_Drawer is at :907, reached from :1254. So commands pushed by the redirected M_Drawer
@@ -172,6 +179,12 @@ static bool MenuResolved = false;
 // stale. Cleared on the falling edge of "the PDA is open" so that a new menu landing on the recycled
 // address of the old one is still tuned - a pointer compare alone would silently skip it.
 static DObject *MenuTuned = nullptr;
+
+// And the zoom it was tuned with, which is the SECOND half of that guard. Kept here rather than read from
+// the cvar at the point of use because what has to be compared is the zoom already baked into the live
+// layout, not the zoom the player currently wants. Not cleared alongside MenuTuned: a null MenuTuned
+// already forces a tune, so the stale value can never be acted on.
+static double MenuTunedZoom = 1.0;
 
 // Whether the panel hook ran this frame with mode 4 selected. The guard also re-tests that the PDA is
 // open, so all this really carries is "there is a live panel and mode 4 is on" - a slowly changing
@@ -425,13 +438,20 @@ bool I_AuxMenuViewIsPdaOpen()
 // covered by drawCanvas. With ui_scaling nulled uiScale reads 1.0 while calcScale has left lastUIScale
 // at the final 0.6458, so without this the menu would relayout every tick and undo the scale.
 //
-// ONCE PER INSTANCE, not per frame, and that is now safe precisely because all three relayout triggers
-// above are closed: nothing else recomputes mainView.frame or mainView.scale. Per-frame would also be
-// actively harmful here - mainView.layout() reaches PDAAppWindow.layout -> savePos ->
+// ONCE PER INSTANCE PER ZOOM, not per frame, and that is now safe precisely because all three relayout
+// triggers above are closed: nothing else recomputes mainView.frame or mainView.scale. Per-frame would
+// also be actively harmful here - mainView.layout() reaches PDAAppWindow.layout -> savePos ->
 // SendNetworkEvent("pdaAppPos:...") (app_window.zs:170), and unlike mode 3 mode 4 does not
 // suppress that, so relaying out every frame would put a network event into the stream every frame.
 // Once per open is exactly what the game itself does.
-static bool MenuTune(DObject *menu)
+//
+// THE ZOOM IS THEREFORE AN EDGE AND NOT AN ARGUMENT READ FRESH EACH FRAME. It divides the baseline
+// height exactly as mode 3's does, which is the whole of the feature; what mode 3 can afford and this
+// cannot is calling the relayout speculatively. See the caller in FAuxMenuRedirect for the compare.
+//
+// `retune` says this instance is already tuned and only the zoom moved, which changes ONE thing: an abort
+// must not latch MenuBroken. See the catch.
+static bool MenuTune(DObject *menu, double zoom, bool retune)
 {
 	// Read the three handles before writing them so the whole tune can be undone if something aborts
 	// part way through. All three, not just ui_scaling: restoring a GUESSED default would be a
@@ -471,11 +491,17 @@ static bool MenuTune(DObject *menu)
 		// reimplemented because it also sets UIDrawer's screenSize and virtualScreenSize (:806-807) and
 		// mainView.scale, all of which have to move together.
 		//
+		// Dividing the baseline height is the whole of the zoom, the same single division mode 3 does:
+		// calcScale's newScale is uscale * CLAMP(canvasHeight / baseline.y, ...), so a smaller baseline
+		// is a bigger scale and a smaller logical box, which is bigger content and a cropped right and
+		// bottom edge. At zoom 1.0 the division is exact in IEEE-754, so calcScale is handed the same
+		// double this line passed before the zoom existed and the layout is bit-identical.
+		//
 		// hasLayedOutOnce is deliberately not set: its only reader is menu.zs:261, which drawCanvas has
 		// already short-circuited.
 		{
 			VMValue params[] = { menu, (int)AuxCanvasWidth, (int)AuxCanvasHeight,
-				DesktopDesignWidth, DesktopBaselineHeight };
+				DesktopDesignWidth, DesktopBaselineHeight / zoom };
 			VMCall(FuncMenuCalcScale, params, MenuCalcScaleRegs, nullptr, 0);
 		}
 
@@ -500,11 +526,27 @@ static bool MenuTune(DObject *menu)
 		// UIMenu.drawer from relaying it out - so a half-tuned menu would stay mis-laid-out for the
 		// rest of its life, now on the main screen, where the player would see the damage rather than
 		// just lose the feature.
+		//
+		// On a RETUNE these three reads happened while the menu was already tuned, so all three writes
+		// put back the tuned values and the block is a no-op. That is correct - undoing a second tune
+		// leaves the first one standing - but it is worth knowing it is not restoring anything pristine.
 		*(DObject **)((uint8_t *)menu + FldMenuDrawCanvas->Offset) = savedDrawCanvas;
 		if (savedDrawCanvas != nullptr)
 			GC::WriteBarrier(menu, savedDrawCanvas);
 		*(bool *)((uint8_t *)menu + FldMenuIgnoreUIScaling->Offset) = savedIgnoreUIScaling;
 		*(void **)((uint8_t *)menu + FldMenuUIScaling->Offset) = savedUIScaling;
+
+		if (retune)
+		{
+			// NOTHING IS LATCHED, because latching here would be the worse failure by some distance: the
+			// menu is still drawCanvas'd and still drawable on the panel, so refusing to redirect it would
+			// hand the player a PDA laid out for 1240x1080 drawn over the game on the MAIN screen, with no
+			// way to undo it. Reported and left where it is instead, laid out for whatever the abort got to.
+			// The caller still advances the tuned zoom, so this is said once per value rather than per frame.
+			Printf(TEXTCOLOR_YELLOW "AuxMenuView: relaying out %s at zoom %g aborted (%s), the panel keeps "
+				"the layout it had\n", MenuPdaClassName, zoom, e.what());
+			return true;
+		}
 
 		Printf(TEXTCOLOR_YELLOW "AuxMenuView: relaying out %s aborted (%s), second-screen PDA disabled\n",
 			MenuPdaClassName, e.what());
@@ -512,9 +554,18 @@ static bool MenuTune(DObject *menu)
 		return false;
 	}
 
-	Printf("AuxMenuView: %s relaid out for %s, logical box %gx%g at scale %g\n",
-		MenuPdaClassName, AuxCanvasName, DesktopDesignWidth, DesktopBaselineHeight,
-		AuxCanvasWidth / DesktopDesignWidth);
+	// THE FIGURES ARE THE ONES ASKED FOR, and the note is what corrects them. Mode 3 reads the installed
+	// scale back out of lastUIScale; mode 4 does not resolve that field, so rather than print a number that
+	// is silently a guess this prints the request and lets DashboardZoomLimitNote name whichever of
+	// calcScale's dead bands - its 0.599 floor, its 1.0 snap window, its 2.0 ceiling - swallowed it.
+	//
+	// The parenthesised token is a REVISION SENTINEL, deliberately unique to this change so it can be
+	// grepped out of the built .so to prove which revision is actually packaged - a size match has twice
+	// passed against a stale APK on this project.
+	Printf("AuxMenuView: %s relaid out for %s at zoom %g, logical box %gx%g at scale %g%s "
+		"(aux-menu-zoom r1)\n",
+		MenuPdaClassName, AuxCanvasName, zoom, DesktopDesignWidth / zoom, DesktopBaselineHeight / zoom,
+		zoom * AuxCanvasWidth / DesktopDesignWidth, DashboardZoomLimitNote(zoom));
 	return true;
 }
 
@@ -620,14 +671,37 @@ FAuxMenuRedirect::FAuxMenuRedirect()
 	twod->Begin((int)AuxCanvasWidth, (int)AuxCanvasHeight);
 	Redirected = true;
 
-	if (MenuTuned != CurrentMenu)
+	// STRICTLY EDGE-TRIGGERED ON THE ZOOM, and this compare is the single most load-bearing line in the
+	// mode. Mode 4 deliberately has NO FProjectionScope, so MenuTune's mainView.layout() reaches
+	// PDAAppWindow.layout -> savePos -> SendNetworkEvent("pdaAppPos:...") for real - into the player's
+	// savegame and the demo stream, which is exactly what it should do for the player's own actions and
+	// exactly what must not happen because we felt like re-reading a cvar. So the zoom the live layout was
+	// built with is remembered and only a CHANGE to it re-tunes; an unchanged zoom costs one cvar read, one
+	// clamp and two compares, calls no script and emits nothing.
+	//
+	// DashboardZoom never returns NaN (i_auxvmreflect.h), which this relies on: NaN != NaN is true, so a
+	// NaN would be a permanent edge and therefore a relayout and a network event on every single frame.
+	const double zoom = DashboardZoom();
+	if (MenuTuned != CurrentMenu || MenuTunedZoom != zoom)
 	{
+		// A zoom change on the instance we already tuned, as opposed to a first tune, which is the only
+		// thing MenuTune treats differently - it must not latch the mode off on an abort.
+		const bool retune = MenuTuned == CurrentMenu;
+
 		// Inside the redirect on purpose: anything the relayout reads or draws through Screen.* then
 		// sees the panel rather than the main screen, and is legal because Begin() has run.
-		if (MenuTune(CurrentMenu))
+		if (MenuTune(CurrentMenu, zoom, retune))
+		{
 			MenuTuned = CurrentMenu;
+
+			// Advanced whether the relayout succeeded or aborted, so a zoom that aborts is tried once
+			// rather than on every frame the player leaves it set.
+			MenuTunedZoom = zoom;
+		}
 		else
+		{
 			MenuWantPublish = false;   // MenuBroken is latched; discard this frame rather than show it
+		}
 	}
 }
 

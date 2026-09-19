@@ -3737,6 +3737,12 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<std::string>& allw
 	if (!batchrun) Printf("M_Init: Init menus.\n");
 	SetDefaultMenuColors();
 	M_Init();
+#ifdef __ANDROID__
+	// Put the second-screen items on Selaco's handheld settings page, and rename it. Only
+	// possible after M_Init, which is what parses every MENUDEF lump - ours loads before they exist.
+	extern void I_AuxPanelInitMenu();
+	I_AuxPanelInitMenu();
+#endif
 	M_CreateGameMenus();
 
 

@@ -93,9 +93,15 @@
 ** called directly with a baseline height derived from the canvas constants (DesktopBaselineHeight)
 ** rather than through layoutChange, and layoutChange's remaining two calls are made by hand. The panel
 ** is then 1920 x 1672.3 logical at scale 0.6458: full design width, extra vertical room, no clipping.
+**
+** AND THAT IS STILL TOO SMALL TO READ on a panel this size, which is a physical problem and not a layout
+** one - so aux_dashboard_zoom divides that baseline height, deliberately trading the un-clipped layout for
+** legibility, and it retunes the LIVE desktop without a rebuild. See the block above DesktopRetune for the
+** arithmetic and for where the usable range really ends.
 */
 
 #include <exception>
+#include <math.h>        // fabs, for reporting which of calcScale's limits a zoom hit
 #include <string.h>      // memcpy, for the stat-total hash
 
 // dobjtype.h and dobjgc.h are not self-contained (they lean on FName, FString and the DObject
@@ -819,6 +825,258 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 	return true;
 }
 
+// ---------------------------------------------------------------------------------------------
+// MODE 3: HOW BIG THE DASHBOARD IS ON THE PANEL - live, without a restart.
+// ---------------------------------------------------------------------------------------------
+//
+// THE PROBLEM IS PHYSICAL, NOT A LAYOUT BUG. The relayout below puts the whole 1920-wide design across the
+// 1240x1080 panel at scale 0.6458, which is correct and clips nothing - and at that scale, on a panel this
+// size, it is too small to read at arm's length. So the zoom deliberately trades layout for legibility: it
+// is EXPECTED to clip the right and the bottom, which is the price of text large enough to read.
+//
+// THE ZOOM IS ONE DIVISION. calcScale is newScale = uscale * CLAMP(canvasHeight / baseline.y, 0.599, 2)
+// and then mainView.frame.size = canvasSize / newScale (pda_menu.zs:785-808), so dividing the baseline
+// height by the zoom multiplies newScale by it and divides the logical box by it. A smaller logical box
+// against a design whose offsets are fixed pixel figures is bigger content and a cropped right and bottom.
+//
+//     baseline.y  = DesktopBaselineHeight / zoom
+//     newScale    = zoom * AuxCanvasWidth / DesktopDesignWidth      = zoom * 0.645833
+//     logical box = (DesktopDesignWidth, DesktopBaselineHeight) / zoom
+//
+// ZOOM 1.0 IS BIT-IDENTICAL TO WHAT SHIPPED, which is the one property here that must not move: IEEE-754
+// division by 1.0 is exact, so calcScale is handed the same double, settles on the same 0.645833 and
+// produces the same 1920 x 1672.3 box with the same absence of clipping.
+//
+// WHERE THE RANGE ACTUALLY ENDS, WHICH IS NOT AT calcScale'S CEILING. The input is clamped to 0.5 - 2.0,
+// and inside that window the binding limits are calcScale's FLOOR and its SNAP; its ceiling is out of
+// reach entirely:
+//
+//     zoom <= 0.927    the 0.599 CLAMP floor holds newScale at 0.599, so every value below this draws
+//                      identically - zooming OUT is effectively not available
+//     1.425 - 1.672    inside |newScale - 1| < 0.08, so calcScale snaps the scale to exactly 1.0 and this
+//                      whole quarter of the range is one plateau at a 1240x1080 box
+//     zoom >= 3.097    the 2.0 CLAMP ceiling, which the 2.0 input clamp puts beyond reach
+//
+// So the useful travel is about 0.93 - 1.42 and 1.68 - 2.0, with a step across the plateau, and 2.0 gives
+// scale 1.2917 - twice the apparent size of zoom 1.0. The 1.75 default sits in the upper band, above the
+// snap plateau, at scale 1.1302 and a 1097 x 956 logical box. The log line reports the scale and box that
+// came BACK from calcScale and names whichever limit fired, because "I changed the number and nothing
+// happened" is otherwise indistinguishable from the cvar being broken.
+//
+// CVAR_ARCHIVE, UNLIKE THE OTHER SECOND-SCREEN CVARS, because this one is no longer a debug knob. It was
+// unarchived while it was only reachable from the console and only a developer would move it; it is now a
+// slider on the Handhelds options page, and a size the player picks in a menu has to still be there after
+// a restart or the setting reads as broken. The default is 1.75 because that is the smallest value that is
+// comfortably legible at arm's length on the Thor's panel.
+//
+// ARCHIVING MAKES 1.75 A DEFAULT ONLY FOR CONFIGS THAT HAVE NEVER SET IT. A config carrying the old 1.0
+// keeps loading 1.0, because that is what CVAR_ARCHIVE means - the saved value wins over the declaration.
+// That is expected rather than a bug: an existing profile keeps the size it was last seen at, and a fresh
+// one starts legible.
+CVAR(Float, aux_dashboard_zoom, 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+
+// 0.5 - 2.0. The lower half is kept even though calcScale's floor swallows most of it, because a clamp
+// that silently rewrites a value the player typed is worse than a range with a documented dead zone.
+static const double DashboardZoomMin = 0.5;
+static const double DashboardZoomMax = 2.0;
+
+// calcScale's own limits expressed as zoom values - the numbers quoted in the table above. Derived from
+// the canvas constants rather than written out so they follow a canvas resize; the literals are
+// calcScale's own, the 0.599/2.0 CLAMP and the 0.08 snap window around 1.0 (pda_menu.zs:791-797).
+static const double DashboardZoomAtFloor = 0.599 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double DashboardZoomAtSnapLow = 0.92 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double DashboardZoomAtSnapHigh = 1.08 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double DashboardZoomAtCeiling = 2.0 * DesktopBaselineHeight / AuxCanvasHeight;
+
+// The zoom the relayout will actually use. The in-range test comes first so that a NaN - which fails every
+// comparison, including both of the ones below it - lands on the no-zoom 1.0 rather than on a limit.
+//
+// NEVER NaN is the property mode 4 depends on, not merely a tidy fallback: i_auxmenuview.cpp edge-triggers
+// its relayout on this value changing, and NaN != NaN would fire that every frame - a savePos netevent into
+// the player's savegame per frame. See the declaration in i_auxvmreflect.h.
+//
+// Not static: mode 4 divides its own baseline by the same clamped value, and the declaration in
+// i_auxvmreflect.h says why that clamp is shared rather than written twice.
+double DashboardZoom()
+{
+	const double zoom = aux_dashboard_zoom;
+	if (zoom >= DashboardZoomMin && zoom <= DashboardZoomMax)
+		return zoom;
+	if (zoom > DashboardZoomMax)
+		return DashboardZoomMax;
+	if (zoom < DashboardZoomMin)
+		return DashboardZoomMin;
+	return 1.0;
+}
+
+// The wide-box relayout's symbols, cached so the live retune can re-run it without resolving anything
+// again. All null unless the OPTIONAL group in BuildDesktopView resolved; FuncDesktopCalcScale doubles as
+// that group's flag, and with it null the zoom is inert and the layoutChange fallback is what runs.
+static VMFunction *FuncDesktopCalcScale = nullptr;
+static VMFunction *FuncDesktopMenuLayout = nullptr;
+static VMFunction *FuncDesktopViewLayout = nullptr;
+static PField *FldDesktopUIScaling = nullptr;
+static PField *FldDesktopLastUIScale = nullptr;
+static int DesktopCalcScaleRegs = 0;
+static int DesktopViewLayoutRegs = 0;
+
+// The zoom the live desktop is laid out for. The seed is inert in practice - BuildDesktopView writes it
+// before anything the retune needs is non-null - and is the no-zoom value so a read before that says so.
+static double DesktopLayoutZoom = 1.0;
+
+// The relayout, factored out so the live retune re-runs EXACTLY what the build ran. Four steps: null the
+// menu's ui_scaling handle, calcScale with the zoomed baseline, then the remaining two lines of
+// layoutChange's body (pda_menu.zs:777-781).
+//
+// THE CALLER OWNS THE PROJECTION SCOPE AND THE TRY/CATCH. Every call here can reach script - mainView
+// .layout() reaches PDAAppWindow.layout -> savePos, which is a SendNetworkEvent into the player's savegame -
+// so there is no safe way to call this outside one, and both call sites are already inside theirs.
+static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
+{
+	// Force uscale to 1.0 by nulling the menu's own cvar handle. calcScale's read of it is
+	// `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS the 1.0 path. Left null
+	// rather than restored: the only other readers are UIMenu.calcScale and UIMenu.ticker (menu.zs:125,
+	// :206), both null-guarded, and this menu is never ticked. Never the CVAR - `ui_scaling` is
+	// CVAR_USERINFO (d_main.cpp:1757) and writing it would push a DEM_UINFCHANGED into the demo/net
+	// stream, the very class of player-state write FProjectionScope exists to stop.
+	*(void **)((uint8_t *)menu + FldDesktopUIScaling->Offset) = nullptr;
+
+	// calcScale(int screenWidth, int screenHeight, Vector2 baselineResolution) - the Vector2 is two
+	// consecutive registers, hence five VMValues for three declared arguments. Dividing the baseline height
+	// is the whole of the zoom, and at 1.0 that division is exact, so the argument is the same double the
+	// un-zoomed build passed.
+	VMValue params[] = { menu, (int)AuxCanvasWidth, (int)AuxCanvasHeight,
+		DesktopDesignWidth, DesktopBaselineHeight / zoom };
+	VMCall(FuncDesktopCalcScale, params, DesktopCalcScaleRegs, nullptr, 0);
+
+	// hasLayedOutOnce is deliberately NOT set: its only reader is UIMenu.drawer (menu.zs:261), which we
+	// never call, and setting it would arm a relayout at the default (1920, 1080) baseline if anything ever
+	// did - undoing both the wide box and the zoom.
+	VMValue selfOnly[] = { menu };
+	VMCall(FuncDesktopMenuLayout, selfOnly, 1, nullptr, 0);
+
+	// mainView.layout() with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel that makes
+	// UIView.layout derive cScale from the view's own scale chain (view.zs:763) instead of taking ours, and
+	// parentAlpha -1 does the same for alpha (:764). Passing (1,1)/1.0 instead would overwrite the scale
+	// calcScale just installed. layoutSubviews recurses unconditionally (view.zs:787-794) rather than
+	// honouring requiresLayout, which is what makes this sufficient on a retune: nothing in the tree is
+	// left holding the old scale.
+	VMValue viewParams[] = { mainView, 0.0, 0.0, -1.0, (int)0 };
+	VMCall(FuncDesktopViewLayout, viewParams, DesktopViewLayoutRegs, nullptr, 0);
+}
+
+// The scale calcScale actually installed, which the logical box follows from.
+//
+// READ BACK RATHER THAN RECOMPUTED, because the CLAMP and the snap are the whole point of the line: the
+// scale asked for is not always the scale installed, and which limit fired is exactly what someone tuning
+// the zoom by eye needs to see. PDAMenu3.calcScale leaves the FINAL value - after both the CLAMP and the
+// snap - in lastUIScale (pda_menu.zs:801, field declared at menu.zs:40). UIMenu.calcScale would leave the
+// raw uscale there instead, but it is PDAMenu3's override that runs.
+//
+// lastUIScale is OPTIONAL: its absence costs the accuracy of a log line and must not cost the wide box, so
+// the arithmetic is used instead and the line says "predicted" rather than "measured". A number that is
+// silently a guess is worse than one labelled as one.
+static double DesktopInstalledScale(DObject *menu, double zoom, bool *outMeasured)
+{
+	if (FldDesktopLastUIScale != nullptr && menu != nullptr)
+	{
+		if (outMeasured != nullptr)
+			*outMeasured = true;
+		return *(const double *)((const uint8_t *)menu + FldDesktopLastUIScale->Offset);
+	}
+
+	if (outMeasured != nullptr)
+		*outMeasured = false;
+
+	// calcScale's body (pda_menu.zs:791-797), replicated for the log line only and never for the layout.
+	double scale = AuxCanvasHeight / (DesktopBaselineHeight / zoom);
+	if (scale < 0.599)
+		scale = 0.599;
+	else if (scale > 2.0)
+		scale = 2.0;
+	if (fabs(scale - 1.0) < 0.08)
+		scale = 1.0;
+	else if (fabs(scale - 2.0) < 0.08)
+		scale = 2.0;
+	return scale;
+}
+
+// Which of calcScale's own limits swallowed this zoom, if any. Empty for the normal case, where the zoom
+// asked for is the zoom that came back. Not static, for the same reason DashboardZoom is not: mode 4 hits
+// the same three bands and needs the same phrase to say so.
+const char *DashboardZoomLimitNote(double zoom)
+{
+	if (zoom <= DashboardZoomAtFloor)
+		return " - held at calcScale's 0.599 floor, no smaller zoom changes anything";
+	if (zoom >= DashboardZoomAtSnapLow && zoom <= DashboardZoomAtSnapHigh)
+		return " - inside calcScale's 1.0 snap window, this whole band draws identically";
+	if (zoom >= DashboardZoomAtCeiling)
+		return " - held at calcScale's 2.0 ceiling, no larger zoom changes anything";
+	return "";
+}
+
+// LIVE RETUNE: apply a changed aux_dashboard_zoom to the desktop that is ALREADY BUILT.
+//
+// A RELAYOUT, NOT A REBUILD, and the difference is a dropped frame per value tried. PDAMenu3.init allocates
+// 100+ DObjects, re-runs the app selection and fires the whole suppression machinery; the four calls in
+// DesktopRelayout are the game's OWN answer to "the screen you are laid out for is not the screen you are
+// on" and are what layoutChange would do to a live menu on a resolution change. Since layoutSubviews
+// recurses unconditionally, that reaches every view in the tree - so there is nothing a rebuild would fix.
+//
+// A REDRAW IS ALSO REQUESTED, which is the part that makes the cvar look like it works at all. The
+// panel holds the last pixels Java was pushed and the readback is edge-triggered (i_auxpanel.cpp), so
+// without *outNeedsRedraw the new layout would sit in the canvas unread and the player would keep seeing
+// the pre-zoom image - the cvar would read as broken while working perfectly.
+static void DesktopRetune(bool *outNeedsRedraw)
+{
+	if (DesktopMenu == nullptr || DesktopRootView == nullptr)
+		return;
+
+	// Gated on the OPTIONAL wide-box group, so a build that fell back to layoutChange keeps exactly the
+	// behaviour it had and the zoom is simply inert. Failing soft here is one unchanged panel, not a
+	// broken one.
+	const double zoom = DashboardZoom();
+	if (FuncDesktopCalcScale != nullptr && zoom != DesktopLayoutZoom)
+	{
+		try
+		{
+			// Load-bearing rather than precautionary: mainView.layout() reaches PDAAppWindow.layout ->
+			// savePos -> SendNetworkEvent("pdaAppPos:..."), which would write the geometry of the PLAYER's
+			// real PDA into their savegame once per value they try.
+			FProjectionScope projection;
+			FMenuActiveKeeper keepMenuState;
+
+			DesktopRelayout(DesktopMenu, DesktopRootView, zoom);
+		}
+		catch (const std::exception &e)
+		{
+			// Nothing is latched beyond refusing to retry this value: the desktop is still built and still
+			// drawable, laid out for whatever scale the abort left it at. A VM abort here must not take the
+			// frame - and therefore the main screen - down.
+			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: relaying the dashboard out at zoom %g aborted (%s)\n",
+				zoom, e.what());
+		}
+
+		// Advanced whether or not it threw, so the line above is said once per value rather than per frame.
+		DesktopLayoutZoom = zoom;
+
+		bool measured = false;
+		const double scale = DesktopInstalledScale(DesktopMenu, zoom, &measured);
+
+		// The parenthesised token is a REVISION SENTINEL, deliberately unique to this change so it can be
+		// grepped out of the built .so to prove which revision is actually packaged - a size match has
+		// twice passed against a stale APK on this project.
+		Printf("AuxDesktopView: dashboard zoom %g%s, logical box %gx%g at %s scale %g%s "
+			"(aux-dashboard-zoom r1)\n",
+			zoom, zoom != (double)aux_dashboard_zoom ? " (clamped)" : "",
+			AuxCanvasWidth / scale, AuxCanvasHeight / scale, measured ? "measured" : "predicted", scale,
+			DashboardZoomLimitNote(zoom));
+
+		if (outNeedsRedraw != nullptr)
+			*outNeedsRedraw = true;
+	}
+}
+
 // Build the desktop. Runs once; every failure latches.
 //
 // The transient gate comes FIRST, ahead of every symbol lookup: it is the cheapest test and the one
@@ -994,8 +1252,24 @@ static bool BuildDesktopView()
 	{
 		funcCalcScale = nullptr;
 		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: no wide-box relayout, falling back to layoutChange - "
-			"the tab bar will clip horizontally\n");
+			"the tab bar will clip horizontally and aux_dashboard_zoom will do nothing\n");
 	}
+
+	// Cached for the live retune, which re-runs exactly this relayout when aux_dashboard_zoom moves.
+	// Assigned on the failure path too, because FuncDesktopCalcScale is what DesktopRetune tests to decide
+	// whether the zoom can do anything at all.
+	FuncDesktopCalcScale = funcCalcScale;
+	FuncDesktopMenuLayout = funcMenuLayout;
+	FuncDesktopViewLayout = funcViewLayout;
+	FldDesktopUIScaling = fldUIScaling;
+	DesktopCalcScaleRegs = calcScaleRegs;
+	DesktopViewLayoutRegs = viewLayoutRegs;
+
+	// lastUIScale is where PDAMenu3.calcScale leaves the scale it settled on, and the only use made of it
+	// here is the log line - so it is resolved apart from the group above and its absence costs the accuracy
+	// of that line and nothing else. See DesktopInstalledScale.
+	FldDesktopLastUIScale = funcCalcScale != nullptr
+		? ResolveField(cls, "lastUIScale", Field_Float, viewCls) : nullptr;
 
 	// Root before anything can allocate: init() creates well over a hundred DObjects and any of those
 	// allocations can run a GC step, so the menu has to be reachable from a root by the first one.
@@ -1105,28 +1379,13 @@ static bool BuildDesktopView()
 		//
 		// The difference from layoutChange is the BASELINE, and only the baseline: layoutChange would
 		// let calcScale default to (1920, 1080), which makes the logical box the canvas width and clips
-		// a 1920-wide design at both edges. See DesktopBaselineHeight for the arithmetic.
+		// a 1920-wide design at both edges. See DesktopBaselineHeight for the arithmetic, and
+		// aux_dashboard_zoom for the divisor the player can move - at zoom 1.0 this is exactly what
+		// shipped.
 		if (funcCalcScale != nullptr)
 		{
-			// Force uscale to 1.0 by nulling the menu's own cvar handle. calcScale's read of it is
-			// `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS the 1.0 path.
-			// Left null rather than restored: the only other readers are UIMenu.calcScale and
-			// UIMenu.ticker (menu.zs:125, :206), both null-guarded, and this menu is never ticked.
-			*(void **)((uint8_t *)menu + fldUIScaling->Offset) = nullptr;
-
-			// calcScale(int screenWidth, int screenHeight, Vector2 baselineResolution) - the Vector2 is
-			// two consecutive registers, hence five VMValues for three declared arguments.
-			VMValue params[] = { menu, (int)AuxCanvasWidth, (int)AuxCanvasHeight,
-				DesktopDesignWidth, DesktopBaselineHeight };
-			VMCall(funcCalcScale, params, calcScaleRegs, nullptr, 0);
-
-			// The rest of layoutChange's body, in its order (pda_menu.zs:777-781). hasLayedOutOnce is
-			// deliberately not set: its only reader is UIMenu.drawer (menu.zs:261), which we never call.
-			VMValue selfOnly[] = { menu };
-			VMCall(funcMenuLayout, selfOnly, 1, nullptr, 0);
-
-			VMValue viewParams[] = { mainView, 0.0, 0.0, -1.0, (int)0 };
-			VMCall(funcViewLayout, viewParams, viewLayoutRegs, nullptr, 0);
+			DesktopLayoutZoom = DashboardZoom();
+			DesktopRelayout(menu, mainView, DesktopLayoutZoom);
 		}
 		else
 		{
@@ -1170,13 +1429,26 @@ static bool BuildDesktopView()
 	FuncDesktopDraw = funcDraw;
 	FuncDesktopDrawSubviews = funcDrawSubviews;
 
-	// The logical box is what to check a screenshot against: at 1240x1080 with the derived baseline it
-	// is 1920 x 1672.3 at scale 0.6458, so the whole 1920-wide design fits across the panel.
-	Printf("AuxDesktopView: %s built at %gx%g on %s, logical box %gx%g at scale %g\n",
-		DesktopClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
-		funcCalcScale != nullptr ? DesktopDesignWidth : AuxCanvasWidth,
-		funcCalcScale != nullptr ? DesktopBaselineHeight : AuxCanvasHeight,
-		funcCalcScale != nullptr ? AuxCanvasWidth / DesktopDesignWidth : 1.0);
+	// The logical box is what to check a screenshot against: at 1240x1080 with the derived baseline and zoom
+	// 1.0 it is 1920 x 1672.3 at scale 0.6458, so the whole 1920-wide design fits across the panel.
+	// The scale is read back from the menu rather than computed, so this shows what calcScale's own CLAMP and
+	// snap settled on rather than what was asked for - see DesktopInstalledScale.
+	if (funcCalcScale != nullptr)
+	{
+		bool measured = false;
+		const double scale = DesktopInstalledScale(menu, DesktopLayoutZoom, &measured);
+		Printf("AuxDesktopView: %s built at %gx%g on %s, logical box %gx%g at %s scale %g, zoom %g%s\n",
+			DesktopClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
+			AuxCanvasWidth / scale, AuxCanvasHeight / scale, measured ? "measured" : "predicted", scale,
+			DesktopLayoutZoom, DashboardZoomLimitNote(DesktopLayoutZoom));
+	}
+	else
+	{
+		Printf("AuxDesktopView: %s built at %gx%g on %s, logical box %gx%g at scale 1 "
+			"(layoutChange fallback, aux_dashboard_zoom inert)\n",
+			DesktopClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
+			AuxCanvasWidth, AuxCanvasHeight);
+	}
 	return true;
 }
 
@@ -1600,6 +1872,13 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 		if (SelectDashboardApp(DesktopMenu, AppMenuClass, AppViewClass) && outNeedsRedraw != nullptr)
 			*outNeedsRedraw = true;
 	}
+
+	// AND THE SIZE THE PANEL DRAWS AT, retuned live on the desktop that is already built. Placed
+	// after the chain above rather than inside it because it is orthogonal to both: a rebuild lays out at the
+	// current zoom itself and baselines it, so this is a no-op on that frame, and a re-select changes
+	// which app is on top without changing the box it is drawn in. Cheap on the unchanged path - one clamped
+	// cvar read and one double compare, no lookups, no allocation and no VM call.
+	DesktopRetune(outNeedsRedraw);
 
 	return true;
 }
