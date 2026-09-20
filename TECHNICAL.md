@@ -898,6 +898,52 @@ Verified on device: the Presentation composites **above** `rip.moth.cocoonshell`
 already owned display 4. Neither prior-art codebase handles a foreign owner, so this was inference
 until tested.
 
+### Selaco's real PDA on the panel, drawn by the engine
+
+The hand-assembled table of contents described below (`BuildToc`/`CountVisible`) is retired.
+**Nothing ever read its output** — `AuxPanel.sCodex` was write-only on the Java side once the text
+overlay it fed was replaced by the readback/splash path — so it was deleted rather than kept beside
+the thing that replaced it. `i_auxcodex.cpp` now keeps only the one piece still consumed,
+`I_AuxCodexGeneration()`, which the code below still needs as a rebuild trigger.
+
+What replaced it draws Selaco's **actual** PDA desktop, rendered by the game's own presentation code
+rather than reproduced by ours, selected per frame by `aux_canvas_zscript`
+(`CVAR(Int, aux_canvas_zscript, 5, 0)`, `i_auxcanvas.cpp:107` — 5 is the shipped default, replacing
+what used to be the diagnostic test pattern). Mode 5 resolves, once per frame, to whichever of two
+owners should hold the canvas (`i_auxpanel.cpp:479-490`):
+
+- **mode 3, the read-only dashboard.** We construct our own `PDAMenu3` by VM reflection, write a few
+  fields, and call its `draw`/`drawSubviews` through the VM. Visible during gameplay, edge-triggered
+  on a content change rather than redrawn every frame.
+- **mode 4, the live codex.** When the player opens their real PDA, the global `twod` pointer is
+  swapped to our offscreen canvas for the duration of `M_Drawer`, so the menu the engine is already
+  ticking and feeding gamepad input to draws on the panel instead of the main screen.
+
+`Selaco.ipk3` is never modified and no mod pk3 is required — everything reflects on classes the game
+has already loaded, and every resolve is validated: a mismatch latches the feature off, prints one
+line, and the game plays on. Duplicating the codex ZScript into a mod was tried first and abandoned:
+a copy of 1300+ lines of CockUI goes stale on a Selaco patch with no compile error to say so, which
+is also the reasoning behind the [ZScript load-order constraint](#the-zscript-load-order-constraint)
+further down — this fork cannot ship ZScript that names Selaco's own classes at all.
+
+**The blocker was never drawing, it was side effects.** A `PDAMenu3` built by hand writes savegame
+state and fires net events on construction — `PDAReaderWindow.init` reaches
+`EventHandler.SendNetworkEvent("pdaUnreadClear")`, wiping the player's unread-datalog badges, on
+mere construction. `FProjectionScope` (`src/common/engine/projectionscope.h`) is a depth-counted
+RAII scope that makes `SendNetworkEvent` inert and mutes `CHANF_UI` sounds for the duration of a
+synchronous VM call; once those two channels were contained, `twod` turned out to be an ordinary
+swappable pointer and the live codex (mode 4) was five lines.
+
+Readback costs **~30 ms in a real level** — see
+[the readback cost above](#the-panel-has-no-surface-of-its-own-but-it-is-no-longer-free) — which is
+why mode 3 is edge-triggered and only mode 4 is paced.
+
+Upstream footprint for this milestone is 19 functional lines across six shared files, all of them
+"call into our code and get out of the way" rather than forked logic: a brace block and a guard in
+`d_main.cpp`, a suppression branch each in `events.cpp` and `s_doomsound.cpp`,
+`VK_IMAGE_USAGE_TRANSFER_SRC_BIT` on the canvas-only branch of `vk_hwtexture.cpp`, the `AUXCANVAS`
+declaration in `animdefs.txt`, and four CMake entries.
+
 ### Reading ZScript state from C++ without shipping any ZScript
 
 Selaco's codex content is **not** code: `/MANUAL.json`, a 42,172-byte lump, read by ZScript through
@@ -943,3 +989,251 @@ before deploying and matched exactly — which is what caught a bug that did not
 recursive call reallocates the array, so every child link was written through a dangling reference. It
 reported `visible=0` against a correctly parsed tree, which reads as "the predicate is too strict"
 rather than "the tree is corrupt". **Predict the count before believing a run.**
+
+> The gating logic this section describes (`BuildToc`, `CountVisible`, the manual.zs-shaped tree it
+> built) has since been deleted — see
+> [Selaco's real PDA on the panel, drawn by the engine](#selacos-real-pda-on-the-panel-drawn-by-the-engine).
+> Left here because the spoiler rules and the dangling-reference lesson generalise to anything else
+> that walks a JSON-derived tree; nothing in the current tree still executes this code.
+
+---
+
+## The ZScript load-order constraint
+
+The most reusable finding in this fork, and the reason the device picker, the profile applier and the
+second-screen settings page are all C++ reflecting on the VM rather than ZScript: **a lump of ours
+cannot name a class of Selaco's.**
+
+`ParseScripts()` (`src/scripting/thingdef.cpp:419-436`) finds every `ZSCRIPT` lump in load order and
+compiles each one as its own `ZCCDoomCompiler`, one lump at a time — a later lump can reference an
+earlier one's classes, never the reverse. `gzdoom.pk3` is the basewad, and `D_DoomMain` adds it before
+the IWAD unconditionally (`src/d_iwad.cpp:809-811`, `:827`: "`zdoom.pk3` must always be the first file
+loaded and the IWAD second"). Our own ZSCRIPT lives in `gzdoom.pk3` for this build, so it compiles
+before `Selaco.ipk3`'s and cannot name `PDAMenu3`, `PromptMenu`, `IntroHandler`, or anything else of
+theirs — reference one and the build fails with an undefined-class error, not a runtime one. `MENUDEF`
+lumps parse in the same load order (`menudef.cpp:1529`), which is the identical constraint behind the
+device picker's settings-page injection (below).
+
+**A pk3 loaded via `iwadinfo.txt`'s `Load` entries was tried and does not work**, for a reason specific
+to this game rather than to the mechanism in general. `FIWadManager::CheckIWADInfo`
+(`src/d_iwad.cpp:395-424`) parses the candidate IWAD's own `IWADINFO` lump and, if an entry with the
+same `Name` already exists, reuses it — otherwise it pushes the parsed result as a **new** entry.
+Selaco's shipped `iwadinfo.txt` sets `Name = ""`, which matches nothing already registered, so
+`CheckIWADInfo` always pushes Selaco's own entry — the one it just parsed, which has no `Load` key —
+and a `Load` entry added by a *different* IWADINFO lump naming the same title is never consulted for
+it. The `Load` list actually used is `info.Load` off whichever entry `CheckIWADInfo` returned
+(`src/d_iwad.cpp:832` walks it), so an attempted `Load` addition is not silently dropped so much as
+attached to an entry the picked IWAD never resolves to.
+
+**How that was proved, because "no error" is not evidence of "never compiled":** the failure mode is
+silent — a `Load` pk3 that is simply never added produces no error, no log line, nothing to grep for.
+It was confirmed with a deliberately broken probe script (one that should fail to compile if it ran at
+all) placed in the candidate pk3; the probe did not fail, which means it never compiled, which means the
+pk3 was never loaded. A clean run and a broken-probe run that both report nothing are indistinguishable
+without the deliberate break — a trap worth remembering the next time a load path claims success by
+staying silent.
+
+---
+
+## Device profiles and the first-launch device picker
+
+### Device profiles
+
+One file per handheld in `profiles/*.cfg`, applied by filename stem (`aux_applyprofile ayn_thor`) or
+picked automatically by the device picker below. **[profiles/README.md](profiles/README.md) documents
+every key, its default, and how to add a device — this section covers only what that file deliberately
+leaves out: the architecture that makes the format safe.**
+
+**A graphics or visibility preset is never a list of cvars kept in this repo — it is applied by
+iterating Selaco's own `OptionValue` block at runtime.** `gfx_preset DeckLow` in a profile becomes a
+lookup of `OptionValue "GFXPresetDeckLow"` in the engine's own parsed menu data
+(`src/common/platform/posix/android/i_auxprofile.cpp:130-132` builds the name;
+`OptionValues.CheckKey` at `:308` finds the block). This is what keeps the feature clear of the
+[ini-reconstruction rule](CLAUDE.md): the block is read from the parser's own output, never
+hand-copied, so it cannot silently drop a cvar sitting at its engine default and it survives Selaco
+renaming or retuning the preset.
+
+**The layout is inverted from the obvious reading, and getting it backwards would silently set cvars
+named after values.** `FOptionValues::Pair` (`src/common/menu/menu.h:283-291`) is:
+
+```cpp
+struct Pair
+{
+	double Value;
+	FString TextValue;
+	FString Text;
+};
+```
+
+`Value` is the number to write and `Text` is the **cvar name** — `i_auxprofile.cpp:331-332` reads
+`pair.Text` for the cvar and `pair.Value` for what to write it to. A block parsed from an
+`OptionString` rather than an `OptionValue` stores `DBL_MAX` in `Value` and puts its real payload in
+`TextValue` instead (`i_auxprofile.cpp:318-321`), so that shape is checked for and rejected rather than
+assumed — a category mistake here (a preset list, `"GFXPresets"`, instead of a preset,
+`"GFXPresetLow"`) would otherwise write cvars from localised label text.
+
+**`steamdeck` calls Selaco's own `UIHelper.SetSteamdeckPresets()` by VM reflection rather than copying
+its nine writes** (`i_auxprofile.cpp:342-373`), so it cannot drift from what their menu button does.
+It defaults to `1` — the one key with a non-"leave it alone" default — because skipping that call is
+what caused three bugs recorded in [CLAUDE.md](CLAUDE.md): walking instead of running, 20x view bob,
+and a stale gamepad layout with no weapon-wheel binding.
+
+### The device picker
+
+Replaces Selaco's two first-run dialogs with one, driven by the profiles above, so adding a handheld
+or retuning an existing one is a data change rather than a C++ change.
+
+**Why suppressing their dialogs is safe, given [CLAUDE.md](CLAUDE.md#do-not-do-these) says not to
+bypass them:** the three bugs that note records were never caused by the dialogs being skipped — they
+were caused by `SetSteamdeckPresets()` and the preset block never running, however the skip happened.
+The picker does that work itself, and the ordering is *enforced* rather than trusted:
+
+- A device choice is never recorded before its profile has applied.
+- A profile that asked for `SetSteamdeckPresets()` and did not get it is refused
+  (`i_auxdevicepicker.cpp:748`: `if (result.steamdeckWanted && !result.steamdeckApplied)`).
+- `aux_device` (`CVAR_ARCHIVE | CVAR_GLOBALCONFIG`, `i_auxdevicepicker.cpp:146`) takes a **reserved
+  value meaning "a picker is owed"**, written in the same operation that suppresses Selaco's dialogs —
+  so no launch can end with neither dialog shown nor a picker armed.
+
+**Shown from a per-frame poll, not once at startup**, because `IntroHandler.UITick` forces `IntroMenu`
+over any menu that is not `IntroMenu` or `StartupMenu` for the whole intro — `introTicks` is 498 on a
+first run (`intro_handler.zs:88`, `494 + 4`), and the force runs at `intro_handler.zs:326-327` from
+`UITick` (`:212`). Opening the picker once at that moment would just be closed by the same tick. The
+poll instead waits for the state intro leaves behind, `i_auxdevicepicker.cpp:653-715`.
+
+**This is also why B cannot dismiss it, and it is a re-open rather than a blocked input**: B closes
+the stock menu, and the poll — running in `D_Display` before anything is drawn — puts the picker
+straight back, `M_SetMenu(..., makesound=false)` so the reopen costs one silent frame and the closed
+state is never actually seen.
+
+**The real driver of Selaco's own dialog is `tos_menu.zs`'s `WorldTick` at `ticks == 0`**
+(`tos_menu.zs:19,28`), not the `IntroHandler` accessors that look like the entry point — those only
+decide what menu is *on screen*, not whether the TOS actor ticks its own open.
+
+Fixes from review, compile-verified only — see the note at the end of this section: a paused title
+screen left with no menu when the picker failed to open; four latches that survived `DeinitMenus` or
+`PClass::StaticShutdown` across an engine restart (`i_auxdevicepicker.cpp:193-194`), one of which
+re-added the second-screen menu items with no heading; five paths in the mode-3 build that left a
+half-built `PDAMenu3` rooted for the process; `CreateNew` called without an abstract-class check, which
+`I_Errors` rather than returning null (`i_auxdevicepicker.cpp:464-466`).
+
+### "Reset Device Choice"
+
+The Handhelds page's "Choose Optimal Settings" button is **replaced**, not left alongside a second
+button, by "Reset Device Choice" (`i_auxdevicereset.cpp:156,186,861`). Their original button only ran
+`SetSteamdeckPresets()` and touched no preset — once a device profile exists, keeping it would have
+been a way to half-override the player's own choice with a stock action that no longer matches what
+picking a device actually does.
+
+The button confirms through Selaco's own `PromptMenu` and quits. Its callback field,
+`Function<ui void(Object, int)> onClosed`, and its `receiver` parameter are both **core ZScript types**
+(`Object`, `int`), so our callback (`AuxDeviceResetPrompt.Answered`,
+`wadsrc/static/zscript/engine/aux_devicereset.zs`) can satisfy that field's signature while naming
+nothing of Selaco's — the same [load-order constraint](#the-zscript-load-order-constraint) as
+everything else here, worked around because the field's declared type happens to need no Selaco class
+at all.
+
+**Recording a choice now writes the ini immediately**, via `M_SaveDefaults(nullptr)`
+(`i_auxdevicereset.cpp:691-695`, and the picker's own write). `aux_device` is `CVAR_ARCHIVE`, and
+nothing else calls `M_SaveDefaults` for it — a player who chose a device and then swiped the app away
+(`am force-stop`, SIGKILL) never reached a clean exit, so the choice never reached disk and the picker
+reopened on every subsequent launch. **Measured on device**, and initially misread as an artefact of
+testing with `am force-stop` rather than the actual bug.
+
+---
+
+## Second-screen settings
+
+Options > Handhelds gains a SECOND SCREEN group with two items, inserted from C++ after `M_Init`
+because MENUDEF lumps parse in load order and `gzdoom.pk3` loads before `Selaco.ipk3`
+(`i_auxpanel.cpp:631-643`) — the same constraint as the device picker's menu edits.
+
+| item | cvar | range | default |
+|---|---|---|---|
+| Second Screen | `aux_panel` | on/off | on |
+| Second Screen Size | `aux_dashboard_zoom` | 1.00–2.00 | 1.75 |
+
+The Options entry for that page is relabelled "Handhelds" by writing the menu item's own `mText`
+directly (`i_auxpanel.cpp:651-658`) rather than overriding `$MENU_STEAMDECK`, because
+`FStringTable`'s override table is Dehacked's own (`d_dehacked.cpp:3746`) and `SetOverrideStrings`
+replaces it wholesale — Selaco's other Steam Deck strings are a separate copy of their own and are
+left untouched. A group heading's colour must be OR'd with `0x12340000` or
+`OptionMenuItemStaticText.Init` discards it and renders white
+(`wadsrc/static/zscript/engine/ui/menu/optionmenuitems.zs:604`, applied at `i_auxpanel.cpp:750`).
+
+**`aux_panel` now takes effect immediately**, via a cvar callback. It previously had none, so turning
+it off stopped the pixel pushes but left the `Presentation` frozen on its last frame — a `Presentation`
+may only be created or dismissed on the UI thread, while a cvar callback runs on the game thread, so
+the callback (`CUSTOM_CVAR`, `i_auxpanel.cpp:119`) posts to the main Looper instead of acting directly.
+Java folds the decision into `updateDisplay()`
+(`android/app/src/main/java/com/selaco/game/AuxPanel.java:310`) as "no display currently qualifies",
+so the player's choice and a genuine absence of a second display take the same code path instead of
+two paths that could disagree. Re-enabling forces a redraw explicitly
+(`i_auxpanel.cpp:260-264`, above the `AuxWasLive` clear): the early return for `aux_panel` off sits
+*above* that clear, so the flag survives the off period and, without the forced redraw, the panel
+would come back showing the splash it had frozen on.
+
+`pickDisplay()` (`AuxPanel.java:361-383`) now reports how many presentation displays it saw and why
+each was rejected, once per dry spell. **The single-screen path has never actually executed** — no
+device without a second display was available to test on — so this reporting, and the "no display
+qualifies" fallback above, are compile-verified only.
+
+### `aux_dashboard_zoom` and `calcScale`'s three limits
+
+`aux_dashboard_zoom` (`CVAR(Float, ..., 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)`,
+`i_auxcodexview.cpp:889`) divides the baseline height handed to `PDAMenu3.calcScale`, so a larger
+zoom gives a smaller logical box and bigger content, in both mode 3 and mode 4. `calcScale` is:
+
+```
+newScale = uscale * CLAMP(canvasHeight / baseline.y, 0.599, 2.0)
+```
+
+(`pda_menu.zs:791-797`, replicated at `i_auxcodexview.cpp:1014-1017` for logging only, never for
+layout). Its three limits are non-obvious and cost real device time to map, because none of them
+sits where the naive "0.5 to 2.0" input range would suggest (`i_auxcodexview.cpp:850-861`):
+
+| zoom range | what happens | why |
+|---|---|---|
+| ≤ 0.927 | pinned at scale 0.599 | the `CLAMP` floor — every value below this draws identically |
+| 1.425–1.672 | pinned at scale exactly 1.0 | `calcScale` snaps to 1.0 whenever `\|newScale - 1\| < 0.08` |
+| ≥ 3.097 | unreachable | the `CLAMP` ceiling, beyond the input clamp's own 2.0 maximum |
+
+So the useful travel is only ~0.93–1.42 and ~1.68–2.0, with a dead plateau between. The shipped
+**default of 1.75 sits in the upper band**, above the snap plateau, at scale **1.130** and a
+**1097×956** logical box.
+
+Zoom crops **symmetrically**, not at the right and bottom, because the logical box maps onto the
+canvas and the tab strip is centre-pinned (`Pin_HCenter`); the game's own focus scrolling handles the
+rest.
+
+### The tab strip padding, and why 1.75 depends on it
+
+The default's box (1097 wide) is narrower than the tab strip Selaco lays out for its own 1920-wide
+design: six tabs at `setTextPadding(42, 0, 42, 0)` (`pda_menu.zs:238` and once per tab) are 84 px each,
+~504 px across six. At 1097 that overflows **symmetrically** — `Pin_HCenter` and sized to its
+contents means the strip loses the first tab as readily as the last, not asymmetrically as an earlier
+version of this fix assumed. Measured on the panel: at zoom 1.5 (the 1240 box) the six tabs fit but
+both trigger icons were cut off; at zoom 1.75 (the 1097 box) `DATALOGS` and `MANUAL` were cut too.
+
+This fork calls `setTextPadding(20, 0, 20, 0)` instead (`TabTextPaddingX`,
+`i_auxvmreflect.cpp:483`), recovering `(42 - 20) * 2 * 6 = 264` design pixels. Confirmed on hardware:
+at zoom 1.5 the strip pulls in ~130 px per side and both trigger icons return; at 1.75 the whole strip,
+icons included, now fits — which is the value the default was tuned for.
+
+**The 1.75 default depends on this padding and cannot be raised without it.** At Selaco's own 42px
+padding, 1.75 clips; **1.5 is the fallback value** if the tightening is ever reverted. It is also
+locale-sensitive — a tab's width is its label plus the padding, so a language with longer labels than
+English has less slack in the same box.
+
+The resolve is cached on the tab's `PClass*`, not a plain "already tried" bool
+(`i_auxvmreflect.cpp:491-497`), so a script recompile — which builds new `PField`/`PClass` objects and
+frees the old ones — re-resolves instead of writing through a freed offset. It fails soft like every
+other reflection point here: an unresolved field or method leaves Selaco's own 42px padding and prints
+one line, without latching the whole dashboard or menu broken. Mode 3's `layoutChange` fallback path
+does not call the relayout this is folded into, so it gets no padding fix; it only runs if the
+wide-box symbols fail to resolve in the first place.
+
+> **Not yet independently exercised on device:** the genuine first-run flow (no `g_tos` override, no
+> pre-seeded `aux_device`) was tested end-to-end for the first time only as part of this work, and the
+> four engine-restart latches above are compile-verified only — no actual `restart` CCMD run has been
+> used to confirm them.
