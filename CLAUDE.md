@@ -65,7 +65,8 @@ absent, run `build-macos.sh` explicitly.
 
 ## adb commands that answer about the wrong thing
 
-Both of these return a confident, plausible answer to a question you did not ask. Neither errors.
+Each of these returns a confident, plausible answer to a question you did not ask. None of them
+error, and two of them made new code look broken when the tooling was at fault.
 
 **`screencap` captures the wrong display.** This device has two: the game's internal panel is
 SurfaceFlinger display `4630946441858561667` (1920x1080), and there is a second at
@@ -89,6 +90,28 @@ nothing observable and the app behaves exactly as if the permission were still g
 `appops set --uid <pkg> <op> deny`, and confirm with `appops get` — it prints both, and the line
 you want is `Uid mode:`. This made a genuine first-launch crash look like it did not reproduce,
 which nearly got the finding dismissed as a misreading of the framework contract.
+
+**`adb uninstall` then `adb install` IS NOT A CLEAN INSTALL.** `allowBackup="true"` is set
+deliberately in the manifest, so Android's auto-backup restores the old app data about two seconds
+after the install finishes — the ini, the extracted `autoexec.cfg`, everything. Both commands print
+`Success` and nothing warns you. A "clean" install done this way came up with a device already
+recorded and a stale config, which read as two separate bugs in new code and cost an hour. The tell
+is in logcat: `BackupManagerService: restoreAtInstall pkg=com.selaco.game`, followed by
+`restoreFinished`. **Grep for that count and require 0** rather than trusting the install. To
+actually get a fresh install: `adb shell bmgr enable false`, uninstall, install, then
+`adb shell pm clear com.selaco.game`, and **put backup back with `bmgr enable true`** — it is the
+only protection the saves have. Saves themselves live in `/sdcard/Selaco/savegames/`, which is not
+app-specific storage and survives all of this; the ini is internal and only reachable through
+`run-as com.selaco.game` on a debug build.
+
+**A shipped `autoexec.cfg` change never reaches an existing install.** `extractAssets` writes the
+config once and then skips it forever if the file exists (`SelacoActivity.java`, the `isConfig`
+branch) so the player's edits survive a reinstall. The consequence is that editing
+`android/app/src/main/assets/autoexec.cfg` does nothing on any device that has already run the
+game, and the APK and the device can disagree indefinitely. Compare sizes rather than assuming —
+a device carrying a 5850-byte config while the APK ships 6436 is the signature. Delete the file on
+the device to pick up the shipped one. The pk3s do not have this problem: they are refreshed
+whenever the size differs.
 
 ---
 
