@@ -321,9 +321,16 @@ endif()
 # Flags
 
 # Update gitinfo.h
-
+#
+# BYPRODUCTS is the fork's addition, and it is what makes the generated header actually take effect.
+# Without it this target declares no outputs, so Ninja settles whether gitinfo.cpp.o is stale from the
+# OLD header mtime before this command has run, and the recompile slips to the next build - leaving a
+# binary that reports the previous commit while the build prints "up to date at commit <new>". Naming
+# the byproduct gives Ninja the edge and the restat it needs to re-evaluate gitinfo.cpp in the same
+# invocation. Symptom if this is ever dropped: GetGitHash() disagrees with HEAD by exactly one build.
 add_custom_target( revision_check ALL
 	COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_SOURCE_DIR}/tools/updaterevision/UpdateRevision.cmake" src/gitinfo.h
+	BYPRODUCTS "${CMAKE_SOURCE_DIR}/src/gitinfo.h"
 	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
