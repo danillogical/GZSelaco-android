@@ -26,15 +26,47 @@ Tested on an **AYN Thor** (Snapdragon 8 Gen 2, Android 13) and on Apple Silicon 
    they survive uninstalling or updating the app. Android has no narrower permission that
    covers this: the media-only permission cannot read an `.ipk3`, and anything the app can
    reach without asking is deleted along with the app.
-5. Pick your settings in the first-run dialog. **Steam Deck: Favour Performance** plus
-   **Favour Spectacle (Steam Deck Optimized)** is the tested combination.
+5. Pick your device in the first-run dialog: **AYN Thor**, **AYN Odin 2**, **AYN Odin**, or
+   one of the two Steam Deck presets. That one choice sets your graphics preset, the
+   handheld UI and control defaults, and — on the Thor — turns the second screen on.
 
-The Thor is detected as a handheld automatically, which gives you the larger UI,
-larger subtitles and aim assist that Selaco ships for Steam Deck.
+You can change device later in **Options → Handhelds → Reset Device Choice**, which
+restarts the game and asks again.
 
 **Requirements:** Vulkan 1.1+ (there is no OpenGL fallback) and **a gamepad** — touch
-controls are not implemented, so a device with no physical buttons cannot play. Only
-the Thor has been tested; other hardware may need a lower preset.
+controls are not implemented, so a device with no physical buttons cannot play.
+
+## The second screen (AYN Thor)
+
+The Thor is a clamshell with two screens facing you, so the bottom one shows Selaco's
+**codex** — the PDA desktop, with your datalogs, objectives, milestones, statistics and the
+manual — while you play on the top screen.
+
+It is the game's own PDA, not a copy of it: the engine draws the real thing onto the lower
+panel. Open your PDA with the codex button and the bottom screen becomes live and
+gamepad-driven; close it and it goes back to a read-only dashboard that keeps the tab you
+were last on and refreshes when you find a secret or hit a milestone.
+
+Two settings in **Options → Handhelds**:
+
+| setting | what it does |
+|---|---|
+| **Second Screen** | turns the lower panel on or off entirely |
+| **Second Screen Size** | how large the codex is drawn, 1.00–2.00. Default **1.75** |
+
+Sizes above about 1.8 start cutting the tab strip off at both ends, because the codex is
+laid out for a 1920-wide screen and the panel is 1240 wide.
+
+## Other handhelds
+
+**AYN Odin 2** gets the Thor's settings without the second screen. **AYN Odin** (first
+generation) gets a lighter graphics preset, since it is the weakest of the three.
+
+**Neither has been tested on hardware** — only the Thor has. The profiles are a considered
+starting point, not a verified one, and if a device picks the wrong preset the fix is a text
+file rather than a code change: see [`profiles/README.md`](profiles/README.md), which
+documents every setting and how to add a device. Pull requests adding or retuning one are
+welcome.
 
 **Updating:** install the new APK *over* the old one — that keeps your settings and key
 bindings, which live in the app's private storage and are the one thing an uninstall does
@@ -99,6 +131,10 @@ It is picked up automatically on the next launch. To go back, delete `vulkan.so`
 
 - **No touch controls.** A gamepad is required on Android.
 - **Vulkan only** — no OpenGL fallback.
+- **Only the AYN Thor has been tested.** The Odin 2, Odin and Steam Deck profiles are
+  reasoned from Selaco's own presets but have never run on that hardware. In particular
+  the single-screen path — everything the Thor never exercises, because it always has a
+  second display — is unverified.
 - **No pre-built macOS release.** Build it yourself.
 - Heavy combat can still dip below 30 fps on the Thor.
 
@@ -106,11 +142,12 @@ It is picked up automatically on the next launch. To go back, delete `vulkan.so`
 
 ## For developers
 
-Build instructions, the Android storage and permission model, performance
-measurements and the patches carried against upstream are in
+Build instructions, the Android storage and permission model, the second screen's
+design, performance measurements and the patches carried against upstream are in
 **[TECHNICAL.md](TECHNICAL.md)**. [CLAUDE.md](CLAUDE.md) covers the traps that bite
-while working in the tree. Graphics profiles used for testing are in
-`android/configs/`.
+while working in the tree. Device profiles live in [`profiles/`](profiles/) and are
+plain text — [`profiles/README.md`](profiles/README.md) documents every key. Graphics
+profiles used for testing are in `android/configs/`.
 
 ---
 
