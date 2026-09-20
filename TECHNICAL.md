@@ -1233,7 +1233,16 @@ one line, without latching the whole dashboard or menu broken. Mode 3's `layoutC
 does not call the relayout this is folded into, so it gets no padding fix; it only runs if the
 wide-box symbols fail to resolve in the first place.
 
-> **Not yet independently exercised on device:** the genuine first-run flow (no `g_tos` override, no
-> pre-seeded `aux_device`) was tested end-to-end for the first time only as part of this work, and the
-> four engine-restart latches above are compile-verified only — no actual `restart` CCMD run has been
-> used to confirm them.
+> **Verified on device:** the genuine first-run flow, on an install proved clean rather than assumed
+> clean — `restoreAtInstall` count 0, no ini, no extracted config. The log line to look for is
+> `AuxDevicePicker: first launch - offering 5 devices`, which is the real branch and not the
+> `aux_devicepicker` console override. Selecting AYN Thor applied 37 cvars with 0 problems and
+> persisted `aux_device=ayn_thor`, `aux_panel=true`, `aux_dashboard_zoom=1.75`, `g_tos=2`.
+>
+> Getting a genuinely clean install is harder than it looks and an earlier attempt produced a false
+> negative — see CLAUDE.md on `adb uninstall` and auto-backup. The picker correctly declined to show
+> on the restored data; it was reading a pre-existing `aux_device=-`, not misbehaving.
+>
+> **Still not exercised on device:** the four engine-restart latches above are compile-verified only,
+> since no `restart` CCMD run has been used to confirm them, and the single-screen path has never
+> executed — no device without a second display was available.
