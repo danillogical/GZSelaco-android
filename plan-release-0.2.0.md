@@ -16,8 +16,8 @@ hard to undo, so the gates below are not optional.
 |---|---|
 | branch | `android-macos-ports` |
 | remote | **`fork`** → `https://github.com/danillogical/GZSelaco-android.git` |
-| HEAD | `23f62ac4a` (confirm — more may have landed) |
-| ahead of `fork/android-macos-ports` | 20 commits, 0 behind |
+| HEAD | confirm with `git log --oneline -1`; the APK must name it (section 2) |
+| ahead of `fork/android-macos-ports` | 21 commits at time of writing, 0 behind |
 | version | `versionName '0.2.0'`, `versionCode 200` |
 | previous release | tag `v0.1.0`, asset `Selaco-android-0.1.0.apk` |
 
@@ -67,10 +67,45 @@ code, not an identifier — ignore it.
 
 ---
 
-## 2. Build the release artifact from the tagged commit
+## 2. Verify the artifact — it is already built
 
-**Do not reuse the APK already in the tree.** It was built before the README
-commit, so its embedded git hash names an earlier commit. Rebuild.
+**The APK is built and fully gated. Do not rebuild it unless a check below
+fails.**
+
+```
+android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+No size or digest is recorded here on purpose: this file is itself committed,
+so any edit to it changes `HEAD`, which changes the hash embedded in the
+binary, which changes the digest — a number written here could never be
+right about the build it describes. The check that *is* stable is that the
+binary names the commit you are about to tag:
+
+```bash
+APK=android/app/build/outputs/apk/debug/app-debug.apk
+DISK=$(stat -f %z android/app/src/main/jniLibs/arm64-v8a/libSelaco.so)
+APKSZ=$(unzip -l "$APK" | awk '/lib\/arm64-v8a\/libSelaco.so/{print $1}')
+[ "$DISK" = "$APKSZ" ] && echo "SO MATCH OK" || echo "STALE APK - do not release"
+
+unzip -p "$APK" lib/arm64-v8a/libSelaco.so > /tmp/so
+strings /tmp/so | grep -c "$(git rev-parse HEAD)"          # must be 1
+strings /tmp/so | grep -oE 'v0\.1\.0-[0-9]+-g[0-9a-f]+(-m)?' | head -1
+unzip -l "$APK" | grep -c 'assets/profiles/'               # must be 5
+unzip -p "$APK" assets/autoexec.cfg | grep -c '^vid_fps 0'  # must be 1
+```
+
+- **hash count must be 1.** If it is 0 the APK predates `HEAD` — most likely
+  because a commit landed after it was built. Rebuild. If it stays 0 after a
+  rebuild, `gitinfo.cpp.o` is stale: `touch src/common/utility/gitinfo.cpp`
+  and build again. That was fixed in `cf0a7fc04`, so a recurrence means the
+  fix regressed.
+- **the git description must NOT end in `-m`.** `-m` means `git describe` saw
+  a dirty tree, so the binary was not built from a committed state.
+
+**If the file is missing**, you are on a different machine —
+`android/app/build/` is gitignored, so the APK is on disk only and is not part
+of the clone. Rebuild:
 
 ```bash
 ./android/build-android.sh
@@ -79,6 +114,12 @@ cd android && java -Xmx4g \
   -classpath /tmp/gradle-8.13/lib/gradle-launcher-8.13.jar \
   org.gradle.launcher.GradleMain --no-daemon assembleDebug
 ```
+
+Then re-run the gate above. Every exit code in that chain lies:
+`package-apk.sh` exits **1** on success, Gradle reports `BUILD SUCCESSFUL`
+against a tree it did not rebuild, and `adb install` reports `Success` for a
+stale APK — which is why the gate compares sizes and the embedded hash rather
+than trusting any of them.
 
 **If Gradle is missing**, `/tmp` has been cleaned — it takes the jars and
 leaves the directory tree, so the install looks present but `lib/` is empty.
@@ -89,30 +130,6 @@ cd /tmp && rm -rf gradle-8.13 && \
   curl -fsSL -o g.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip && \
   unzip -q g.zip && rm g.zip
 ```
-
-### The artifact gate — do not skip this
-
-Every exit code in that chain lies. `package-apk.sh` exits **1** on success,
-Gradle reports `BUILD SUCCESSFUL` against a tree it did not rebuild, and
-`adb install` reports `Success` for a stale APK.
-
-```bash
-APK=android/app/build/outputs/apk/debug/app-debug.apk
-DISK=$(stat -f %z android/app/src/main/jniLibs/arm64-v8a/libSelaco.so)
-APKSZ=$(unzip -l "$APK" | awk '/lib\/arm64-v8a\/libSelaco.so/{print $1}')
-[ "$DISK" = "$APKSZ" ] || echo "STALE APK - do not release"
-
-unzip -p "$APK" lib/arm64-v8a/libSelaco.so > /tmp/so
-strings /tmp/so | grep -c "$(git rev-parse HEAD)"          # must be 1
-strings /tmp/so | grep -oE 'v0\.1\.0-[0-9]+-g[0-9a-f]+(-m)?' | head -1
-unzip -l "$APK" | grep -c 'assets/profiles/'               # must be 5
-```
-
-- **hash count must be 1.** If it is 0, `gitinfo.cpp.o` is stale — `touch
-  src/common/utility/gitinfo.cpp` and rebuild. This was fixed in
-  `cf0a7fc04`, so it should not recur; if it does, that fix regressed.
-- **the git description must NOT end in `-m`.** `-m` means `git describe`
-  saw a dirty tree, so the binary was not built from the tagged commit.
 
 ---
 
