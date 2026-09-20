@@ -611,3 +611,86 @@ void SetMenuLastAppClass(PClass *cls)
 }
 
 }   // namespace AuxView
+
+// ---------------------------------------------------------------------------------------------
+// THE RESTART TEARDOWN HOOK: forget everything this port has resolved out of script.
+//
+// Called from D_Cleanup (d_main.cpp) on the `restart` CCMD, immediately before PClass::StaticShutdown().
+// That function deletes every PClass, deletes every VMFunction, releases every symbol table and frees the
+// class data allocator - and the engine then reinitialises IN PROCESS and re-parses all script. So from
+// that line onward every PClass*, PField*, PFunction* and VMFunction* cached anywhere in this port is
+// dangling, together with the AUXCANVAS FCanvas (a DObject owned by a texture D_Cleanup has already
+// deleted) and the DObjects two GC marker functions still mark.
+//
+// THE MARKED DObjects ARE THE REPORTED CRASH. There is no RemoveMarkerFunc and GC's marker array is never
+// cleared, so both markers keep reading their globals for the life of the process: DesktopMenu and
+// AuxReceiver were therefore marked live through every collection in D_Cleanup, outlived the class
+// deletion, and the first collection after the restart - DestroyAllThinkers loading TITLEMAP - walked them
+// through a freed PClass in DObject::PropagateMark.
+//
+// WHY IT IS SAFE HERE, and it is the only property that matters: every one of the seven functions it calls
+// does nothing but store to its own file statics. No VMCall, no Destroy(), no scripted onDestroy, no sound,
+// no music, no texture or menu access, nothing that can throw. In particular this is NOT DesktopViewDiscard
+// or an equivalent - that one calls menu->Destroy(), which dispatches PDAMenu3's scripted onDestroy and
+// I_SetMusicVolume through it, both illegal at a point where the sound system is already down and the
+// classes are about to go. Unrooting the objects and letting the collection inside StaticShutdown sweep
+// them is strictly safer: that collection runs with bVMOperational already false, so DObject::Destroy
+// calls no script at all, and it runs before the PClasses are deleted, so ~DObject can still read them.
+//
+// Safe to call when nothing was ever built - every store is unconditional and every target starts at the
+// same value it is being put back to - and safe to call twice, which it is: GameMain calls D_Cleanup a
+// second time on the way out.
+//
+// LEVEL CHANGES DO NOT COME THROUGH HERE. They keep going through DesktopViewDiscard and the per-frame
+// edges, deliberately: this throws away every resolve, which would mean a full rebuild, and a map change is
+// the case the dashboard is specifically built to survive without one.
+
+// Revision-unique, in the same shape as the other aux build ids, so `strings` on the packaged library
+// answers "is this change in the binary" without a device run - the one check this project's build chain
+// makes necessary, because every exit code in it can report success against a tree it did not rebuild.
+static const char *const AuxRestartBuild = "AUXRESTART_BUILD_20260920_M8_R1";
+
+void I_AuxForgetScriptState()
+{
+	// One line per restart, and the only output this function produces. It is here because the hook is
+	// otherwise completely silent: a restart that crashed the same way as before would give no way to tell
+	// "the fix is not in this binary" from "the fix does not work", which is the reading this project has
+	// been caught by before. The build id is also what proves the change reached the packaged library.
+	//
+	// PRINT_NONOTIFY IS LOAD-BEARING, NOT TIDINESS. Without it PrintString feeds the notify buffer, and
+	// FNotifyBuffer::AddString does a VMCall on StatusBar.ProcessNotify (c_notifybuffer.cpp:96-106) and reads
+	// twod for the scale - a VM call from inside the teardown, which is the one thing this whole function
+	// exists to avoid. NONOTIFY leaves I_PrintStr (so it still reaches logcat), the console buffer and the
+	// log file, none of which touch the VM, a font or a drawer.
+	Printf(PRINT_HIGH | PRINT_NONOTIFY, "AuxRestart: forgetting cached script state before the class "
+		"teardown (build=%s)\n", AuxRestartBuild);
+
+	// This file's own two caches first, because both are shared BY the files below rather than owned by one
+	// of them, and neither is reset by anything else.
+	//
+	// The tab-padding group is keyed on the menu class, which is the right shape but compares POINTERS: the
+	// restart re-parses the same script in the same order, so the new PDAMenu3 can land on the freed one's
+	// address, the key matches, and six freed PFields are then used as raw byte offsets.
+	AuxView::TabPaddingClass = nullptr;
+	AuxView::TabPaddingTabClass = nullptr;
+	for (unsigned i = 0; i < countof(AuxView::TabFieldNames); i++)
+		AuxView::TabPaddingFields[i] = nullptr;
+	AuxView::FuncSetTextPadding = nullptr;
+	AuxView::SetTextPaddingRegs = 0;
+
+	// The cross-mode channel. Its comment in i_auxvmreflect.h says PClass objects are never freed and so it
+	// is never cleared; that holds within a session and StaticShutdown is where it stops holding, which is
+	// the one place "the last app this session" stops meaning anything.
+	AuxView::SetMenuLastAppClass(nullptr);
+
+	I_AuxCanvasForgetScriptState();
+	I_AuxCodexForgetScriptState();
+	I_AuxCodexViewForgetScriptState();
+	I_AuxMenuViewForgetScriptState();
+	I_AuxPanelForgetScriptState();
+	I_AuxDevicePickerForgetScriptState();
+	I_AuxDeviceResetForgetScriptState();
+
+	// i_auxprofile.cpp is deliberately absent: it caches nothing engine-derived and latches nothing, so it
+	// re-resolves every cvar, option-value block and UIHelper method on each call already.
+}

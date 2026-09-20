@@ -45,6 +45,8 @@
 #include "symbols.h"
 #include "types.h"
 
+#include "i_auxvmreflect.h"   // the restart-teardown declarations; this file resolves its own symbols
+
 // ---------------------------------------------------------------------------------------------
 // The unlock bridge (M1, proven on device).
 // ---------------------------------------------------------------------------------------------
@@ -83,6 +85,28 @@ unsigned I_AuxCodexGeneration()
 {
 	Probe();
 	return CodexGeneration;
+}
+
+// Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs. Nothing here does VM work; every line is a store.
+//
+// The memoisation is keyed on the ManualItem class, which is the right shape but compares POINTERS - and a
+// restart frees every PClass and re-parses the same script, so the new class can land on the freed one's
+// address and the key matches. That skips the isMap/Size/KeyType/ValueType validation the comment above
+// says must never be skipped as an optimisation, and CachedUnlocksField's offset is then read out of freed
+// memory and used to reinterpret arbitrary object bytes as a Map<Name,Int>.
+//
+// CodexGeneration goes back to zero along with i_auxcodexview.cpp's copy of it, so the two agree after the
+// restart and the rebuild is driven by the desktop having been discarded rather than by a spurious edge.
+void I_AuxCodexForgetScriptState()
+{
+	ProbeBroken = false;
+	LastChecksum = 0;
+	LastState = -1;
+	CachedItemClass = nullptr;
+	CachedUnlocksField = nullptr;
+	CachedFieldValid = false;
+	CodexGeneration = 0;
 }
 
 static bool ReadUnlockChecksum(uint64_t &checksum, int &state)

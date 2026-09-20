@@ -1989,3 +1989,100 @@ void I_AuxCodexViewDraw(int mode)
 	if (mode == 3)
 		DesktopViewDraw();
 }
+
+// Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs.
+//
+// NOT DesktopViewDiscard, and that is the whole reason this function is separate from it: Discard calls
+// menu->Destroy(), which dispatches PDAMenu3's scripted onDestroy (pda_menu.zs:973) and through it
+// I_SetMusicVolume. Both are illegal at teardown - the sound system is already down and the classes are
+// about to be deleted - so the menu is simply unrooted here and left to the collection inside
+// PClass::StaticShutdown, which runs with bVMOperational already false and therefore calls no script at all.
+//
+// THE THREE MARKED POINTERS COME FIRST because they are the crash: the marker function registered in
+// BuildDesktopView stays in GC's marker array for the life of the process (there is no RemoveMarkerFunc),
+// so anything still here is walked by the first collection after the restart, by which time its PClass has
+// been deleted. The rest is the remainder the audit found - every one-shot resolve, so that the next init
+// re-resolves against the freshly parsed script instead of reusing a freed PField's offset.
+void I_AuxCodexViewForgetScriptState()
+{
+	DesktopMenu = nullptr;
+	DesktopRootView = nullptr;
+	DesktopPendingApp = nullptr;
+
+	// DesktopAbsent and DesktopBroken are cleared here although DesktopViewDiscard deliberately leaves them
+	// latched, because the two cases are not the same one. Discard keeps a verdict about script that is still
+	// loaded; a restart can load an entirely different wad set, so the old verdict is about a game that is no
+	// longer running. The cost of being wrong is one re-attempt and one repeated yellow line.
+	DesktopAbsent = false;
+	DesktopBroken = false;
+
+	// The canvas is a DObject owned by the AUXCANVAS FCanvasTexture, and D_Cleanup's TexMan.DeleteAll()
+	// destroys the texture, which unlinks the FCanvas from AllCanvases - its only GC root - and nulls it.
+	DesktopCanvas = nullptr;
+	FuncDesktopDraw = nullptr;
+	FuncDesktopDrawSubviews = nullptr;
+	DesktopGeneration = 0;
+
+	// The app-select group, which BuildDesktopView does NOT reassign: it resolves once for the process and
+	// is gated by AppSelectResolved, so without this the first post-restart selection reads tab offsets out
+	// of freed PFields and calls freed VMFunctions.
+	AppSelectResolved = false;
+	AppSelectBroken = false;
+	AppWindowClass = nullptr;
+	AppTabClass = nullptr;
+	FldDesktopView = nullptr;
+	FldViewParentMenu = nullptr;
+	FldTabDisabled = nullptr;
+	FuncNumSubviews = nullptr;
+	FuncViewAt = nullptr;
+	FuncViewAdd = nullptr;
+	FuncAppClose = nullptr;
+	FuncSwitchToApp = nullptr;
+	FuncTabSetSelected = nullptr;
+	ViewAtRegs = 0;
+	ViewAddRegs = 0;
+	SwitchToAppRegs = 0;
+	SetSelectedRegs = 0;
+	AppMenuClass = nullptr;
+	AppViewClass = nullptr;
+	for (unsigned i = 0; i < countof(DashboardApps); i++)
+	{
+		AppClasses[i] = nullptr;
+		AppVInit[i] = nullptr;
+		AppVInitRegs[i] = 0;
+		AppTabFields[i] = nullptr;
+	}
+	DesktopAppWantedIndex = -1;
+	DesktopAppShownIndex = -1;
+
+	// The wide-box relayout group. FuncDesktopCalcScale doubles as the group's "resolved" flag, which is
+	// what DesktopRetune tests before calling through the rest of them.
+	FuncDesktopCalcScale = nullptr;
+	FuncDesktopMenuLayout = nullptr;
+	FuncDesktopViewLayout = nullptr;
+	FldDesktopUIScaling = nullptr;
+	FldDesktopLastUIScale = nullptr;
+	DesktopCalcScaleRegs = 0;
+	DesktopViewLayoutRegs = 0;
+	DesktopPdaClass = nullptr;
+	DesktopViewClass = nullptr;
+	DesktopLayoutZoom = 1.0;
+
+	// The stat probe, which walks Stats.trackers through raw field offsets - the one place here where a
+	// stale PField is a read of arbitrary object bytes rather than a missed call. StatsHashValid is cleared
+	// so the first post-restart sample is taken as a new baseline instead of being reported as a change,
+	// which would otherwise route straight back into DesktopViewDiscard.
+	StatsProbeBroken = false;
+	StatsProbeResolved = false;
+	StatsActorClass = nullptr;
+	StatTrackerClass = nullptr;
+	FldStatsTrackers = nullptr;
+	FldTrackerValue = nullptr;
+	FldTrackerPossible = nullptr;
+	StatsTrackerCount = 0;
+	StatsHashValue = 0;
+	StatsHashValid = false;
+	DesktopLastRebuildMs = 0.0;
+	DesktopPendingChanges = 0;
+}

@@ -773,3 +773,48 @@ FAuxMenuRedirect::~FAuxMenuRedirect()
 	if (Blurred != nullptr && Blurred == CurrentMenu)
 		Blurred->DontBlur = SavedDontBlur;
 }
+
+// Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs.
+//
+// MenuResolved is the one that matters most here: MenuIsPdaOpen short-circuits MenuResolve() on it, so
+// left set it keeps all eleven pointers below in use against a script that has been recompiled - and the
+// four PFields are used as raw byte offsets to WRITE through, which is the widest corruption primitive
+// this file has. Nothing here does VM work; every line is a store.
+void I_AuxMenuViewForgetScriptState()
+{
+	// Cleared, unlike the in-session behaviour where a latched verdict stays latched, because a restart can
+	// bring up a different wad set and the old verdict is about a game that is no longer running.
+	MenuAbsent = false;
+	MenuBroken = false;
+	MenuResolved = false;
+
+	MenuPdaClass = nullptr;
+	MenuViewClass = nullptr;
+	FuncMenuCalcScale = nullptr;
+	FuncMenuLayout = nullptr;
+	FuncMenuViewLayout = nullptr;
+	MenuCalcScaleRegs = 0;
+	MenuViewLayoutRegs = 0;
+	FldMenuMainView = nullptr;
+	FldMenuUIScaling = nullptr;
+	FldMenuIgnoreUIScaling = nullptr;
+	FldMenuDrawCanvas = nullptr;
+	MenuAppWindowClass = nullptr;
+	FldMenuCurrentAppWindow = nullptr;
+
+	// The canvas is a DObject owned by the AUXCANVAS FCanvasTexture, which D_Cleanup's TexMan.DeleteAll()
+	// destroys. Left set, FAuxMenuRedirect would point the global twod at a freed F2DDrawer for the whole
+	// of M_Drawer, so every 2D command the engine's menu system issues would land in freed memory.
+	MenuCanvas = nullptr;
+
+	MenuTuned = nullptr;
+	MenuTunedZoom = 1.0;
+	MenuArmed = false;
+	MenuWantPublish = false;
+
+	// Cleared so the first post-restart frame does not see a close edge for a PDA that belonged to the
+	// previous session and issue a canvas clear and a readback against the stale canvas.
+	MenuWasOpen = false;
+	MenuFramesSincePublish = 0;
+}

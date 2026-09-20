@@ -809,3 +809,32 @@ CCMD(aux_devicepicker)
 	Printf("%s: forced - %d device%s, shown at the next idle title screen\n", AuxSubsystem,
 		AuxPickerEntries, AuxPickerEntries == 1 ? "" : "s");
 }
+
+// Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs. Nothing here does VM work; every line is a store.
+void I_AuxDevicePickerForgetScriptState()
+{
+	// The bridge is keyed on the IntroHandler class by pointer, which the restart defeats by freeing every
+	// PClass and then re-parsing: a recycled address makes the compare match and skips the resolve, leaving
+	// the three VMCalls below aimed at freed VMFunctions.
+	AuxBridgeAttempted = false;
+	AuxBridgeResolved = false;
+	AuxBridgeClass = nullptr;
+	AuxFuncStartupCheck = nullptr;
+	AuxFuncClearTOS = nullptr;
+	AuxFuncClearVisibility = nullptr;
+
+	// AuxPickerBuilt already re-checks the live descriptor, so this is belt and braces rather than the fix;
+	// it is cleared anyway so the next build's log line counts the entries it really added.
+	AuxPickerBuilt = false;
+	AuxPickerEntries = 0;
+
+	// THE ONE ENTRY HERE THAT IS USER-VISIBLE RATHER THAN A DANGLING POINTER. Both are write-true-only from
+	// I_AuxDevicePickerInit, and every one of its early returns leaves them alone - so a restart carried a
+	// previous launch's armed state into a launch that decided not to offer a picker. With AuxPickerForced
+	// set that is undismissable by design, which turned `aux_devicepicker` plus a restart into a picker
+	// reopening on the title screen of an install that already had a device. The next Init re-arms if a
+	// picker is genuinely owed.
+	AuxPickerArmed = false;
+	AuxPickerForced = false;
+}

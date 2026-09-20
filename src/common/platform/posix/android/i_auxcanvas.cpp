@@ -375,3 +375,31 @@ bool I_AuxCanvasReadback(const uint8_t **outPixels, int *outWidth, int *outHeigh
 	*outHeight = h;
 	return true;
 }
+
+// Forget the resolved canvas, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs. Nothing here does VM work; every line is a store.
+//
+// This is the one place AuxCanvasResolve's stated precondition stops holding. Its comment says a full
+// texture-manager reinitialisation would invalidate the cached FCanvas and does not happen on this target -
+// but D_Cleanup runs TexMan.DeleteAll(), which destroys the FCanvasTexture, and ~FCanvasTexture removes the
+// FCanvas from AllCanvases (its only GC root) and nulls it. Left cached, the pointer is dereferenced on the
+// render path on every frame after the restart, and the new AUXCANVAS the re-parsed animdefs creates is
+// never picked up because the resolve short-circuits on the stale one.
+//
+// AuxStaging and AuxStagingPixels are deliberately left alone. They are Vulkan memory, not engine memory,
+// the device is not torn down by a restart, and i_auxpanel.cpp's AuxPixelsBuffer is a direct ByteBuffer
+// over that exact mapping - retiring the buffer here would dangle a JNI reference and would mean freeing a
+// resource that in-flight command buffers may still reference, during teardown.
+void I_AuxCanvasForgetScriptState()
+{
+	AuxCanvas = nullptr;
+
+	// Cleared so a failure latched against the previous wad set does not silently disable the second screen
+	// for a session that might not have it. The cost of being wrong is one re-attempt and one yellow line.
+	AuxCanvasBroken = false;
+
+	// Zeroed rather than left: they are the extents the clear and the test pattern draw at, and the next
+	// resolve is what re-reads them off the texture that actually exists.
+	AuxCanvasActualWidth = 0;
+	AuxCanvasActualHeight = 0;
+}

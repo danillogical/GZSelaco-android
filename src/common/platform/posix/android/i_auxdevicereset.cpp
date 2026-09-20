@@ -892,3 +892,37 @@ CCMD(aux_resetdevice)
 	AuxPromptWanted = true;
 	Printf("%s: asking for confirmation on the next frame\n", AuxSubsystem);
 }
+
+// Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs.
+//
+// AuxReceiver IS THE SECOND HALF OF THE CRASH. It is created once and deliberately kept for the process,
+// and the marker function above keeps marking it - so it survives every collection in D_Cleanup with its
+// PClass deleted underneath it, and the first collection after the restart walks it. Nulling it here is
+// what lets the collection inside PClass::StaticShutdown sweep it instead, while bVMOperational is already
+// false and no scripted OnDestroy can run. Nothing here does VM work; every line is a store.
+void I_AuxDeviceResetForgetScriptState()
+{
+	AuxPendingPrompt = nullptr;
+	AuxReceiver = nullptr;
+
+	// Keying the bridge on the PromptMenu class is the right shape but it compares POINTERS, and the
+	// restart frees every PClass and then re-parses the same script in the same order - so the new
+	// PromptMenu can land on the freed one's address, the compare matches, and the resolve is skipped with
+	// all eight pointers below still pointing into freed memory. Clearing the key is what closes that.
+	AuxBridgeAttempted = false;
+	AuxBridgeClass = nullptr;
+	AuxPromptClass = nullptr;
+	AuxCallbackClass = nullptr;
+	AuxCallbackFunc = nullptr;
+	AuxFuncInitNew = nullptr;
+	AuxFldOnClosed = nullptr;
+	AuxFldReceiver = nullptr;
+	AuxFldAllowBack = nullptr;
+
+	// An answer owed to a prompt that no longer exists must not be honoured: AuxAwaitingAnswer is the only
+	// thing separating our own confirmation from a hand-typed `aux_devicereset 1`, and the action it
+	// authorises clears the device choice and quits.
+	AuxPromptWanted = false;
+	AuxAwaitingAnswer = false;
+}

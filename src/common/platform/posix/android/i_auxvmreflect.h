@@ -66,6 +66,33 @@ class VMFunction;
 FCanvas *GetTextureCanvas(const FString &texturename);
 
 // ---------------------------------------------------------------------------------------------
+// THE RESTART TEARDOWN. One entry point, called from D_Cleanup; one per-file reset behind it.
+//
+// A `restart` deletes every PClass and VMFunction and releases every symbol table, then reinitialises the
+// engine in process against freshly parsed script - so every resolve this port latches is dangling from
+// that moment, and the two GC marker functions keep walking the DObjects they mark until something nulls
+// them. Each file resets its own statics because they are file-local by design; the aggregator in
+// i_auxvmreflect.cpp is what D_Cleanup calls, and it carries the full reasoning.
+//
+// Declared here, rather than as an ad-hoc local `extern` at each call site, so the eight definitions and
+// the one caller cannot drift apart - they are only ever called from one place and a silent signature
+// mismatch would be a linker error at best and a wrong call at worst.
+//
+// EVERY ONE OF THESE MUST REMAIN FREE OF VM WORK. They run after the sound system is down and before the
+// classes are deleted, so a VMCall, a Destroy(), a sound or a texture lookup from any of them would be
+// unsafe. Storing to file statics is the whole contract.
+// ---------------------------------------------------------------------------------------------
+void I_AuxForgetScriptState();
+
+void I_AuxCanvasForgetScriptState();
+void I_AuxCodexForgetScriptState();
+void I_AuxCodexViewForgetScriptState();
+void I_AuxMenuViewForgetScriptState();
+void I_AuxPanelForgetScriptState();
+void I_AuxDevicePickerForgetScriptState();
+void I_AuxDeviceResetForgetScriptState();
+
+// ---------------------------------------------------------------------------------------------
 // THE SECOND-SCREEN ZOOM, which BOTH modes lay their menu out against: one cvar, one clamp, two modes.
 //
 // aux_dashboard_zoom and the arithmetic table saying where its useful travel actually ends live in

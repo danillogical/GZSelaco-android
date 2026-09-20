@@ -4259,6 +4259,13 @@ void D_Cleanup()
 	}
 	PClassActor::AllActorClasses.Clear();
 	ScriptUtil::Clear();
+#ifdef __ANDROID__
+	// The line below deletes every PClass and VMFunction and releases every symbol table, so every resolve
+	// this port caches is dangling from here - including the DObjects our two GC marker functions keep
+	// marking, which is what made `restart` crash in PropagateMark once the engine reinitialised. Stores to
+	// file statics only: no VMCall, no Destroy, nothing that can throw. See i_auxvmreflect.cpp.
+	{ extern void I_AuxForgetScriptState(); I_AuxForgetScriptState(); }
+#endif
 	PClass::StaticShutdown();
 	
 	GC::FullGC();					// perform one final garbage collection after shutdown

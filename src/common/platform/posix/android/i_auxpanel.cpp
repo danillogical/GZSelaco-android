@@ -936,3 +936,30 @@ void I_AuxPanelInitMenu()
 	AuxRenameHandheldEntry();
 }
 
+// Forget the state that outlives a restart wrongly, for the restart teardown. See I_AuxForgetScriptState in
+// i_auxvmreflect.cpp for why it exists and when it runs. Nothing here does VM work; every line is a store.
+//
+// THIS FILE'S JNI STATE IS DELIBERATELY UNTOUCHED - AuxBroken, AuxClass, the three jmethodIDs, the pixel
+// ByteBuffer, AuxLive and AuxEverLive. None of it is engine state: the JVM, the AuxPanel class and whether a
+// Presentation is up are all properties of the process, and a restart changes none of them. Clearing AuxBroken
+// here would also be wrong, because the failure it records is a JNI failure that is still true.
+void I_AuxPanelForgetScriptState()
+{
+	// Keyed on the descriptor rather than a bare bool, which was right - but DeinitMenus clears
+	// MenuDescriptors wholesale and the freshly parsed SteamDeckMenu descriptor can be allocated at the
+	// address the old one was just freed from. On that match the heading and its gap are skipped while both
+	// items are appended anyway, which is exactly what keying on the descriptor was meant to prevent.
+	AuxHeadingAddedTo = nullptr;
+
+	// The panel's only redraw triggers are a mode change and a not-live-last-frame edge, and after a restart
+	// in the shipping mode neither fires: the mode resolves to the same value and the panel was live. Nothing
+	// else may set AuxCanvasDrawRequests, so without this the panel stays frozen on the pre-restart image for
+	// the rest of the process. -1 and false are the same values the first-ever frame starts from.
+	AuxLastMode = -1;
+	AuxWasLive = false;
+	AuxCanvasDrawRequests = 0;
+
+	// An armed readback belongs to a canvas that no longer exists.
+	AuxCanvasNeedsReadback = false;
+}
+
