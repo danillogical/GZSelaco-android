@@ -80,6 +80,28 @@ done
 # It sets vsync, the 30 fps cap and the fps readout; graphics presets are chosen in-game.
 [ -f "$ASSETS/autoexec.cfg" ] && echo "  autoexec.cfg (shipped default config)"
 
+# ---- device profiles -----------------------------------------------------
+# profiles/*.cfg are the per-device settings files (see profiles/README.md). They are
+# copied from the repo on every package rather than checked in under assets/, because the
+# repo is their source of truth: a PR that retunes a device has to reach existing installs.
+# SelacoActivity.extractAssets extracts them the same way it does the pk3s - overwriting on
+# every install - rather than write-once like autoexec.cfg, for that same reason.
+say "Staging device profiles into $ASSETS/profiles"
+PROFILE_SRC="$GZ_ROOT/profiles"
+if [ -d "$PROFILE_SRC" ]; then
+	# Cleared first so a profile deleted or renamed in the repo does not linger in the APK
+	# and keep showing up in the picker.
+	rm -rf "$ASSETS/profiles"
+	mkdir -p "$ASSETS/profiles"
+	for cfg in "$PROFILE_SRC"/*.cfg; do
+		[ -e "$cfg" ] || continue
+		install -m 644 "$cfg" "$ASSETS/profiles/"
+		echo "  $(basename "$cfg")"
+	done
+else
+	echo "  WARNING: no $PROFILE_SRC directory - no device profiles will be packaged"
+fi
+
 # ---- SDL's Java sources --------------------------------------------------
 # SDLActivity and friends are part of SDL, not of this repo, so they are copied
 # out of the SDL checkout rather than vendored.

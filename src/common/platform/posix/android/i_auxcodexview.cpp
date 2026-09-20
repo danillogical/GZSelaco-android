@@ -434,26 +434,26 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 	// numSubviews() and viewAt(int) are the game's OWN accessors for desktopView.subviews (view.zs:993,
 	// :997), used in preference to walking the TArray from C++ so that nothing here depends on its layout
 	// - and viewAt does a raw `subviews[idx]`, so every call below is bounded by numSubviews().
-	VMFunction *funcNum = classesOk ? ResolveMethod(viewCls, "numSubviews", nullptr, 0, &numRegs) : nullptr;
-	VMFunction *funcAt = funcNum != nullptr ? ResolveMethod(viewCls, "viewAt", IntArg, 1, &ViewAtRegs) : nullptr;
+	VMFunction *funcNum = classesOk ? ResolveMethod(viewCls, "numSubviews", "AuxDesktopView", nullptr, 0, &numRegs) : nullptr;
+	VMFunction *funcAt = funcNum != nullptr ? ResolveMethod(viewCls, "viewAt", "AuxDesktopView", IntArg, 1, &ViewAtRegs) : nullptr;
 	// add(UIView) is virtual (view.zs:936); desktopView is proved to be EXACTLY UIView before it is used
 	// as self, the same argument the file already makes for mainView.
 	VMFunction *funcAdd = funcAt != nullptr
-		? ResolveMethod(viewCls, "add", ObjArg, 1, &ViewAddRegs, viewCls) : nullptr;
+		? ResolveMethod(viewCls, "add", "AuxDesktopView", ObjArg, 1, &ViewAddRegs, viewCls) : nullptr;
 	// close() is PDAAppWindow's own, takes no arguments, and is non-virtual and unique in the whole tree
 	// (app_window.zs:139) - so resolving it on the base is what runs for every subclass.
-	VMFunction *funcClose = funcAdd != nullptr ? ResolveMethod(appCls, "close", nullptr, 0, &closeRegs) : nullptr;
+	VMFunction *funcClose = funcAdd != nullptr ? ResolveMethod(appCls, "close", "AuxDesktopView", nullptr, 0, &closeRegs) : nullptr;
 	// switchToAppWindow is declared `private` (pda_menu.zs:718). private and protected are COMPILE-TIME
 	// checks in ZScript - the compiler refuses the access at parse time and nothing about the symbol
 	// itself changes - so PClass::FindSymbol still returns it and VMCall still invokes it. Validated
 	// exactly as strictly as every public symbol here, because VMFillParams does not care how it was
 	// declared: it walks the CALLEE's NumArgs regardless.
 	VMFunction *funcSwitch = funcClose != nullptr
-		? ResolveMethod(menuCls, "switchToAppWindow", ObjArg, 1, &SwitchToAppRegs, appCls) : nullptr;
+		? ResolveMethod(menuCls, "switchToAppWindow", "AuxDesktopView", ObjArg, 1, &SwitchToAppRegs, appCls) : nullptr;
 	// setSelected(bool s = true, bool sound = true) - button.zs:743. Both optional, so it is two declared
 	// arguments and three registers with self.
 	VMFunction *funcSel = funcSwitch != nullptr
-		? ResolveMethod(tabCls, "setSelected", BoolBoolArgs, 2, &SetSelectedRegs) : nullptr;
+		? ResolveMethod(tabCls, "setSelected", "AuxDesktopView", BoolBoolArgs, 2, &SetSelectedRegs) : nullptr;
 
 	PField *fldDesktop = funcSel != nullptr ? ResolveField(menuCls, "desktopView", Field_ViewPtr, viewCls) : nullptr;
 	// parentMenu takes the MENU class as the expected pointee ancestor, not viewCls - see Field_MenuPtr.
@@ -481,7 +481,7 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 		// vInit(Vector2, Vector2) is the virtual constructor init() itself uses (app_window.zs:14,
 		// pda_menu.zs:419), so a subclass override is what runs - ResolveMethod dispatches through the
 		// instance's own vtable for exactly that reason.
-		AppVInit[i] = ResolveMethod(cls, "vInit", VInitArgs, 2, &AppVInitRegs[i]);
+		AppVInit[i] = ResolveMethod(cls, "vInit", "AuxDesktopView", VInitArgs, 2, &AppVInitRegs[i]);
 		// The tab is expected to be a PDATab, which is what the disabled read below assumes.
 		AppTabFields[i] = AppVInit[i] != nullptr
 			? ResolveField(menuCls, DashboardApps[i].TabFieldName, Field_ViewPtr, tabCls) : nullptr;
@@ -791,9 +791,9 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 	catch (const std::exception &e)
 	{
 		// Latch the SELECTION only, and not the desktop: the desktop is already built and drawing, and the
-		// desktop is already built and drawing, and the relayout in BuildDesktopView still runs. An abort
-		// part way through the sweep can leave fewer apps open than init() restored, which is why this says
-		// "incomplete" rather than claiming the savegame's set is intact.
+		// relayout in BuildDesktopView still runs. An abort part way through the sweep can leave fewer apps
+		// open than init() restored, which is why this says "incomplete" rather than claiming the savegame's
+		// set is intact.
 		DesktopPendingApp = nullptr;
 		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: selecting the dashboard app aborted (%s), the dashboard's "
 			"app set is incomplete for this build\n", e.what());
@@ -1100,12 +1100,22 @@ static void DesktopRetune(bool *outNeedsRedraw)
 	}
 }
 
+// Drop the built desktop and unroot it. Defined further down, next to the reasoning about PDAMenu3's
+// onDestroy; forward-declared here because BuildDesktopView's own failure paths run AFTER the menu has
+// been created and rooted, and every one of them has to hand it back.
+static void DesktopViewDiscard();
+
 // Build the desktop. Runs once; every failure latches.
 //
 // The transient gate comes FIRST, ahead of every symbol lookup: it is the cheapest test and the one
 // most often false, and a mode-3 frame at the title screen must not pay for a dozen FindSymbols to be
 // told to come back later. The cost is that the "not the full Selaco" line below only appears once a
 // level is loaded, which is a delayed diagnostic rather than a missing one.
+//
+// EVERY FAILURE AFTER cls->CreateNew() DISCARDS THE MENU, which is not tidying: DesktopMenu is marked by
+// the marker function registered below, so a bare `return false` would leave a half-built PDAMenu3 and the
+// 100+ DObjects init() allocated rooted for the life of the process - and its onDestroy, which writes the
+// music volume, would then never run at a controlled moment either.
 static bool BuildDesktopView()
 {
 	// PDAMenu3.init dereferences players[consoleplayer].mo unguarded (pda_menu.zs:320,368,372,385,390)
@@ -1178,17 +1188,17 @@ static bool BuildDesktopView()
 	static const EArgKind LayoutChangeArgs[] = { Arg_Int, Arg_Int };
 
 	int initRegs = 0, canvasRegs = 0, layoutChangeRegs = 0, drawRegs = 0, subviewRegs = 0;
-	VMFunction *funcInit = ResolveMethod(cls, "init", InitArgs, 1, &initRegs);
+	VMFunction *funcInit = ResolveMethod(cls, "init", "AuxDesktopView", InitArgs, 1, &initRegs);
 	// layoutChange(int, int) is the game's OWN entry point for "the screen you are laid out for is not
 	// the screen you are on" (menu.zs:113-121, overridden at pda_menu.zs:775): it calls calcScale,
 	// refreshes background.freeze, then relayouts. Using it is why nothing here writes mainView.frame.
 	VMFunction *funcLayoutChange = funcInit != nullptr
-		? ResolveMethod(cls, "layoutChange", LayoutChangeArgs, 2, &layoutChangeRegs) : nullptr;
+		? ResolveMethod(cls, "layoutChange", "AuxDesktopView", LayoutChangeArgs, 2, &layoutChangeRegs) : nullptr;
 	VMFunction *funcSetCanvas = funcLayoutChange != nullptr
-		? ResolveMethod(viewCls, "setCanvas", CanvasArgs, 1, &canvasRegs) : nullptr;
-	VMFunction *funcDraw = funcSetCanvas != nullptr ? ResolveMethod(viewCls, "draw", nullptr, 0, &drawRegs) : nullptr;
+		? ResolveMethod(viewCls, "setCanvas", "AuxDesktopView", CanvasArgs, 1, &canvasRegs) : nullptr;
+	VMFunction *funcDraw = funcSetCanvas != nullptr ? ResolveMethod(viewCls, "draw", "AuxDesktopView", nullptr, 0, &drawRegs) : nullptr;
 	VMFunction *funcDrawSubviews = funcDraw != nullptr
-		? ResolveMethod(viewCls, "drawSubviews", nullptr, 0, &subviewRegs) : nullptr;
+		? ResolveMethod(viewCls, "drawSubviews", "AuxDesktopView", nullptr, 0, &subviewRegs) : nullptr;
 	if (funcDrawSubviews == nullptr)
 	{
 		// ResolveMethod already logged which check failed; it latches nothing, so mode 3 records its own
@@ -1250,18 +1260,18 @@ static bool BuildDesktopView()
 	int calcScaleRegs = 0, menuLayoutRegs = 0, viewLayoutRegs = 0;
 	// calcScale(int, int, Vector2) is FIVE registers, not four - a Vector2 is one declared argument and
 	// two registers (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxDesktopView", CalcScaleArgs, 3, &calcScaleRegs);
 	// PDAMenu3.layout() - pda_menu.zs:771, non-virtual, self only. All it does is refresh
 	// background.freeze, which is moot while background.hidden is true, but it is what layoutChange
 	// calls and there may be more in it later.
 	VMFunction *funcMenuLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", nullptr, 0, &menuLayoutRegs) : nullptr;
+		? ResolveMethod(cls, "layout", "AuxDesktopView", nullptr, 0, &menuLayoutRegs) : nullptr;
 	// mainView.layout(), with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel that
 	// makes UIView.layout derive cScale from the view's own scale chain (view.zs:763) instead of taking
 	// ours, and parentAlpha -1 does the same for alpha (:764). Passing (1,1)/1.0 instead would overwrite
 	// the 0.6458 scale calcScale just installed.
 	VMFunction *funcViewLayout = funcMenuLayout != nullptr
-		? ResolveMethod(viewCls, "layout", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+		? ResolveMethod(viewCls, "layout", "AuxDesktopView", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
 	// PDAMenu3.calcScale reads ui_scaling unconditionally (pda_menu.zs:787) - unlike UIMenu.calcScale
 	// it does not honour ignoreUIScaling (menu.zs:125) - and Selaco's handheld profile sets that cvar
 	// to 1.2 (SetSteamdeckPresets, forced on for Android at d_main.cpp:3513). A baseline cannot absorb
@@ -1343,6 +1353,7 @@ static bool BuildDesktopView()
 			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.mainView is not a plain %s, desktop view disabled\n",
 				DesktopClassName, ViewClassName);
 			DesktopBroken = true;
+			DesktopViewDiscard();
 			return false;
 		}
 
@@ -1355,6 +1366,7 @@ static bool BuildDesktopView()
 			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.background is not a %s, desktop view disabled\n",
 				DesktopClassName, ViewClassName);
 			DesktopBroken = true;
+			DesktopViewDiscard();
 			return false;
 		}
 		*(bool *)((uint8_t *)background + fldHidden->Offset) = true;
@@ -1366,6 +1378,7 @@ static bool BuildDesktopView()
 			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.innerView is not a %s, desktop view disabled\n",
 				DesktopClassName, ViewClassName);
 			DesktopBroken = true;
+			DesktopViewDiscard();
 			return false;
 		}
 
@@ -1376,6 +1389,7 @@ static bool BuildDesktopView()
 				Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a %s, desktop view disabled\n",
 					DesktopClassName, TabFieldNames[i], ViewClassName);
 				DesktopBroken = true;
+				DesktopViewDiscard();
 				return false;
 			}
 		}
@@ -1447,6 +1461,7 @@ static bool BuildDesktopView()
 		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: building %s aborted (%s), desktop view disabled\n",
 			DesktopClassName, e.what());
 		DesktopBroken = true;
+		DesktopViewDiscard();
 		return false;
 	}
 

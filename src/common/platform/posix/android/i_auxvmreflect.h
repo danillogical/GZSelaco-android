@@ -153,6 +153,7 @@ enum EArgKind
 	Arg_Float,
 	Arg_Bool,
 	Arg_Int,
+	Arg_String,
 	Arg_Canvas,
 	Arg_Menu,
 	Arg_ObjectOf,
@@ -164,8 +165,13 @@ enum EArgKind
 //
 // argClass is forwarded to ArgMatches for Arg_ObjectOf and ignored otherwise. One class covers every
 // call site because none of them passes more than one script object.
-VMFunction *ResolveMethod(PClass *cls, const char *funcname,
-	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass = nullptr);
+//
+// subsystem prefixes every failure line and disabledNote ends it, so a caller that is not the desktop
+// view neither announces itself as one nor tells the player the desktop view is off. Both mode files
+// pass "AuxDesktopView" and take the default note, which is the text these lines have always had.
+VMFunction *ResolveMethod(PClass *cls, const char *funcname, const char *subsystem,
+	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass = nullptr,
+	const char *disabledNote = "desktop view disabled");
 
 // A field we are about to write, proved to be the field we mean. A wrong offset here is memory
 // corruption rather than a misdraw, so the type is checked structurally every time and nothing is
@@ -181,6 +187,25 @@ enum EFieldKind
 	Field_ObjArray,
 	Field_MenuPtr,
 };
+
+// A ZERO-ARGUMENT STATIC class method, proved the same way ResolveMethod proves an instance one.
+//
+// SEPARATE FROM ResolveMethod RATHER THAN A FLAG ON IT, deliberately. ResolveMethod hardcodes
+// selfArgs = 1 and rejects the absence of a self outright (see the VARF_Method comment in its body),
+// because every mode-3 and mode-4 call site passes an instance. Threading a "no self" mode through it
+// would edit the one function the whole second screen resolves its symbols with, and a mistake there
+// costs the panel - which is the one thing this fork's aux code is not allowed to break. A static with
+// no arguments needs none of ResolveMethod's argument machinery anyway: there is no self to type-check
+// and no parameter list to walk, so the honest version is shorter, not a special case of a longer one.
+//
+// Restricted to zero arguments because that is the only static this fork calls
+// (UIHelper.SetSteamdeckPresets, helper.zs:616). A static WITH arguments would need the ArgMatches
+// loop, and should extend this rather than grow a second copy of it.
+//
+// subsystem prefixes every failure line, so a caller that is not the desktop view does not print
+// "desktop view disabled" at the player. Returns nullptr on any mismatch, having already printed
+// which check failed, and latches nothing - for the same reason ResolveMethod does not.
+VMFunction *ResolveStaticMethod(PClass *cls, const char *funcname, const char *subsystem, int *outRegs);
 
 // Returns nullptr on any mismatch, having already printed which check failed. Latches nothing, for
 // the same reason ResolveMethod does not.

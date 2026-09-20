@@ -690,15 +690,20 @@ static DOptionMenuDescriptor *AuxHandheldDescriptor()
 // behind because each caller only reaches this after its own item class has resolved. The latch is what
 // stops the second caller adding a second heading.
 //
+// KEYED ON THE DESCRIPTOR rather than a bare bool: a `restart` runs DeinitMenus, which clears
+// MenuDescriptors wholesale (menudef.cpp:158), and then D_InitGame calls I_AuxPanelInitMenu again against
+// a freshly parsed page. A bare latch would re-append the toggle and the slider to that new descriptor
+// with no heading above them.
+//
 // Both items are decoration, so a missing class is one line and no heading rather than a return: the toggle
 // and the slider still go in, just without a title above them. OptionMenuItemSpace in particular is
 // Selaco's own class and simply does not exist on another game.
-static bool AuxHeadingAdded = false;
+static DOptionMenuDescriptor *AuxHeadingAddedTo = nullptr;
 static void AuxAddSecondScreenHeading(DOptionMenuDescriptor *desc)
 {
-	if (AuxHeadingAdded)
+	if (AuxHeadingAddedTo == desc)
 		return;
-	AuxHeadingAdded = true;
+	AuxHeadingAddedTo = desc;
 
 	// The gap first, then the title, matching the Space/StaticText order of SteamDeckMenu's own three groups.
 	//

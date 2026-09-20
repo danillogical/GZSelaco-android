@@ -89,6 +89,13 @@ static bool ArgMatches(PType *type, EArgKind kind, int &regs, PClass *argClass)
 		regs = 1;
 		return type == TypeSInt32;
 
+	case Arg_String:
+		// One register. A ZScript String argument is passed as a VMValue holding an FString* which the
+		// callee copies out of, which is what lets a caller hand over the address of a local FString.
+		// Equality against TypeString because there is exactly one string type.
+		regs = 1;
+		return type == TypeString;
+
 	case Arg_Canvas:
 		// ZScript's Canvas is the native FCanvas: DECLARE_CLASS registers it and PClass strips the
 		// leading letter (dobjtype.cpp:351), so RUNTIME_CLASS(FCanvas) IS the Canvas class script
@@ -99,8 +106,10 @@ static bool ArgMatches(PType *type, EArgKind kind, int &regs, PClass *argClass)
 			&& RUNTIME_CLASS(FCanvas)->IsDescendantOf(static_cast<PObjectPointer *>(type)->PointedClass());
 
 	case Arg_Menu:
-		// PDAMenu3.init takes a Menu parent, and ZScript's Menu is the native DMenu. We only ever pass
-		// null for it, so this proves the register layout rather than the validity of a cast.
+		// PDAMenu3.init and PromptMenu.initNew both take a Menu parent, and ZScript's Menu is the native
+		// DMenu. Descendant so a parameter declared as a base of Menu still matches; the value passed is
+		// either null or a DMenu* the engine already holds, so this proves the register layout and the
+		// validity of the cast at once.
 		regs = 1;
 		return type->isObjectPointer()
 			&& RUNTIME_CLASS(DMenu)->IsDescendantOf(static_cast<PObjectPointer *>(type)->PointedClass());
@@ -119,23 +128,23 @@ static bool ArgMatches(PType *type, EArgKind kind, int &regs, PClass *argClass)
 }
 
 
-VMFunction *ResolveMethod(PClass *cls, const char *funcname,
-	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass)
+VMFunction *ResolveMethod(PClass *cls, const char *funcname, const char *subsystem,
+	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass, const char *disabledNote)
 {
 	// noCreate: never add a name to the table just to look one up.
 	FName name(funcname, true);
 	if (name == NAME_None)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s does not exist, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s does not exist, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, disabledNote);
 		return nullptr;
 	}
 
 	PFunction *sym = dyn_cast<PFunction>(cls->FindSymbol(name, true));
 	if (sym == nullptr || sym->Variants.Size() != 1)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a single-variant function, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a single-variant function, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, disabledNote);
 		return nullptr;
 	}
 
@@ -145,13 +154,14 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 	// by a positive flag: zcc_compile.cpp:2507 clears VARF_Method and sets VARF_Final for it, and
 	// never sets VARF_Static, which is only ever applied to fields (:1291, :1551, :1624). Testing
 	// VARF_Static here rejected ManualHandler.Instance on device even though it is declared static.
-	// Nothing in either mode calls a static, so the absence of a self is simply rejected.
+	// Nothing either mode calls is a static, so the absence of a self is simply rejected here;
+	// ResolveStaticMethod below is what the profile applier uses for one that genuinely is.
 	const bool isMethod = !!(variant.Flags & VARF_Method);
 	if (!isMethod || (variant.Flags & VARF_Action))
 	{
 		// An action takes three implicit arguments instead of one, so it is rejected either way.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a plain instance method, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a plain instance method, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, disabledNote);
 		return nullptr;
 	}
 
@@ -170,8 +180,8 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 	{
 		// Native would mean a different calling convention and no NumArgs to check against;
 		// abstract aborts the VM on call (vmframe.cpp:317-320).
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is missing, native or abstract, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is missing, native or abstract, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, disabledNote);
 		return nullptr;
 	}
 
@@ -190,8 +200,8 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 		// prototype found where a self was expected would otherwise underflow to four billion.
 		const unsigned declared = proto != nullptr && proto->ArgumentTypes.Size() >= selfArgs
 			? proto->ArgumentTypes.Size() - selfArgs : 0u;
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s takes %u arguments, not %u, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname, declared, nargs);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s takes %u arguments, not %u, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, declared, nargs, disabledNote);
 		return nullptr;
 	}
 
@@ -204,8 +214,8 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 		PClassType *selfClass = selfPtr != nullptr ? PType::toClass(selfPtr->PointedType) : nullptr;
 		if (selfClass == nullptr || selfClass->Descriptor == nullptr || !cls->IsDescendantOf(selfClass->Descriptor))
 		{
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s is not a valid self for %s, desktop view disabled\n",
-				cls->TypeName.GetChars(), funcname);
+			Printf(TEXTCOLOR_YELLOW "%s: %s is not a valid self for %s, %s\n",
+				subsystem, cls->TypeName.GetChars(), funcname, disabledNote);
 			return nullptr;
 		}
 	}
@@ -216,8 +226,8 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 		int argregs = 0;
 		if (!ArgMatches(proto->ArgumentTypes[i + selfArgs], argkinds[i], argregs, argClass))
 		{
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s argument %u has an unexpected type, desktop view disabled\n",
-				cls->TypeName.GetChars(), funcname, i + 1);
+			Printf(TEXTCOLOR_YELLOW "%s: %s.%s argument %u has an unexpected type, %s\n",
+				subsystem, cls->TypeName.GetChars(), funcname, i + 1, disabledNote);
 			return nullptr;
 		}
 
@@ -225,8 +235,8 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 		// so it would change the register layout under an argument type that still looks correct.
 		if (func->ArgFlags.Size() > i + selfArgs && (func->ArgFlags[i + selfArgs] & VARF_Out))
 		{
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s argument %u is an out parameter, desktop view disabled\n",
-				cls->TypeName.GetChars(), funcname, i + 1);
+			Printf(TEXTCOLOR_YELLOW "%s: %s.%s argument %u is an out parameter, %s\n",
+				subsystem, cls->TypeName.GetChars(), funcname, i + 1, disabledNote);
 			return nullptr;
 		}
 
@@ -239,12 +249,80 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname,
 	const VMScriptFunction *sfunc = static_cast<const VMScriptFunction *>(func);
 	if (sfunc->NumArgs != regs)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s wants %d parameters, we would pass %d, desktop view disabled\n",
-			cls->TypeName.GetChars(), funcname, (int)sfunc->NumArgs, regs);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s wants %d parameters, we would pass %d, %s\n",
+			subsystem, cls->TypeName.GetChars(), funcname, (int)sfunc->NumArgs, regs, disabledNote);
 		return nullptr;
 	}
 
 	*outRegs = regs;
+	return func;
+}
+
+VMFunction *ResolveStaticMethod(PClass *cls, const char *funcname, const char *subsystem, int *outRegs)
+{
+	// noCreate: never add a name to the table just to look one up.
+	FName name(funcname, true);
+	if (name == NAME_None)
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s does not exist\n", subsystem, cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	PFunction *sym = dyn_cast<PFunction>(cls->FindSymbol(name, true));
+	if (sym == nullptr || sym->Variants.Size() != 1)
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a single-variant function\n",
+			subsystem, cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	const PFunction::Variant &variant = sym->Variants[0];
+
+	// The mirror image of ResolveMethod's check, and it relies on the same finding: a ZScript static is
+	// identified by the ABSENCE of an implied self (zcc_compile.cpp:2507 clears VARF_Method for it and
+	// never sets VARF_Static, which only ever applies to fields). So a static is VARF_Method CLEAR -
+	// testing VARF_Static here would reject a function that genuinely is one.
+	if ((variant.Flags & VARF_Method) || (variant.Flags & VARF_Action))
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a static (it takes a self)\n",
+			subsystem, cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	// No vtable dispatch: a static cannot be virtual, so the symbol's implementation is what runs.
+	VMFunction *func = variant.Implementation;
+	if (func == nullptr || (func->VarFlags & (VARF_Native | VARF_Abstract)))
+	{
+		// Native would mean a different calling convention and no NumArgs to check against;
+		// abstract aborts the VM on call (vmframe.cpp:317-320).
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is missing, native or abstract\n",
+			subsystem, cls->TypeName.GetChars(), funcname);
+		return nullptr;
+	}
+
+	// No self and no declared arguments, so the prototype must be empty. Checked rather than assumed:
+	// this is what stops us calling a function that gained a parameter in a Selaco update.
+	PPrototype *proto = func->Proto;
+	if (proto == nullptr || proto->ArgumentTypes.Size() != 0)
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s takes %u arguments, not 0\n", subsystem,
+			cls->TypeName.GetChars(), funcname,
+			proto != nullptr ? proto->ArgumentTypes.Size() : 0u);
+		return nullptr;
+	}
+
+	// The decisive check, exactly as in ResolveMethod: NumArgs is what VMFillParams loops over
+	// (vmexec.cpp:210), so agreeing with it is the guarantee that the callee reads no further than the
+	// (empty) array we pass.
+	const VMScriptFunction *sfunc = static_cast<const VMScriptFunction *>(func);
+	if (sfunc->NumArgs != 0)
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s wants %d parameters, we would pass 0\n",
+			subsystem, cls->TypeName.GetChars(), funcname, (int)sfunc->NumArgs);
+		return nullptr;
+	}
+
+	*outRegs = 0;
 	return func;
 }
 
@@ -451,7 +529,7 @@ static void ResolveTabPadding(DObject *menu, PClass *menuCls, PClass *viewCls)
 	// fills omitted ones in, so the callee still declares and reads five.
 	static const EArgKind PaddingArgs[] = { Arg_Float, Arg_Float, Arg_Float, Arg_Float };
 	PClass *tabCls = firstTab->GetClass();
-	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", PaddingArgs, 4, &SetTextPaddingRegs);
+	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", "AuxDesktopView", PaddingArgs, 4, &SetTextPaddingRegs);
 	if (func == nullptr)
 		return;
 

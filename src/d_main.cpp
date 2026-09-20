@@ -1100,6 +1100,12 @@ void D_Display ()
 	// Deliberately BEFORE screen->BeginFrame(): this must not sit between BeginFrame and the
 	// present, where a mistake could land inside the frame the main screen depends on.
 	{ extern void I_AuxPanelFrame(); I_AuxPanelFrame(); }
+
+	// Open the first-launch device picker once the title screen is idle, if one is owed. Costs a
+	// single bool test when it is not, which is every launch after the first. Polled rather than
+	// opened once from D_DoomMain because Selaco's IntroHandler replaces any menu that is not one of
+	// its own for the whole title-screen intro; see i_auxdevicepicker.cpp.
+	{ extern void I_AuxDevicePickerFrame(); I_AuxDevicePickerFrame(); }
 #endif
 
 	screen->BeginFrame();
@@ -3742,6 +3748,11 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<std::string>& allw
 	// possible after M_Init, which is what parses every MENUDEF lump - ours loads before they exist.
 	extern void I_AuxPanelInitMenu();
 	I_AuxPanelInitMenu();
+	// Decide whether this is a first launch and, if it is, arm the device picker and suppress
+	// Selaco's own first-run dialogs. Must be before the first world tick, which is when their
+	// TOSEventHandler would open them; needs MENUDEF parsed for the same reason as the line above.
+	extern void I_AuxDevicePickerInit();
+	I_AuxDevicePickerInit();
 #endif
 	M_CreateGameMenus();
 

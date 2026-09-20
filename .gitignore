@@ -47,6 +47,9 @@ gzdoom-crash.log
 /android/app/build
 /android/app/src/main/jniLibs
 /android/app/src/main/assets/*.pk3
+# Staged from profiles/ by package-apk.sh. The root profiles/ is the source of
+# truth; a checked-in copy here would be a second one that silently drifts.
+/android/app/src/main/assets/profiles
 /android/app/src/main/java-sdl
 /build-macos-*
 /macos/deps/src

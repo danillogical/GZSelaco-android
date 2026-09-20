@@ -246,11 +246,11 @@ static bool MenuResolve()
 	int calcScaleRegs = 0, menuLayoutRegs = 0, viewLayoutRegs = 0;
 	// calcScale(int, int, Vector2) is FIVE registers for three declared arguments - a Vector2 is two
 	// (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxDesktopView", CalcScaleArgs, 3, &calcScaleRegs);
 	VMFunction *funcMenuLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", nullptr, 0, &menuLayoutRegs) : nullptr;
+		? ResolveMethod(cls, "layout", "AuxDesktopView", nullptr, 0, &menuLayoutRegs) : nullptr;
 	VMFunction *funcViewLayout = funcMenuLayout != nullptr
-		? ResolveMethod(viewCls, "layout", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+		? ResolveMethod(viewCls, "layout", "AuxDesktopView", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
 
 	PField *fldMainView = funcViewLayout != nullptr ? ResolveField(cls, "mainView", Field_ViewPtr, viewCls) : nullptr;
 	PField *fldUIScaling = fldMainView != nullptr ? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls) : nullptr;

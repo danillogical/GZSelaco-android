@@ -32,6 +32,11 @@ import java.io.OutputStream;
 public class SelacoActivity extends SDLActivity {
     private static final String TAG = "Selaco";
 
+    // The asset subdirectory device profiles are packaged into, and the directory name they
+    // are extracted to. Must match ProfileSubdir in i_auxprofile.cpp, which is what reads
+    // them back out of progdir.
+    private static final String PROFILE_DIR = "profiles";
+
     @Override
     protected String[] getLibraries() {
         // Order matters: dependencies first. libSelaco.so has DT_NEEDED entries
@@ -301,12 +306,63 @@ public class SelacoActivity extends SDLActivity {
             Log.i(TAG, "Extracting " + name + " to " + target);
             try (InputStream in = getAssets().open(name);
                  OutputStream out = new FileOutputStream(target)) {
-                byte[] buffer = new byte[64 * 1024];
-                int read;
-                while ((read = in.read(buffer)) != -1) {
-                    out.write(buffer, 0, read);
+                copyStream(in, out);
+            }
+        }
+
+        extractProfiles(targetDir);
+    }
+
+    /**
+     * Copy the per-device profiles out of the APK into &lt;externalFilesDir&gt;/profiles.
+     *
+     * They live in an asset subdirectory rather than at the root, so the root listing
+     * above does not see them - getAssets().list() is not recursive.
+     *
+     * Unlike autoexec.cfg these are ALWAYS overwritten, and unlike the pk3s they are
+     * overwritten unconditionally rather than only when the size differs. The repo is the
+     * source of truth for profiles: a PR that retunes a device has to reach existing
+     * installs, and a size comparison would let an edited-on-device file of the same
+     * length win over the packaged one. They are a few KB in total, so rewriting them on
+     * every launch costs nothing worth protecting. profiles/README.md tells contributors
+     * that local edits do not survive a reinstall, so this is the behaviour it promises.
+     *
+     * Failures here are logged and swallowed: a profile is only read when the player asks
+     * for one by name, so not having them must not stop the game from starting.
+     */
+    private void extractProfiles(File targetDir) {
+        try {
+            String[] profiles = getAssets().list(PROFILE_DIR);
+            if (profiles == null || profiles.length == 0) {
+                Log.i(TAG, "No " + PROFILE_DIR + " assets to extract");
+                return;
+            }
+
+            File profileDir = new File(targetDir, PROFILE_DIR);
+            if (!profileDir.exists() && !profileDir.mkdirs()) {
+                Log.w(TAG, "Could not create " + profileDir + " - no device profiles");
+                return;
+            }
+
+            for (String name : profiles) {
+                String assetPath = PROFILE_DIR + "/" + name;
+                File target = new File(profileDir, name);
+                Log.i(TAG, "Extracting " + assetPath + " to " + target);
+                try (InputStream in = getAssets().open(assetPath);
+                     OutputStream out = new FileOutputStream(target)) {
+                    copyStream(in, out);
                 }
             }
+        } catch (IOException e) {
+            Log.w(TAG, "Could not extract device profiles", e);
+        }
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
         }
     }
 }

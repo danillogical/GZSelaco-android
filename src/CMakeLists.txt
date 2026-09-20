@@ -469,8 +469,11 @@ set( PLAT_ANDROID_SOURCES
 	common/platform/posix/android/i_auxcanvas.cpp
 	common/platform/posix/android/i_auxcodex.cpp
 	common/platform/posix/android/i_auxcodexview.cpp
+	common/platform/posix/android/i_auxdevicepicker.cpp
+	common/platform/posix/android/i_auxdevicereset.cpp
 	common/platform/posix/android/i_auxmenuview.cpp
 	common/platform/posix/android/i_auxpanel.cpp
+	common/platform/posix/android/i_auxprofile.cpp
 	common/platform/posix/android/i_auxvmreflect.cpp
 	common/platform/posix/android/i_crashlog.cpp
 	common/platform/posix/android/i_specialpaths.cpp )

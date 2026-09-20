@@ -9,6 +9,8 @@ version "4.12"
 #include "zscript/engine/service.zs"
 #include "zscript/engine/ppshader.zs"
 #include "zscript/engine/screenjob.zs"
+// Android port: the callback half of the Handhelds page's "Reset Device Choice" button.
+#include "zscript/engine/aux_devicereset.zs"
 
 #include "zscript/engine/ui/menu/colorpickermenu.zs"
 #include "zscript/engine/ui/menu/joystickmenu.zs"
