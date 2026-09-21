@@ -126,6 +126,7 @@
 #include "vm.h"
 #include "zstring.h"
 
+#include "i_auxcodexviewstate.h"   // the view-state manager: which app, which entry, how far down
 #include "i_auxvmreflect.h"   // the resolvers, the panel's geometry and GetTextureCanvas
 
 using namespace AuxView;
@@ -223,11 +224,16 @@ static bool SetViewAlpha(DObject *view, PClass *viewCls, const PField *alphaFiel
 //
 // SO THIS DOES THREE THINGS, in precedence order:
 //
-//   1. Follow the live codex. Mode 4 samples PDAMenu3.currentAppWindow every frame the player's own PDA is
-//      open (see LiveSampleCurrentApp in i_auxlivecodex.cpp) and leaves its CLASS in
-//      AuxView::LiveLastAppClass(). That is the app the player
+//   1. Follow the live codex. Mode 4 hands PDAMenu3.currentAppWindow to the view-state manager on every
+//      frame the player's own PDA is open (see LiveSampleCurrentApp in i_auxlivecodex.cpp), and the app's
+//      CLASS comes back out of AuxCodexView::WantedAppClass(). That is the app the player
 //      last switched to, because switchToAppWindow (pda_menu.zs:735) is the single funnel every switch goes
 //      through - the six openX() helpers, the tab handler at :880-900, and the click-to-raise at :961.
+//
+//      THE APP IS ONLY THE FIRST OF THREE THINGS THAT COME BACK THAT WAY. Which datalog entry was open and
+//      how far down it the player had scrolled arrive through the same manager and are applied by
+//      StandbyApplyViewState, on its own trigger, for the reason recorded there: the case this whole feature
+//      exists for does not change the app at all.
 //
 //   2. Otherwise aux_standby_app, defaulting to Datalogs. This is the INITIAL value - what the panel
 //      shows before the player has opened their real PDA at all this session.
@@ -346,9 +352,10 @@ static PField *AppTabFields[countof(StandbyApps)] = {};
 static PClass *AppMenuClass = nullptr;
 static PClass *AppViewClass = nullptr;
 
-// THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3 is AuxView::LiveLastAppClass(), read by
-// StandbyWantedIndex below. The storage, the accessor pair and the whole argument for why it is
-// harmless in both directions are in i_auxvmreflect.h.
+// THE CROSS-MODE CHANNEL IS THE VIEW-STATE MANAGER (i_auxcodexviewstate.h), read here by
+// StandbyWantedIndex for the app and by StandbyApplyViewState below for the entry and the scroll. The
+// storage, the accessors and the whole argument for why it is harmless in both directions are in that
+// header.
 
 // The index into StandbyApps the current selection was COMPUTED FROM, and the one it settled on.
 //
@@ -357,6 +364,16 @@ static PClass *AppViewClass = nullptr;
 // would differ forever and re-select on every single frame. -1 means nothing has been selected yet.
 static int StandbyAppWantedIndex = -1;
 static int StandbyAppShownIndex = -1;
+
+// The view-state generation the standby codex has already been put into, or 0 for "nothing applied to the
+// window that is on screen now". See StandbyApplyViewState for why this is a generation rather than an edge.
+//
+// RESET TO 0 BY EVERY PATH THAT PRODUCES A DIFFERENT READER INSTANCE - the rebuild, through
+// StandbyViewDiscard, and the re-select, at the bottom of SelectStandbyApp. That is what makes the restore
+// survive a stat rebuild: a fresh PDAReaderWindow starts at whatever entry the savegame implies and at the
+// top of it, so the state has to be applied again, and the manager still holds it because the manager is not
+// part of the desktop that was thrown away.
+static unsigned StandbyAppliedViewGeneration = 0;
 
 // Where a wanted app came from, for the log line only.
 enum EAppSource
@@ -376,7 +393,7 @@ static int StandbyWantedIndex(EAppSource *outSource)
 {
 	// 1. THE LIVE CODEX. Matched by class rather than by PDAMenu3.currentApp, and that is not a stylistic
 	//    choice - see LiveSampleCurrentApp (i_auxlivecodex.cpp) for why currentApp cannot be used.
-	PClass *const lastApp = LiveLastAppClass();
+	PClass *const lastApp = AuxCodexView::WantedAppClass();
 	if (lastApp != nullptr)
 	{
 		for (unsigned i = 0; i < countof(StandbyApps); i++)
@@ -810,6 +827,12 @@ static bool SelectStandbyApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 	StandbyAppWantedIndex = index;
 	StandbyAppShownIndex = chosen;
 
+	// The window on screen is not the one the view state was last applied to - it was either just constructed
+	// or just raised out of the close sweep - so the entry and the scroll have to go in again. Zeroed rather
+	// than applied here: StandbyApplyViewState owns that, needs its own projection scope for it, and runs later
+	// on this same frame.
+	StandbyAppliedViewGeneration = 0;
+
 	if (from != nullptr)
 	{
 		Printf("AuxStandbyCodex: standby codex switching from %s to %s (%s, from the %s, %s)\n",
@@ -823,6 +846,99 @@ static bool SelectStandbyApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 			SourceNames[source], constructed ? "constructed" : "already open");
 	}
 	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// MODE 3: WHERE IN THE DOCUMENT - put the player's reading position back on the panel.
+// ---------------------------------------------------------------------------------------------
+//
+// THE BUG THIS FIXES. The player opens the codex, scrolls a datalog down to read a passcode, closes it - and
+// the panel snaps to the top of the document, losing exactly the thing they were looking at. The standby
+// codex's PDAReaderWindow is a different instance from theirs and never had their position; the DATA was
+// always shared, because both read Selaco's real datalogs natively, but the VIEW state was not.
+//
+// A GENERATION AND NOT AN EDGE, which is the whole reason this is a separate trigger from the app re-select
+// above rather than folded into it. The re-select fires on "the wanted app differs from the selected one",
+// and the case this feature exists for does not move the app at all: the player opens their PDA on DATALOGS,
+// which is what the panel was already showing, scrolls, and closes it. StandbyWantedIndex would return the
+// same index it returned before and the re-select would correctly do nothing. So the trigger has to be the
+// view state's own generation, which the manager bumps when the entry or the scroll changes and at no other
+// time.
+//
+// AND IT IS APPLIED WITHOUT A REBUILD, for the same reason the app switch is: the desktop is a separate,
+// still-live instance, so this is one openEntry, two scroll calls and one redraw request rather than a fresh
+// PDAMenu3.init.
+//
+// THE WINDOW IS LOOKED UP RATHER THAN CACHED, on the frames that actually apply. Caching the reader instance
+// would mean a pointer that the close sweep in SelectStandbyApp can invalidate and that the GC marker would
+// then have to keep alive, i.e. two lifetime arguments to get right for something that is asked for once per
+// scroll. The gate in front of the lookup is two integer compares, so the walk only ever runs on a frame that
+// was going to call script anyway.
+//
+// FAILS SOFT AND LATCHES NOTHING OF MODE 3's. A missing window, a desktop that is not a plain UIView or a VM
+// abort costs the reading position and nothing else - the desktop is built, laid out and drawable either way,
+// and losing the panel to save a nicety is the wrong trade here exactly as it is for the app selection.
+static void StandbyApplyViewState(bool *outNeedsRedraw)
+{
+	if (StandbyMenu == nullptr || !AppSelectResolved || AppSelectBroken || StandbyAppShownIndex < 0)
+		return;
+
+	// 0 is "the player has not opened their own PDA this session", which is the normal state right up until
+	// they do and must cost nothing. Equality is the no-change path and is the overwhelmingly common one.
+	const unsigned generation = AuxCodexView::Generation();
+	if (generation == 0 || generation == StandbyAppliedViewGeneration)
+		return;
+
+	try
+	{
+		// LOAD-BEARING, NOT PRECAUTIONARY. openEntry is reached below, and although the false it is passed for
+		// immediateRead is what stops it asking for the "pdaEntrySet" write (reader.zs:1050), the calls it makes
+		// in turn reach a layout of the mail pane and so PDAAppWindow.layout -> savePos ->
+		// SendNetworkEvent("pdaAppPos:..."). The standby codex is a projection nobody asked for and must not be
+		// able to record anything against the player, however indirectly.
+		FProjectionScope projection;
+
+		// Nothing here is known to touch menuactive, but the cost of covering it is one stack word and the
+		// failure it prevents - a permanently wrong menuactive - lasts the rest of the session.
+		FMenuActiveKeeper keepMenuState;
+
+		DObject *desktop = ReadObjectField(StandbyMenu, FldStandbyView);
+		if (desktop != nullptr && desktop->GetClass() == AppViewClass)
+		{
+			// The shown app's own instance, found the same way SelectStandbyApp finds it: exact class, because
+			// AppClasses names the concrete class the selection constructed. The manager re-checks that it is a
+			// reader before touching it, so a shown app that is not one simply finds nothing to do.
+			DObject *shown = nullptr;
+			const int count = CallNumSubviews(desktop);
+			for (int i = 0; i < count; i++)
+			{
+				DObject *v = CallViewAt(desktop, i);
+				if (v != nullptr && v->GetClass() == AppClasses[StandbyAppShownIndex])
+				{
+					shown = v;
+					break;
+				}
+			}
+
+			// A redraw is what makes this visible at all: the panel holds the last pixels Java was pushed and
+			// the readback is edge-triggered (i_auxpanel.cpp), so without the request the restored position
+			// would sit in the canvas unread and the player would keep seeing the top of the document.
+			if (shown != nullptr && AuxCodexView::ApplyToWindow(shown) && outNeedsRedraw != nullptr)
+				*outNeedsRedraw = true;
+		}
+	}
+	catch (const std::exception &e)
+	{
+		// Nothing is latched beyond refusing to retry this generation. openEntry is not bounds-safe - it
+		// reaches entry.entries[area][item] (reader.zs:1384) - so a pair that is somehow out of range lands
+		// here, and the desktop is still built and still drawable, showing whatever the abort got to.
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: restoring the reading position aborted (%s), the standby "
+			"codex keeps the entry it had\n", e.what());
+	}
+
+	// Advanced whether it applied, found nothing or threw, so each generation is tried once rather than on
+	// every frame. A further sample moves the generation again and the question is asked afresh.
+	StandbyAppliedViewGeneration = generation;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1738,6 +1854,12 @@ static void StandbyViewDiscard()
 	StandbyAppWantedIndex = -1;
 	StandbyAppShownIndex = -1;
 
+	// AND SO THE REBUILT DESKTOP GETS THE READING POSITION BACK. This is what makes the restore survive a stat
+	// rebuild: the fresh PDAReaderWindow opens at whatever the savegame implies and at the top of it, so the
+	// state has to go in again - and it still exists to go in, because the view-state manager is not part of
+	// the desktop being thrown away here.
+	StandbyAppliedViewGeneration = 0;
+
 	if (menu == nullptr || (menu->ObjectFlags & OF_EuthanizeMe))
 		return;
 
@@ -1913,6 +2035,14 @@ static bool StandbyViewUpdate(bool *outNeedsRedraw)
 			*outNeedsRedraw = true;
 	}
 
+	// AND WHERE IN THE DOCUMENT, on the app the chain above settled on. Placed after it because it needs the
+	// window that is actually on screen, and BEFORE the retune because the retune's mainView.layout() recurses
+	// the whole tree - UIVerticalScroll.layout re-reads the scrollbar and re-applies it
+	// (vertical_scroll.zs:290-297), so a frame that does both ends with the restored position baked into the
+	// final layout rather than into one that is about to be replaced. Cheap on the unchanged path: two integer
+	// compares, no lookups, no allocation and no VM call.
+	StandbyApplyViewState(outNeedsRedraw);
+
 	// AND THE SIZE THE PANEL DRAWS AT, retuned live on the desktop that is already built. Placed
 	// after the chain above rather than inside it because it is orthogonal to both: a rebuild lays out at the
 	// current zoom itself and baselines it, so this is a no-op on that frame, and a re-select changes
@@ -2055,6 +2185,11 @@ void I_AuxStandbyCodexForgetScriptState()
 	}
 	StandbyAppWantedIndex = -1;
 	StandbyAppShownIndex = -1;
+
+	// The manager's own state and resolves are cleared by I_AuxCodexViewStateForgetScriptState; all that
+	// belongs here is mode 3's record of what it has applied, which would otherwise make the first
+	// post-restart update believe the new desktop already holds the previous session's reading position.
+	StandbyAppliedViewGeneration = 0;
 
 	// The wide-box relayout group. FuncStandbyCalcScale doubles as the group's "resolved" flag, which is
 	// what StandbyRetune tests before calling through the rest of them.

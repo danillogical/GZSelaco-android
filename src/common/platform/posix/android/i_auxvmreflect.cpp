@@ -326,15 +326,16 @@ VMFunction *ResolveStaticMethod(PClass *cls, const char *funcname, const char *s
 	return func;
 }
 
-PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls)
+PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls,
+	const char *subsystem, const char *disabledNote)
 {
 	// noCreate, for the same reason as in ResolveMethod: never add a name to the table to look one up.
 	FName name(fieldname, true);
 	PField *field = name != NAME_None ? dyn_cast<PField>(cls->FindSymbol(name, true)) : nullptr;
 	if (field == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s is not a field, second-screen view disabled\n",
-			cls->TypeName.GetChars(), fieldname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a field, %s\n",
+			subsystem, cls->TypeName.GetChars(), fieldname, disabledNote);
 		return nullptr;
 	}
 
@@ -348,8 +349,8 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 	// internally declared, so no script-declared field is ever one.
 	if (field->Flags & (VARF_Native | VARF_Static | VARF_Meta))
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s is not a plain instance field, second-screen view disabled\n",
-			cls->TypeName.GetChars(), fieldname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s is not a plain instance field, %s\n",
+			subsystem, cls->TypeName.GetChars(), fieldname, disabledNote);
 		return nullptr;
 	}
 
@@ -358,6 +359,12 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 	{
 	case Field_Bool:
 		ok = field->Type == TypeBool;
+		break;
+
+	case Field_Int:
+		// A plain ZScript `int`, the same identity Arg_Int checks. Equality rather than a signed/unsigned
+		// family test because the read is a 4-byte load interpreted as a signed int and nothing else.
+		ok = field->Type == TypeSInt32;
 		break;
 
 	case Field_Float:
@@ -451,8 +458,8 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 
 	if (!ok)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s has an unexpected type, second-screen view disabled\n",
-			cls->TypeName.GetChars(), fieldname);
+		Printf(TEXTCOLOR_YELLOW "%s: %s.%s has an unexpected type, %s\n",
+			subsystem, cls->TypeName.GetChars(), fieldname, disabledNote);
 		return nullptr;
 	}
 
@@ -596,20 +603,6 @@ void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls)
 	}
 }
 
-// The storage behind the cross-mode channel documented in i_auxvmreflect.h. It lives here, in neither
-// mode's translation unit, so that the one piece of shared state is not owned by either of them.
-static PClass *LastAppClass = nullptr;
-
-PClass *LiveLastAppClass()
-{
-	return LastAppClass;
-}
-
-void SetLiveLastAppClass(PClass *cls)
-{
-	LastAppClass = cls;
-}
-
 }   // namespace AuxView
 
 // ---------------------------------------------------------------------------------------------
@@ -628,7 +621,7 @@ void SetLiveLastAppClass(PClass *cls)
 // deletion, and the first collection after the restart - DestroyAllThinkers loading TITLEMAP - walked them
 // through a freed PClass in DObject::PropagateMark.
 //
-// WHY IT IS SAFE HERE, and it is the only property that matters: every one of the seven functions it calls
+// WHY IT IS SAFE HERE, and it is the only property that matters: every one of the eight functions it calls
 // does nothing but store to its own file statics. No VMCall, no Destroy(), no scripted onDestroy, no sound,
 // no music, no texture or menu access, nothing that can throw. In particular this is NOT StandbyViewDiscard
 // or an equivalent - that one calls menu->Destroy(), which dispatches PDAMenu3's scripted onDestroy and
@@ -648,7 +641,7 @@ void SetLiveLastAppClass(PClass *cls)
 // Revision-unique, in the same shape as the other aux build ids, so `strings` on the packaged library
 // answers "is this change in the binary" without a device run - the one check this project's build chain
 // makes necessary, because every exit code in it can report success against a tree it did not rebuild.
-static const char *const AuxRestartBuild = "AUXRESTART_BUILD_20260920_M8_R1";
+static const char *const AuxRestartBuild = "AUXRESTART_BUILD_20260920_M9_R1";
 
 void I_AuxForgetScriptState()
 {
@@ -678,10 +671,12 @@ void I_AuxForgetScriptState()
 	AuxView::FuncSetTextPadding = nullptr;
 	AuxView::SetTextPaddingRegs = 0;
 
-	// The cross-mode channel. Its comment in i_auxvmreflect.h says PClass objects are never freed and so it
-	// is never cleared; that holds within a session and StaticShutdown is where it stops holding, which is
-	// the one place "the last app this session" stops meaning anything.
-	AuxView::SetLiveLastAppClass(nullptr);
+	// The cross-mode channel, which is now the view-state manager's whole state rather than one PClass* here.
+	// Its own comment says a PClass* is never freed and so the app choice is never cleared; that holds within a
+	// session and StaticShutdown is where it stops holding, which is the one place "the last app this session"
+	// stops meaning anything. Called before the rest for the same reason the tab-padding group is: it is shared
+	// BY the two mode files rather than owned by one of them.
+	I_AuxCodexViewStateForgetScriptState();
 
 	I_AuxCanvasForgetScriptState();
 	I_AuxCodexForgetScriptState();

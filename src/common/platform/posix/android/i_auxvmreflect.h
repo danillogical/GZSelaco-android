@@ -90,7 +90,7 @@ FCanvas *GetTextureCanvas(const FString &texturename);
 // them. Each file resets its own statics because they are file-local by design; the aggregator in
 // i_auxvmreflect.cpp is what D_Cleanup calls, and it carries the full reasoning.
 //
-// Declared here, rather than as an ad-hoc local `extern` at each call site, so the eight definitions and
+// Declared here, rather than as an ad-hoc local `extern` at each call site, so the nine definitions and
 // the one caller cannot drift apart - they are only ever called from one place and a silent signature
 // mismatch would be a linker error at best and a wrong call at worst.
 //
@@ -102,6 +102,7 @@ void I_AuxForgetScriptState();
 
 void I_AuxCanvasForgetScriptState();
 void I_AuxCodexForgetScriptState();
+void I_AuxCodexViewStateForgetScriptState();
 void I_AuxStandbyCodexForgetScriptState();
 void I_AuxLiveCodexForgetScriptState();
 void I_AuxPanelForgetScriptState();
@@ -115,9 +116,9 @@ void I_AuxDeviceResetForgetScriptState();
 // i_auxstandbycodex.cpp, next to the mode-3 relayout they were written for. Mode 4 divides the same
 // baseline height by the same clamped value, so these two are the whole of what it needs from there.
 //
-// NOT a second cross-mode channel like LiveLastAppClass below: there is no state and no direction here,
-// only a read of one cvar through one clamp. Shared rather than re-derived because the clamp is
-// load-bearing for mode 4 in a way it is not for mode 3 - the value comes back inside 0.5 - 2.0 and
+// NOT a cross-mode channel like the view-state manager (i_auxcodexviewstate.h): there is no state and no
+// direction here, only a read of one cvar through one clamp. Shared rather than re-derived because the clamp
+// is load-bearing for mode 4 in a way it is not for mode 3 - the value comes back inside 0.5 - 2.0 and
 // NEVER NaN, and a NaN would compare unequal to itself, which in mode 4 is a relayout every frame and a
 // network event with it.
 //
@@ -222,6 +223,7 @@ VMFunction *ResolveMethod(PClass *cls, const char *funcname, const char *subsyst
 enum EFieldKind
 {
 	Field_Bool,
+	Field_Int,
 	Field_Float,
 	Field_String,
 	Field_ViewPtr,
@@ -252,7 +254,12 @@ VMFunction *ResolveStaticMethod(PClass *cls, const char *funcname, const char *s
 
 // Returns nullptr on any mismatch, having already printed which check failed. Latches nothing, for
 // the same reason ResolveMethod does not.
-PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls);
+//
+// subsystem prefixes every failure line and disabledNote ends it, for the same reason and with the same
+// defaults as ResolveMethod's: a caller that is not the standby codex must neither announce itself as one nor
+// tell the player the second-screen view is off when only its own feature has been lost.
+PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass *viewCls,
+	const char *subsystem = "AuxStandbyCodex", const char *disabledNote = "second-screen view disabled");
 
 DObject *ReadObjectField(DObject *obj, const PField *field);
 
@@ -273,7 +280,8 @@ FString *StringFieldAddr(DObject *obj, const PField *field);
 // can be handed back without touching anything the design depends on.
 //
 // SHARED BETWEEN BOTH MODES because both host the same PDAMenu3 against the same narrow canvas, and it
-// lives here rather than in either mode file for the reason LiveLastAppClass does: neither mode owns it.
+// lives here rather than in either mode file for the reason the view-state manager lives in its own file:
+// neither mode owns it.
 //
 // EACH CALLER FOLDS IT INTO THE RELAYOUT IT ALREADY RUNS, and that placement is a requirement rather
 // than a tidiness: this only writes fields and pins, so it needs a layout pass after it to take effect,
@@ -290,24 +298,5 @@ FString *StringFieldAddr(DObject *obj, const PField *field);
 // at; both callers have already proved menu is an instance of menuCls.
 // ---------------------------------------------------------------------------------------------
 void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls);
-
-// ---------------------------------------------------------------------------------------------
-// THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3, and the whole point of the feature: the class
-// of the app the player last switched to in their OWN PDA. Written by LiveSampleCurrentApp (mode 4,
-// i_auxlivecodex.cpp) on every frame the real PDA is open, read by StandbyWantedIndex (mode 3,
-// i_auxstandbycodex.cpp).
-//
-// Every other piece of state in the two mode files is deliberately private to one mode so that a
-// failure in one cannot disturb another. This is the exception, so it is built to be harmless in both
-// directions: mode 4 only ever stores a PClass* it has already proved is a PDAAppWindow, PClass objects
-// are never freed, and a mode-4 failure simply leaves it null - which reads as "the player has not
-// opened their PDA yet" and falls through to the cvar. Never cleared, because "the last app this
-// session" is exactly what it means.
-//
-// An accessor pair rather than an extern so that the storage stays in one place and neither mode owns
-// the other's state: this is the only thing that crosses the file boundary between them.
-// ---------------------------------------------------------------------------------------------
-PClass *LiveLastAppClass();
-void SetLiveLastAppClass(PClass *cls);
 
 }   // namespace AuxView

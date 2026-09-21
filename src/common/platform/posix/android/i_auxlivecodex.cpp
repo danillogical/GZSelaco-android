@@ -53,6 +53,7 @@
 #include "vm.h"
 #include "zstring.h"
 
+#include "i_auxcodexviewstate.h"   // the view-state manager, which is all mode 4 hands its samples to
 #include "i_auxvmreflect.h"
 
 using namespace AuxView;
@@ -257,10 +258,13 @@ static bool LiveResolve()
 	PField *fldIgnore = fldUIScaling != nullptr ? ResolveField(cls, "ignoreUIScaling", Field_Bool, viewCls) : nullptr;
 	PField *fldDrawCanvas = fldIgnore != nullptr ? ResolveField(cls, "drawCanvas", Field_CanvasPtr, viewCls) : nullptr;
 
-	// THE COUPLING, and the one OPTIONAL group here. currentAppWindow (pda_menu.zs:49) is what mode 3 reads
-	// to follow the live codex; without it the dashboard just keeps using aux_standby_app. Resolved after
-	// the required group so a miss cannot be mistaken for one, and excluded from `ok` below so it cannot
-	// disable the second-screen PDA - losing the panel entirely to save a nicety is the wrong trade.
+	// THE COUPLING, and the one OPTIONAL group here. currentAppWindow (pda_menu.zs:49) is the only handle mode
+	// 4 has on what the player is actually looking at, so it is what everything the view-state manager samples
+	// is read off - the app, the open datalog entry and the scroll position alike. Without it the panel keeps
+	// using aux_standby_app and opens documents at the top, which is the behaviour that shipped before any of
+	// this. Resolved after the required group so a miss cannot be mistaken for one, and excluded from `ok`
+	// below so it cannot disable the second-screen PDA - losing the panel entirely to save a nicety is the
+	// wrong trade.
 	PClass *appWindowCls = PClass::FindClass(AppWindowClassName);
 	PField *fldCurrentApp = appWindowCls != nullptr && appWindowCls->IsDescendantOf(viewCls)
 		? ResolveField(cls, "currentAppWindow", Field_ViewPtr, appWindowCls) : nullptr;
@@ -295,8 +299,9 @@ static bool LiveResolve()
 
 	if (fldCurrentApp == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: cannot read %s.currentAppWindow - the dashboard will not "
-			"follow the live codex and will stay on aux_standby_app\n", LivePdaClassName);
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: cannot read %s.currentAppWindow - the standby codex will not "
+			"follow the live codex and will stay on aux_standby_app at the top of every document\n",
+			LivePdaClassName);
 	}
 
 	Printf("AuxLiveCodex: %s resolved, second-screen PDA ready on %s at %gx%g\n",
@@ -304,26 +309,37 @@ static bool LiveResolve()
 	return true;
 }
 
-// Record which app the player is looking at in their OWN PDA, so mode 3 can put the dashboard on the same
-// one when they close it. Called on every frame the real PDA is open.
+// Record what the player is looking at in their OWN PDA, so mode 3 can put the panel back on it when they
+// close it. Called on every frame the real PDA is open.
+//
+// WHAT IS SAMPLED, AND WHERE IT GOES. The app window is handed to the view-state manager
+// (i_auxcodexviewstate.h), which takes three things off it: the app's class, and - when it is the reader -
+// which datalog entry is open and how far down it the player has scrolled. All three live there rather than
+// here so that neither mode owns the other's state; the full argument is in that header.
+//
+// READ-ONLY, WHICH IS NOT NEGOTIABLE. This is the PLAYER'S menu. The manager writes nothing to it and calls
+// no script on this path at all, so mode 4 remains exactly the pass-through it was: the engine ticks the
+// menu, M_Responder drives it and M_Drawer draws it, and the only thing this file changes is where the
+// pixels land.
 //
 // SAMPLED EVERY FRAME RATHER THAN READ ON THE FALLING EDGE, and that is not caution. M_ClearMenus destroys
 // the menu when it closes (menu.cpp:946), so by the time any "is the PDA open" predicate goes false the
 // instance may already be euthanized - and reading a field off it then is reading freed memory to answer a
-// question we could have answered a frame earlier for free. A per-frame object-field load costs nothing.
+// question we could have answered a frame earlier for free. A per-frame handful of object-field loads costs
+// nothing, and it means a kill mid-session loses nothing and there is no close edge to miss.
 //
 // currentAppWindow AND NOT currentApp, which is the part that had to be checked rather than assumed.
 // PDAMenu3 does declare `int currentApp` at pda_menu.zs:52 - it looks exactly like the right field - but a
 // grep of the entire extracted ipk3 (zscript/, zscripts/, MENUDEF.zsc, ACS) finds that ONE line and nothing
 // else: it is never written and never read anywhere in Selaco. It would therefore sample 0 forever, and 0 is
-// not even a valid PDA_APP_ID (PDA_APP_READER is 1), so the dashboard would silently never follow anything.
+// not even a valid PDA_APP_ID (PDA_APP_READER is 1), so the panel would silently never follow anything.
 //
 // currentAppWindow is unambiguous instead: it is set by switchToAppWindow (pda_menu.zs:735), which is the
 // single funnel every app switch in the PDA goes through - the six openX() helpers at :515-609, the tab
 // handler at :880-900, and the click-to-raise in mouseDownEvent at :961 - and it is repaired to the topmost
-// remaining window when one is closed (:935-945). Its CLASS is what is stored, because the class is what
-// StandbyApps keys on and because a class pointer stays valid for the life of the process while the
-// instance does not.
+// remaining window when one is closed (:935-945). It is also the only handle that reaches the READER
+// INSTANCE, which is what the entry and the scroll have to be read off; there is no parallel path to it and
+// none is added.
 static void LiveSampleCurrentApp()
 {
 	if (FldLiveCurrentAppWindow == nullptr || LiveAppWindowClass == nullptr || CurrentMenu == nullptr)
@@ -333,10 +349,10 @@ static void LiveSampleCurrentApp()
 
 	// The field's DECLARED type was proved to be a PDAAppWindow when it was resolved; this proves the object
 	// in it is one. Null is normal - handleControl clears it when the last window closes (pda_menu.zs:936) -
-	// and is deliberately NOT propagated: "the player closed every window" is not a new app choice, so the
+	// and is deliberately NOT propagated: "the player closed every window" is not a new view state, so the
 	// last real one stands.
 	if (app != nullptr && !(app->ObjectFlags & OF_EuthanizeMe) && app->IsKindOf(LiveAppWindowClass))
-		SetLiveLastAppClass(app->GetClass());
+		AuxCodexView::SampleAppWindow(app);
 }
 
 // Is the player's own PDA the current menu? Null-safe on every game: PClass::FindClass returns nullptr

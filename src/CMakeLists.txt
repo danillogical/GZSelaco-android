@@ -475,6 +475,7 @@ set( PLAT_UNIX_SOURCES
 set( PLAT_ANDROID_SOURCES
 	common/platform/posix/android/i_auxcanvas.cpp
 	common/platform/posix/android/i_auxcodex.cpp
+	common/platform/posix/android/i_auxcodexviewstate.cpp
 	common/platform/posix/android/i_auxstandbycodex.cpp
 	common/platform/posix/android/i_auxdevicepicker.cpp
 	common/platform/posix/android/i_auxdevicereset.cpp
