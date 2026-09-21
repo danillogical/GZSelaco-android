@@ -463,7 +463,7 @@ static bool AuxBuildPicker()
 
 	// CreateNew calls I_Error on either of these rather than returning null (dobjtype.cpp:433-437), so an
 	// item class that cannot be instantiated has to be caught here or it costs the player a startup rather
-	// than a picker. Same check, and the same reason, as i_auxcodexview.cpp makes before its own CreateNew.
+	// than a picker. Same check, and the same reason, as i_auxstandbycodex.cpp makes before its own CreateNew.
 	if (cls->bAbstract || cls->ConstructNative == nullptr
 		|| !cls->IsDescendantOf(RUNTIME_CLASS(DMenuItemBase)))
 	{

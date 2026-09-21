@@ -6,12 +6,12 @@
 ** This file used to also parse MANUAL.json into a node tree and format a table of contents for
 ** direct display (BuildToc/CountVisible), but nothing ever read that output - AuxPanel.sCodex was
 ** write-only on the Java side, since the text overlay it fed was replaced by the readback/splash
-** path. That milestone is gone; what remains is the one piece i_auxcodexview.cpp actually consumes,
-** I_AuxCodexGeneration, as a rebuild trigger for the dashboard it bakes from the same unlock state.
+** path. That milestone is gone; what remains is the one piece i_auxstandbycodex.cpp actually consumes,
+** I_AuxCodexGeneration, as a rebuild trigger for the standby codex it bakes from the same unlock state.
 **
 ** There is no longer a separate per-frame probe call: I_AuxCodexGeneration() re-checks the unlock
 ** state itself on every call (see Probe(), below), because the reflection it does is memoised
-** against the item's class and therefore cheap enough to poll lazily. i_auxcodexview.cpp already
+** against the item's class and therefore cheap enough to poll lazily. i_auxstandbycodex.cpp already
 ** calls I_AuxCodexGeneration() at the cadence that needs to observe it move, so a second hook from
 ** i_auxpanel.cpp would only be a second thing that could disagree about when to look.
 **
@@ -67,7 +67,7 @@ static bool CachedFieldValid = false;
 // Bumped once whenever the unlock checksum changes. Published rather than the checksum itself
 // because no caller needs to know WHICH gate changed, only that something did.
 //
-// The consumer is i_auxcodexview.cpp, which bakes the unlock state into a widget tree at build
+// The consumer is i_auxstandbycodex.cpp, which bakes the unlock state into a widget tree at build
 // time and therefore has to rebuild when this moves.
 //
 // Frozen if ProbeBroken latches (a missing or wrong-typed unlocks field): the consumer then builds
@@ -96,8 +96,8 @@ unsigned I_AuxCodexGeneration()
 // says must never be skipped as an optimisation, and CachedUnlocksField's offset is then read out of freed
 // memory and used to reinterpret arbitrary object bytes as a Map<Name,Int>.
 //
-// CodexGeneration goes back to zero along with i_auxcodexview.cpp's copy of it, so the two agree after the
-// restart and the rebuild is driven by the desktop having been discarded rather than by a spurious edge.
+// CodexGeneration goes back to zero along with i_auxstandbycodex.cpp's copy of it, so the two agree after the
+// restart and the rebuild is driven by the standby codex having been discarded rather than by a spurious edge.
 void I_AuxCodexForgetScriptState()
 {
 	ProbeBroken = false;

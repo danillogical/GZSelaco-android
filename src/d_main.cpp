@@ -897,7 +897,7 @@ static void DrawOverlays()
 	NetUpdate ();
 	C_DrawConsole ();
 	{
-		// "Wii U mode": while Selaco's PDA is the current menu and aux_canvas_zscript is 4, this guard
+		// THE LIVE CODEX: while Selaco's PDA is the current menu and aux_codex_mode is 4, this guard
 		// points twod at the second screen's offscreen canvas for the duration of M_Drawer, so the menu
 		// the engine is already ticking and feeding gamepad input to draws THERE instead of over the
 		// game. Scoped rather than a pair of assignments because a VM abort in a menu drawer unwinds

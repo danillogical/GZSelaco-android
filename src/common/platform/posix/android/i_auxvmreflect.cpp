@@ -52,7 +52,7 @@
 #include "i_auxvmreflect.h"
 
 // ZScript's `struct CVar native`, which is what UIMenu.ui_scaling (menu.zs:28) is a pointer to. Named
-// here because Field_CVarPtr compares against it by name; see the null store in BuildDesktopView.
+// here because Field_CVarPtr compares against it by name; see the null store in BuildStandbyView.
 static const char *const CVarStructName = "CVar";
 
 namespace AuxView
@@ -333,7 +333,7 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 	PField *field = name != NAME_None ? dyn_cast<PField>(cls->FindSymbol(name, true)) : nullptr;
 	if (field == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a field, desktop view disabled\n",
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s is not a field, second-screen view disabled\n",
 			cls->TypeName.GetChars(), fieldname);
 		return nullptr;
 	}
@@ -348,7 +348,7 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 	// internally declared, so no script-declared field is ever one.
 	if (field->Flags & (VARF_Native | VARF_Static | VARF_Meta))
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a plain instance field, desktop view disabled\n",
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s is not a plain instance field, second-screen view disabled\n",
 			cls->TypeName.GetChars(), fieldname);
 		return nullptr;
 	}
@@ -451,7 +451,7 @@ PField *ResolveField(PClass *cls, const char *fieldname, EFieldKind kind, PClass
 
 	if (!ok)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s has an unexpected type, desktop view disabled\n",
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s has an unexpected type, second-screen view disabled\n",
 			cls->TypeName.GetChars(), fieldname);
 		return nullptr;
 	}
@@ -529,7 +529,7 @@ static void ResolveTabPadding(DObject *menu, PClass *menuCls, PClass *viewCls)
 	// fills omitted ones in, so the callee still declares and reads five.
 	static const EArgKind PaddingArgs[] = { Arg_Float, Arg_Float, Arg_Float, Arg_Float };
 	PClass *tabCls = firstTab->GetClass();
-	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", "AuxDesktopView", PaddingArgs, 4, &SetTextPaddingRegs);
+	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", "AuxStandbyCodex", PaddingArgs, 4, &SetTextPaddingRegs);
 	if (func == nullptr)
 		return;
 
@@ -600,12 +600,12 @@ void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls)
 // mode's translation unit, so that the one piece of shared state is not owned by either of them.
 static PClass *LastAppClass = nullptr;
 
-PClass *MenuLastAppClass()
+PClass *LiveLastAppClass()
 {
 	return LastAppClass;
 }
 
-void SetMenuLastAppClass(PClass *cls)
+void SetLiveLastAppClass(PClass *cls)
 {
 	LastAppClass = cls;
 }
@@ -623,14 +623,14 @@ void SetMenuLastAppClass(PClass *cls)
 // deleted) and the DObjects two GC marker functions still mark.
 //
 // THE MARKED DObjects ARE THE REPORTED CRASH. There is no RemoveMarkerFunc and GC's marker array is never
-// cleared, so both markers keep reading their globals for the life of the process: DesktopMenu and
+// cleared, so both markers keep reading their globals for the life of the process: StandbyMenu and
 // AuxReceiver were therefore marked live through every collection in D_Cleanup, outlived the class
 // deletion, and the first collection after the restart - DestroyAllThinkers loading TITLEMAP - walked them
 // through a freed PClass in DObject::PropagateMark.
 //
 // WHY IT IS SAFE HERE, and it is the only property that matters: every one of the seven functions it calls
 // does nothing but store to its own file statics. No VMCall, no Destroy(), no scripted onDestroy, no sound,
-// no music, no texture or menu access, nothing that can throw. In particular this is NOT DesktopViewDiscard
+// no music, no texture or menu access, nothing that can throw. In particular this is NOT StandbyViewDiscard
 // or an equivalent - that one calls menu->Destroy(), which dispatches PDAMenu3's scripted onDestroy and
 // I_SetMusicVolume through it, both illegal at a point where the sound system is already down and the
 // classes are about to go. Unrooting the objects and letting the collection inside StaticShutdown sweep
@@ -641,9 +641,9 @@ void SetMenuLastAppClass(PClass *cls)
 // same value it is being put back to - and safe to call twice, which it is: GameMain calls D_Cleanup a
 // second time on the way out.
 //
-// LEVEL CHANGES DO NOT COME THROUGH HERE. They keep going through DesktopViewDiscard and the per-frame
+// LEVEL CHANGES DO NOT COME THROUGH HERE. They keep going through StandbyViewDiscard and the per-frame
 // edges, deliberately: this throws away every resolve, which would mean a full rebuild, and a map change is
-// the case the dashboard is specifically built to survive without one.
+// the case the standby codex is specifically built to survive without one.
 
 // Revision-unique, in the same shape as the other aux build ids, so `strings` on the packaged library
 // answers "is this change in the binary" without a device run - the one check this project's build chain
@@ -681,12 +681,12 @@ void I_AuxForgetScriptState()
 	// The cross-mode channel. Its comment in i_auxvmreflect.h says PClass objects are never freed and so it
 	// is never cleared; that holds within a session and StaticShutdown is where it stops holding, which is
 	// the one place "the last app this session" stops meaning anything.
-	AuxView::SetMenuLastAppClass(nullptr);
+	AuxView::SetLiveLastAppClass(nullptr);
 
 	I_AuxCanvasForgetScriptState();
 	I_AuxCodexForgetScriptState();
-	I_AuxCodexViewForgetScriptState();
-	I_AuxMenuViewForgetScriptState();
+	I_AuxStandbyCodexForgetScriptState();
+	I_AuxLiveCodexForgetScriptState();
 	I_AuxPanelForgetScriptState();
 	I_AuxDevicePickerForgetScriptState();
 	I_AuxDeviceResetForgetScriptState();

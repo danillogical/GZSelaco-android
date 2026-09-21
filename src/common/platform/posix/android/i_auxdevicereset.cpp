@@ -238,7 +238,7 @@ static const int AuxInitNewRegs = 13;
 // The kinds of field this file writes. NOT i_auxvmreflect.h's ResolveField: two of the three are kinds it
 // does not know - a function pointer and a bare Object - and teaching it two new kinds means editing the
 // resolver the second screen depends on for the sake of one button. It also ends every failure line with
-// "desktop view disabled", which is not what is lost here.
+// "second-screen view disabled", which is not what is lost here.
 enum EAuxPromptFieldKind
 {
 	AuxPromptField_Bool,
@@ -798,7 +798,7 @@ void AuxDeviceResetInitMenu()
 	if (fldFunc == nullptr)
 	{
 		// Through the shared resolver rather than AuxPromptField because mFunc is a String and Field_String
-		// is a kind it already knows. Its own failure line ends in "desktop view disabled", which is not
+		// is a kind it already knows. Its own failure line ends in "second-screen view disabled", which is not
 		// true here, so this one follows it and says what is actually lost - the same pairing
 		// AuxRenameHandheldEntry uses in i_auxpanel.cpp.
 		Printf(TEXTCOLOR_YELLOW "%s: no %s.%s to identify their button by, %s\n", AuxSubsystem,

@@ -2,8 +2,8 @@
 
 /*
 ** i_auxvmreflect.h
-** ZScript symbol resolution for the AYN Thor's second screen, shared by the mode-3 dashboard
-** (i_auxcodexview.cpp) and the mode-4 PDA redirect (i_auxmenuview.cpp).
+** ZScript symbol resolution for the AYN Thor's second screen, shared by the mode-3 standby codex
+** (i_auxstandbycodex.cpp) and the mode-4 live codex, Selaco's real PDA redirected (i_auxlivecodex.cpp).
 **
 **---------------------------------------------------------------------------
 ** Copyright 2026 Selaco Android port contributors
@@ -59,6 +59,22 @@ class PClass;
 class PField;
 class VMFunction;
 
+// The second screen's canvas owner, named where every aux file that compares against it can see the
+// name rather than the bare integer. THE INTEGERS ARE A USER-FACING CONTRACT and must never be
+// renumbered: aux_codex_mode is a console cvar the player types a number into
+// (`aux_codex_mode 5`), and both TECHNICAL.md and the commit history cite these values.
+//
+// 1 and 2 are RETIRED and deliberately not reused, so a config or a habit that still names one lands
+// on the no-content branch (i_auxpanel.cpp) rather than silently on whatever took the number next.
+enum EAuxCanvasMode
+{
+	AuxMode_TestPattern = 0,
+	// 1 and 2 are retired - see the comment above.
+	AuxMode_Standby     = 3,   // the standby codex: a read-only summary drawn by this fork's own C++ view
+	AuxMode_Live        = 4,   // the live codex: Selaco's real PDA, redirected onto the panel
+	AuxMode_Auto        = 5,   // resolves per frame to Standby or Live, whichever should hold the canvas
+};
+
 // GetTextureCanvas has no declaration in any engine header - vmnatives.cpp:622, its only other
 // caller, declares it locally too. Declared here rather than in an upstream header so this fork's
 // footprint in upstream code stays zero, and once rather than per file so the three aux translation
@@ -86,8 +102,8 @@ void I_AuxForgetScriptState();
 
 void I_AuxCanvasForgetScriptState();
 void I_AuxCodexForgetScriptState();
-void I_AuxCodexViewForgetScriptState();
-void I_AuxMenuViewForgetScriptState();
+void I_AuxStandbyCodexForgetScriptState();
+void I_AuxLiveCodexForgetScriptState();
 void I_AuxPanelForgetScriptState();
 void I_AuxDevicePickerForgetScriptState();
 void I_AuxDeviceResetForgetScriptState();
@@ -95,25 +111,25 @@ void I_AuxDeviceResetForgetScriptState();
 // ---------------------------------------------------------------------------------------------
 // THE SECOND-SCREEN ZOOM, which BOTH modes lay their menu out against: one cvar, one clamp, two modes.
 //
-// aux_dashboard_zoom and the arithmetic table saying where its useful travel actually ends live in
-// i_auxcodexview.cpp, next to the mode-3 relayout they were written for. Mode 4 divides the same
+// aux_codex_size and the arithmetic table saying where its useful travel actually ends live in
+// i_auxstandbycodex.cpp, next to the mode-3 relayout they were written for. Mode 4 divides the same
 // baseline height by the same clamped value, so these two are the whole of what it needs from there.
 //
-// NOT a second cross-mode channel like MenuLastAppClass below: there is no state and no direction here,
+// NOT a second cross-mode channel like LiveLastAppClass below: there is no state and no direction here,
 // only a read of one cvar through one clamp. Shared rather than re-derived because the clamp is
 // load-bearing for mode 4 in a way it is not for mode 3 - the value comes back inside 0.5 - 2.0 and
 // NEVER NaN, and a NaN would compare unequal to itself, which in mode 4 is a relayout every frame and a
 // network event with it.
 //
 // At global scope rather than inside AuxView for the same reason GetTextureCanvas is: they are defined
-// in a translation unit that does not open the namespace. Hence the Dashboard prefix on both names,
-// which is the cvar's own name rather than a claim that mode 3 owns them.
-double DashboardZoom();
+// in a translation unit that does not open the namespace. Hence the Codex prefix on both names, which
+// is the cvar's own name rather than a claim that either mode owns them.
+double CodexZoom();
 
 // Which of calcScale's own limits swallowed a zoom, as a phrase to append to a log line, or "" when the
 // zoom asked for is the zoom that comes back. calcScale is the same PDAMenu3 method in both modes, so
 // its floor and its snap band are dead zones in both.
-const char *DashboardZoomLimitNote(double zoom);
+const char *CodexZoomLimitNote(double zoom);
 
 // Everything below is in a namespace for one concrete reason: i_auxcanvas.cpp includes this header
 // for GetTextureCanvas and already has its own AuxCanvasName, AuxCanvasWidth and AuxCanvasHeight
@@ -162,7 +178,7 @@ static const char *const ViewClassName = "UIView";
 static const char *const MenuClassName = "UIMenu";
 
 // The base of every app that lives on the desktop (app_window.zs:1). Mode 3's app selection resolves
-// the concrete app classes against it (see SelectDashboardApp) and mode 4 checks it before reading
+// the concrete app classes against it (see SelectStandbyApp) and mode 4 checks it before reading
 // currentAppWindow.
 static const char *const AppWindowClassName = "PDAAppWindow";
 
@@ -193,12 +209,12 @@ enum EArgKind
 // argClass is forwarded to ArgMatches for Arg_ObjectOf and ignored otherwise. One class covers every
 // call site because none of them passes more than one script object.
 //
-// subsystem prefixes every failure line and disabledNote ends it, so a caller that is not the desktop
-// view neither announces itself as one nor tells the player the desktop view is off. Both mode files
-// pass "AuxDesktopView" and take the default note, which is the text these lines have always had.
+// subsystem prefixes every failure line and disabledNote ends it, so a caller that is not the standby
+// codex neither announces itself as one nor tells the player the second-screen view is off. Both mode files
+// pass "AuxStandbyCodex" and take the default note, which is the text these lines have always had.
 VMFunction *ResolveMethod(PClass *cls, const char *funcname, const char *subsystem,
 	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass = nullptr,
-	const char *disabledNote = "desktop view disabled");
+	const char *disabledNote = "second-screen view disabled");
 
 // A field we are about to write, proved to be the field we mean. A wrong offset here is memory
 // corruption rather than a misdraw, so the type is checked structurally every time and nothing is
@@ -229,8 +245,8 @@ enum EFieldKind
 // (UIHelper.SetSteamdeckPresets, helper.zs:616). A static WITH arguments would need the ArgMatches
 // loop, and should extend this rather than grow a second copy of it.
 //
-// subsystem prefixes every failure line, so a caller that is not the desktop view does not print
-// "desktop view disabled" at the player. Returns nullptr on any mismatch, having already printed
+// subsystem prefixes every failure line, so a caller that is not the standby codex does not print
+// "second-screen view disabled" at the player. Returns nullptr on any mismatch, having already printed
 // which check failed, and latches nothing - for the same reason ResolveMethod does not.
 VMFunction *ResolveStaticMethod(PClass *cls, const char *funcname, const char *subsystem, int *outRegs);
 
@@ -257,7 +273,7 @@ FString *StringFieldAddr(DObject *obj, const PField *field);
 // can be handed back without touching anything the design depends on.
 //
 // SHARED BETWEEN BOTH MODES because both host the same PDAMenu3 against the same narrow canvas, and it
-// lives here rather than in either mode file for the reason MenuLastAppClass does: neither mode owns it.
+// lives here rather than in either mode file for the reason LiveLastAppClass does: neither mode owns it.
 //
 // EACH CALLER FOLDS IT INTO THE RELAYOUT IT ALREADY RUNS, and that placement is a requirement rather
 // than a tidiness: this only writes fields and pins, so it needs a layout pass after it to take effect,
@@ -277,9 +293,9 @@ void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls);
 
 // ---------------------------------------------------------------------------------------------
 // THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3, and the whole point of the feature: the class
-// of the app the player last switched to in their OWN PDA. Written by MenuSampleCurrentApp (mode 4,
-// i_auxmenuview.cpp) on every frame the real PDA is open, read by DashboardWantedIndex (mode 3,
-// i_auxcodexview.cpp).
+// of the app the player last switched to in their OWN PDA. Written by LiveSampleCurrentApp (mode 4,
+// i_auxlivecodex.cpp) on every frame the real PDA is open, read by StandbyWantedIndex (mode 3,
+// i_auxstandbycodex.cpp).
 //
 // Every other piece of state in the two mode files is deliberately private to one mode so that a
 // failure in one cannot disturb another. This is the exception, so it is built to be harmless in both
@@ -291,7 +307,7 @@ void TightenTabStrip(DObject *menu, PClass *menuCls, PClass *viewCls);
 // An accessor pair rather than an extern so that the storage stays in one place and neither mode owns
 // the other's state: this is the only thing that crosses the file boundary between them.
 // ---------------------------------------------------------------------------------------------
-PClass *MenuLastAppClass();
-void SetMenuLastAppClass(PClass *cls);
+PClass *LiveLastAppClass();
+void SetLiveLastAppClass(PClass *cls);
 
 }   // namespace AuxView

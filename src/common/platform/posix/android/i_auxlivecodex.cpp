@@ -1,6 +1,6 @@
 /*
-** i_auxmenuview.cpp
-** "Wii U mode": the player's OWN PDA, redirected onto the AYN Thor's second screen.
+** i_auxlivecodex.cpp
+** The live codex: the player's OWN PDA, redirected onto the AYN Thor's second screen.
 **
 **---------------------------------------------------------------------------
 ** Copyright 2026 Selaco Android port contributors
@@ -31,7 +31,7 @@
 **---------------------------------------------------------------------------
 **
 ** Why the handful of script symbols here are reached by VM reflection rather than by a compile-time
-** type: see WHY THIS IS C++ AND NOT ZSCRIPT at the top of i_auxcodexview.cpp, and the safety argument
+** type: see WHY THIS IS C++ AND NOT ZSCRIPT at the top of i_auxstandbycodex.cpp, and the safety argument
 ** for the resolvers themselves in i_auxvmreflect.h.
 */
 
@@ -104,14 +104,14 @@ using namespace AuxView;
 //    and PDAMenu3.init sets DontBlur = false (pda_menu.zs:80). It is a scene-level postprocess on the
 //    MAIN framebuffer, so the swap does not redirect it - left alone the main screen blurs for a menu
 //    that is not on the main screen. DontDim needs nothing: PDAMenu3 sets it true (pda_menu.zs:79), and
-//    sysCallbacks.MenuDim has no assignment anywhere in this tree so it is a no-op regardless.
+//    sysCallbacks.LiveDim has no assignment anywhere in this tree so it is a no-op regardless.
 //
 // 4. THE MENU RELAYOUTS ITSELF AGAINST WHATEVER Screen.GetWidth() SAYS, and mode 4 makes that answer
-//    change depending on where in the frame you ask. See MenuTune.
+//    change depending on where in the frame you ask. See LiveTune.
 //
-// AND ONE THING THAT IS NOT ABOUT CORRECTNESS AT ALL: aux_dashboard_zoom, the same cvar and the same
+// AND ONE THING THAT IS NOT ABOUT CORRECTNESS AT ALL: aux_codex_size, the same cvar and the same
 // clamp mode 3 uses, because 1240x1080 at arm's length is too small to read whichever mode put it there.
-// The arithmetic is free - it divides the baseline height MenuTune hands calcScale, nothing more - but it
+// The arithmetic is free - it divides the baseline height LiveTune hands calcScale, nothing more - but it
 // is the one player-facing value here that can move while the menu is LIVE, and in a mode with no
 // FProjectionScope a relayout is a real write to the player's savegame. So WHEN it is applied is the
 // delicate part rather than what it computes: see the compare in FAuxMenuRedirect's constructor.
@@ -138,78 +138,78 @@ using namespace AuxView;
 // because mode 4's content is LIVE and INTERACTIVE - the player is moving a selection with the gamepad
 // and latency is what decides whether the panel is usable - and because mode 4 pauses the world, so the
 // frame time it gives up buys nothing back. Performance is explicitly not a constraint for this mode.
-static const int AuxMenuPublishInterval = 2;
+static const int AuxLivePublishInterval = 2;
 
 // The menu class we host, and the ancestors every write below assumes. PDAMenu3 is a UIMenu (hence
 // mainView, drawCanvas, ignoreUIScaling and ui_scaling) and a DMenu (hence being CurrentMenu at all).
-static const char *const MenuPdaClassName = "PDAMenu3";
+static const char *const LivePdaClassName = "PDAMenu3";
 
 // Two latches with the same split of meaning as the other modes'. Absent is the expected outcome on
 // Doom and on the demo and says one line then nothing; broken is a real diagnostic. On either, mode 4
 // reports the PDA as not open, so the redirect never engages and M_Drawer draws the menu to the MAIN
 // screen exactly as it would without this file. Failing towards the main screen is deliberate: a PDA
 // the player cannot see anywhere is far worse than a PDA that is merely not on the panel.
-static bool MenuAbsent = false;
-static bool MenuBroken = false;
+static bool LiveAbsent = false;
+static bool LiveBroken = false;
 
-static PClass *MenuPdaClass = nullptr;
-static PClass *MenuViewClass = nullptr;
-static FCanvas *MenuCanvas = nullptr;
+static PClass *LivePdaClass = nullptr;
+static PClass *LiveCodexClass = nullptr;
+static FCanvas *LiveCanvas = nullptr;
 
-static VMFunction *FuncMenuCalcScale = nullptr;
-static VMFunction *FuncMenuLayout = nullptr;
-static VMFunction *FuncMenuViewLayout = nullptr;
-static int MenuCalcScaleRegs = 0;
-static int MenuViewLayoutRegs = 0;
+static VMFunction *FuncLiveCalcScale = nullptr;
+static VMFunction *FuncLiveLayout = nullptr;
+static VMFunction *FuncLiveCodexLayout = nullptr;
+static int LiveCalcScaleRegs = 0;
+static int LiveCodexLayoutRegs = 0;
 
-static PField *FldMenuMainView = nullptr;
-static PField *FldMenuUIScaling = nullptr;
-static PField *FldMenuIgnoreUIScaling = nullptr;
-static PField *FldMenuDrawCanvas = nullptr;
+static PField *FldLiveMainView = nullptr;
+static PField *FldLiveUIScaling = nullptr;
+static PField *FldLiveIgnoreUIScaling = nullptr;
+static PField *FldLiveDrawCanvas = nullptr;
 
 // The coupling to mode 3, and the ONE optional group mode 4 resolves. Null here means the dashboard does
-// not follow the live codex and falls back to aux_dashboard_app - a lost feature, not a broken mode, which
-// is why a failure to resolve these must not set MenuBroken.
-static PClass *MenuAppWindowClass = nullptr;
-static PField *FldMenuCurrentAppWindow = nullptr;
+// not follow the live codex and falls back to aux_standby_app - a lost feature, not a broken mode, which
+// is why a failure to resolve these must not set LiveBroken.
+static PClass *LiveAppWindowClass = nullptr;
+static PField *FldLiveCurrentAppWindow = nullptr;
 
-static bool MenuResolved = false;
+static bool LiveResolved = false;
 
-// The instance MenuTune has already been applied to, compared by POINTER and never dereferenced while
+// The instance LiveTune has already been applied to, compared by POINTER and never dereferenced while
 // stale. Cleared on the falling edge of "the PDA is open" so that a new menu landing on the recycled
 // address of the old one is still tuned - a pointer compare alone would silently skip it.
-static DObject *MenuTuned = nullptr;
+static DObject *LiveTuned = nullptr;
 
 // And the zoom it was tuned with, which is the SECOND half of that guard. Kept here rather than read from
 // the cvar at the point of use because what has to be compared is the zoom already baked into the live
-// layout, not the zoom the player currently wants. Not cleared alongside MenuTuned: a null MenuTuned
+// layout, not the zoom the player currently wants. Not cleared alongside LiveTuned: a null LiveTuned
 // already forces a tune, so the stale value can never be acted on.
-static double MenuTunedZoom = 1.0;
+static double LiveTunedZoom = 1.0;
 
 // Whether the panel hook ran this frame with mode 4 selected. The guard also re-tests that the PDA is
 // open, so all this really carries is "there is a live panel and mode 4 is on" - a slowly changing
 // condition where one frame of staleness costs at most one redirected-and-discarded M_Drawer.
-static bool MenuArmed = false;
+static bool LiveArmed = false;
 
 // Whether the guard should mark the texture dirty and arm the readback when it finishes drawing. The
-// decision is made at the top of the frame, in I_AuxMenuViewFrame, because that is where the readback
+// decision is made at the top of the frame, in I_AuxLiveCodexFrame, because that is where the readback
 // state it has to agree with lives.
-static bool MenuWantPublish = false;
+static bool LiveWantPublish = false;
 
-static bool MenuWasOpen = false;
-static int MenuFramesSincePublish = 0;
+static bool LiveWasOpen = false;
+static int LiveFramesSincePublish = 0;
 
 // Resolve everything mode 4 calls or writes. Runs once, on the first frame the PDA is actually open -
 // never at startup, because PClass::FindClass cannot answer before the scripts are compiled and a
-// premature lookup would latch MenuAbsent forever on a game that does have the class.
-static bool MenuResolve()
+// premature lookup would latch LiveAbsent forever on a game that does have the class.
+static bool LiveResolve()
 {
-	PClass *cls = PClass::FindClass(MenuPdaClassName);
+	PClass *cls = PClass::FindClass(LivePdaClassName);
 	if (cls == nullptr)
 	{
 		// The Doom and demo path, and the only outcome here that is not a diagnostic.
-		Printf("AuxMenuView: no %s class - not the full Selaco, second-screen PDA unavailable\n", MenuPdaClassName);
-		MenuAbsent = true;
+		Printf("AuxLiveCodex: no %s class - not the full Selaco, second-screen PDA unavailable\n", LivePdaClassName);
+		LiveAbsent = true;
 		return false;
 	}
 
@@ -218,39 +218,39 @@ static bool MenuResolve()
 	// ignoreUIScaling exist.
 	if (!cls->IsDescendantOf(RUNTIME_CLASS(DMenu)) || !cls->IsDescendantOf(FName(MenuClassName, true)))
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: %s is not a %s, second-screen PDA disabled\n",
-			MenuPdaClassName, MenuClassName);
-		MenuBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: %s is not a %s, second-screen PDA disabled\n",
+			LivePdaClassName, MenuClassName);
+		LiveBroken = true;
 		return false;
 	}
 
 	PClass *viewCls = PClass::FindClass(ViewClassName);
 	if (viewCls == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: no %s class, second-screen PDA disabled\n", ViewClassName);
-		MenuBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: no %s class, second-screen PDA disabled\n", ViewClassName);
+		LiveBroken = true;
 		return false;
 	}
 
 	FCanvas *canvas = GetTextureCanvas(AuxCanvasName);
 	if (canvas == nullptr || canvas->Tex == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: %s is not a canvas texture, second-screen PDA disabled\n", AuxCanvasName);
-		MenuBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: %s is not a canvas texture, second-screen PDA disabled\n", AuxCanvasName);
+		LiveBroken = true;
 		return false;
 	}
 
 	static const EArgKind CalcScaleArgs[] = { Arg_Int, Arg_Int, Arg_Vector2 };
 	static const EArgKind ViewLayoutArgs[] = { Arg_Vector2, Arg_Float, Arg_Bool };
 
-	int calcScaleRegs = 0, menuLayoutRegs = 0, viewLayoutRegs = 0;
+	int calcScaleRegs = 0, liveLayoutRegs = 0, viewLayoutRegs = 0;
 	// calcScale(int, int, Vector2) is FIVE registers for three declared arguments - a Vector2 is two
 	// (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxDesktopView", CalcScaleArgs, 3, &calcScaleRegs);
-	VMFunction *funcMenuLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", "AuxDesktopView", nullptr, 0, &menuLayoutRegs) : nullptr;
-	VMFunction *funcViewLayout = funcMenuLayout != nullptr
-		? ResolveMethod(viewCls, "layout", "AuxDesktopView", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxStandbyCodex", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcLiveLayout = funcCalcScale != nullptr
+		? ResolveMethod(cls, "layout", "AuxStandbyCodex", nullptr, 0, &liveLayoutRegs) : nullptr;
+	VMFunction *funcViewLayout = funcLiveLayout != nullptr
+		? ResolveMethod(viewCls, "layout", "AuxStandbyCodex", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
 
 	PField *fldMainView = funcViewLayout != nullptr ? ResolveField(cls, "mainView", Field_ViewPtr, viewCls) : nullptr;
 	PField *fldUIScaling = fldMainView != nullptr ? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls) : nullptr;
@@ -258,7 +258,7 @@ static bool MenuResolve()
 	PField *fldDrawCanvas = fldIgnore != nullptr ? ResolveField(cls, "drawCanvas", Field_CanvasPtr, viewCls) : nullptr;
 
 	// THE COUPLING, and the one OPTIONAL group here. currentAppWindow (pda_menu.zs:49) is what mode 3 reads
-	// to follow the live codex; without it the dashboard just keeps using aux_dashboard_app. Resolved after
+	// to follow the live codex; without it the dashboard just keeps using aux_standby_app. Resolved after
 	// the required group so a miss cannot be mistaken for one, and excluded from `ok` below so it cannot
 	// disable the second-screen PDA - losing the panel entirely to save a nicety is the wrong trade.
 	PClass *appWindowCls = PClass::FindClass(AppWindowClassName);
@@ -271,36 +271,36 @@ static bool MenuResolve()
 	{
 		// ResolveMethod/ResolveField already printed which symbol failed; all that is left is to record
 		// it against mode 4. Neither resolver latches anything of its own - see i_auxvmreflect.h.
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: %s does not look the way this code was written against, "
-			"second-screen PDA disabled\n", MenuPdaClassName);
-		MenuBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: %s does not look the way this code was written against, "
+			"second-screen PDA disabled\n", LivePdaClassName);
+		LiveBroken = true;
 		return false;
 	}
 
-	MenuPdaClass = cls;
-	MenuViewClass = viewCls;
-	MenuCanvas = canvas;
-	FuncMenuCalcScale = funcCalcScale;
-	FuncMenuLayout = funcMenuLayout;
-	FuncMenuViewLayout = funcViewLayout;
-	MenuCalcScaleRegs = calcScaleRegs;
-	MenuViewLayoutRegs = viewLayoutRegs;
-	FldMenuMainView = fldMainView;
-	FldMenuUIScaling = fldUIScaling;
-	FldMenuIgnoreUIScaling = fldIgnore;
-	FldMenuDrawCanvas = fldDrawCanvas;
-	MenuAppWindowClass = fldCurrentApp != nullptr ? appWindowCls : nullptr;
-	FldMenuCurrentAppWindow = fldCurrentApp;
-	MenuResolved = true;
+	LivePdaClass = cls;
+	LiveCodexClass = viewCls;
+	LiveCanvas = canvas;
+	FuncLiveCalcScale = funcCalcScale;
+	FuncLiveLayout = funcLiveLayout;
+	FuncLiveCodexLayout = funcViewLayout;
+	LiveCalcScaleRegs = calcScaleRegs;
+	LiveCodexLayoutRegs = viewLayoutRegs;
+	FldLiveMainView = fldMainView;
+	FldLiveUIScaling = fldUIScaling;
+	FldLiveIgnoreUIScaling = fldIgnore;
+	FldLiveDrawCanvas = fldDrawCanvas;
+	LiveAppWindowClass = fldCurrentApp != nullptr ? appWindowCls : nullptr;
+	FldLiveCurrentAppWindow = fldCurrentApp;
+	LiveResolved = true;
 
 	if (fldCurrentApp == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: cannot read %s.currentAppWindow - the dashboard will not "
-			"follow the live codex and will stay on aux_dashboard_app\n", MenuPdaClassName);
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: cannot read %s.currentAppWindow - the dashboard will not "
+			"follow the live codex and will stay on aux_standby_app\n", LivePdaClassName);
 	}
 
-	Printf("AuxMenuView: %s resolved, second-screen PDA ready on %s at %gx%g\n",
-		MenuPdaClassName, AuxCanvasName, AuxCanvasWidth, AuxCanvasHeight);
+	Printf("AuxLiveCodex: %s resolved, second-screen PDA ready on %s at %gx%g\n",
+		LivePdaClassName, AuxCanvasName, AuxCanvasWidth, AuxCanvasHeight);
 	return true;
 }
 
@@ -322,26 +322,26 @@ static bool MenuResolve()
 // single funnel every app switch in the PDA goes through - the six openX() helpers at :515-609, the tab
 // handler at :880-900, and the click-to-raise in mouseDownEvent at :961 - and it is repaired to the topmost
 // remaining window when one is closed (:935-945). Its CLASS is what is stored, because the class is what
-// DashboardApps keys on and because a class pointer stays valid for the life of the process while the
+// StandbyApps keys on and because a class pointer stays valid for the life of the process while the
 // instance does not.
-static void MenuSampleCurrentApp()
+static void LiveSampleCurrentApp()
 {
-	if (FldMenuCurrentAppWindow == nullptr || MenuAppWindowClass == nullptr || CurrentMenu == nullptr)
+	if (FldLiveCurrentAppWindow == nullptr || LiveAppWindowClass == nullptr || CurrentMenu == nullptr)
 		return;
 
-	DObject *app = ReadObjectField(CurrentMenu, FldMenuCurrentAppWindow);
+	DObject *app = ReadObjectField(CurrentMenu, FldLiveCurrentAppWindow);
 
 	// The field's DECLARED type was proved to be a PDAAppWindow when it was resolved; this proves the object
 	// in it is one. Null is normal - handleControl clears it when the last window closes (pda_menu.zs:936) -
 	// and is deliberately NOT propagated: "the player closed every window" is not a new app choice, so the
 	// last real one stands.
-	if (app != nullptr && !(app->ObjectFlags & OF_EuthanizeMe) && app->IsKindOf(MenuAppWindowClass))
-		SetMenuLastAppClass(app->GetClass());
+	if (app != nullptr && !(app->ObjectFlags & OF_EuthanizeMe) && app->IsKindOf(LiveAppWindowClass))
+		SetLiveLastAppClass(app->GetClass());
 }
 
 // Is the player's own PDA the current menu? Null-safe on every game: PClass::FindClass returns nullptr
-// on Doom and on the demo, MenuAbsent latches, and this answers false forever after.
-static bool MenuIsPdaOpen()
+// on Doom and on the demo, LiveAbsent latches, and this answers false forever after.
+static bool LiveIsPdaOpen()
 {
 	bool open = false;
 
@@ -351,10 +351,10 @@ static bool MenuIsPdaOpen()
 	// A descendant counts: PDAMenu3 is what Selaco opens today, and a subclass would still be the
 	// player's PDA. A modal child menu pushed ON TOP of it is NOT a descendant, so mode 4 stands down
 	// for it and that child draws on the main screen - which is where a confirmation prompt belongs.
-	if (!MenuAbsent && !MenuBroken && CurrentMenu != nullptr && menuactive != MENU_Off
-		&& (MenuResolved || MenuResolve()))
+	if (!LiveAbsent && !LiveBroken && CurrentMenu != nullptr && menuactive != MENU_Off
+		&& (LiveResolved || LiveResolve()))
 	{
-		open = CurrentMenu->IsKindOf(MenuPdaClass);
+		open = CurrentMenu->IsKindOf(LivePdaClass);
 	}
 
 	// SAMPLED HERE, which is the only place that knows CurrentMenu really is a PDAMenu3 and is called on
@@ -364,39 +364,39 @@ static bool MenuIsPdaOpen()
 	// because it runs after the tick that could have switched apps.
 	//
 	// PURE MODE 3 DOES NOT SAMPLE, and that is a deliberate boundary rather than an oversight: nothing calls
-	// this on a mode-3 frame, and making mode 3 call it would drag mode 4's lazy MenuResolve - and therefore
+	// this on a mode-3 frame, and making mode 3 call it would drag mode 4's lazy LiveResolve - and therefore
 	// mode 4's latches - onto mode 3's per-frame path, which is exactly the cross-contamination the split
-	// between these two files is arranged to avoid. In pure mode 3 the dashboard stays on aux_dashboard_app.
+	// between these two files is arranged to avoid. In pure mode 3 the dashboard stays on aux_standby_app.
 	// Mode 5 is the shipping combination and the one the coupling is for.
 	if (open)
-		MenuSampleCurrentApp();
+		LiveSampleCurrentApp();
 
 	// Forget the tuned instance the moment the PDA stops being the current menu, and this is NOT tidying -
-	// it is what makes the pointer comparison in the guard safe. MenuTuned is compared by ADDRESS, and a
+	// it is what makes the pointer comparison in the guard safe. LiveTuned is compared by ADDRESS, and a
 	// new PDAMenu3 is very likely to land on the freed one's address: same class, same size, same
-	// allocator. A stale MenuTuned would therefore make the SECOND and every subsequent open skip
-	// MenuTune entirely and draw a desktop that was never relaid out - the clipped tab strip, back again,
+	// allocator. A stale LiveTuned would therefore make the SECOND and every subsequent open skip
+	// LiveTune entirely and draw a desktop that was never relaid out - the clipped tab strip, back again,
 	// but only after the first open, which is exactly the kind of bug that gets called intermittent.
 	//
-	// Cleared HERE rather than on an edge inside I_AuxMenuViewFrame on purpose: in mode 5 that function
+	// Cleared HERE rather than on an edge inside I_AuxLiveCodexFrame on purpose: in mode 5 that function
 	// is not called at all on frames the PDA is shut, so an edge there would never fire and the bug would
 	// be reachable only in the combined mode.
 	if (!open)
-		MenuTuned = nullptr;
+		LiveTuned = nullptr;
 
 	return open;
 }
 
 // Exported so the combined mode (5) can ask who should own the canvas this frame without any of mode 4's
-// state having to be unpicked. Mode 3 (the read-only dashboard) and mode 4 (the live PDA) share only the
+// state having to be unpicked. Mode 3 (the standby codex) and mode 4 (the live codex) share only the
 // canvas and the readback flag, so the dispatcher in i_auxpanel.cpp just resolves to one of them per
 // frame; both edges then fall out of the existing mode-change trigger.
 //
 // Note this has a deliberate side effect - it forgets a tuned menu instance when the PDA is shut - so it
 // must be called every frame in any mode that uses it, which the dispatcher does.
-bool I_AuxMenuViewIsPdaOpen()
+bool I_AuxLiveCodexIsPdaOpen()
 {
-	return MenuIsPdaOpen();
+	return LiveIsPdaOpen();
 }
 
 // Make the menu lay itself out for a 1240x1080 panel with a 1920-wide design, once per PDA instance.
@@ -450,36 +450,36 @@ bool I_AuxMenuViewIsPdaOpen()
 // cannot is calling the relayout speculatively. See the caller in FAuxMenuRedirect for the compare.
 //
 // `retune` says this instance is already tuned and only the zoom moved, which changes ONE thing: an abort
-// must not latch MenuBroken. See the catch.
-static bool MenuTune(DObject *menu, double zoom, bool retune)
+// must not latch LiveBroken. See the catch.
+static bool LiveTune(DObject *menu, double zoom, bool retune)
 {
 	// Read the three handles before writing them so the whole tune can be undone if something aborts
 	// part way through. All three, not just ui_scaling: restoring a GUESSED default would be a
 	// different write rather than an undo. Leaving a half-tuned menu behind is the one failure here
 	// that would follow the player onto the MAIN screen, because the writes that stop the game
 	// relaying it out are the same writes that would stop it repairing itself.
-	void *savedUIScaling = *(void **)((uint8_t *)menu + FldMenuUIScaling->Offset);
-	DObject *savedDrawCanvas = *(DObject **)((uint8_t *)menu + FldMenuDrawCanvas->Offset);
-	const bool savedIgnoreUIScaling = *(bool *)((uint8_t *)menu + FldMenuIgnoreUIScaling->Offset);
+	void *savedUIScaling = *(void **)((uint8_t *)menu + FldLiveUIScaling->Offset);
+	DObject *savedDrawCanvas = *(DObject **)((uint8_t *)menu + FldLiveDrawCanvas->Offset);
+	const bool savedIgnoreUIScaling = *(bool *)((uint8_t *)menu + FldLiveIgnoreUIScaling->Offset);
 
 	try
 	{
-		DObject *mainView = ReadObjectField(menu, FldMenuMainView);
-		if (mainView == nullptr || mainView->GetClass() != MenuViewClass)
+		DObject *mainView = ReadObjectField(menu, FldLiveMainView);
+		if (mainView == nullptr || mainView->GetClass() != LiveCodexClass)
 		{
 			// Exactly UIView, not merely a subclass: layout() was resolved against UIView's vtable and a
 			// subclass could override it with something this code has not read.
-			Printf(TEXTCOLOR_YELLOW "AuxMenuView: %s.mainView is not a plain %s, second-screen PDA disabled\n",
-				MenuPdaClassName, ViewClassName);
-			MenuBroken = true;
+			Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: %s.mainView is not a plain %s, second-screen PDA disabled\n",
+				LivePdaClassName, ViewClassName);
+			LiveBroken = true;
 			return false;
 		}
 
 		// Stop the game relaying the menu out from under us, THEN relayout it ourselves. In this order,
 		// so that nothing between the two can act on a half-updated state.
-		*(DObject **)((uint8_t *)menu + FldMenuDrawCanvas->Offset) = MenuCanvas;
-		GC::WriteBarrier(menu, MenuCanvas);
-		*(bool *)((uint8_t *)menu + FldMenuIgnoreUIScaling->Offset) = true;
+		*(DObject **)((uint8_t *)menu + FldLiveDrawCanvas->Offset) = LiveCanvas;
+		GC::WriteBarrier(menu, LiveCanvas);
+		*(bool *)((uint8_t *)menu + FldLiveIgnoreUIScaling->Offset) = true;
 
 		// NARROW THE TAB STRIP BEFORE THE RELAYOUT BELOW, AND NOWHERE ELSE. It only writes fields and
 		// pins, so it needs a layout pass to take effect - and the pass it needs is the one already three
@@ -502,12 +502,12 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 		// It fails soft and latches nothing, so there is no return value worth testing, and it swallows
 		// its own aborts - which matters here specifically, because the catch below this would otherwise
 		// read one as a failed tune and latch mode 4 off over a cosmetic nicety.
-		TightenTabStrip(menu, MenuPdaClass, MenuViewClass);
+		TightenTabStrip(menu, LivePdaClass, LiveCodexClass);
 
 		// calcScale's read is `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS
 		// the 1.0 path. Safe without a write barrier: a native struct pointer is not an object pointer
 		// (zcc_compile.cpp:2208), so the GC does not trace this field and nulling it orphans nothing.
-		*(void **)((uint8_t *)menu + FldMenuUIScaling->Offset) = nullptr;
+		*(void **)((uint8_t *)menu + FldLiveUIScaling->Offset) = nullptr;
 
 		// calcScale(int screenWidth, int screenHeight, Vector2 baselineResolution), then the rest of
 		// layoutChange's body in its own order (pda_menu.zs:777-781). calcScale is CALLED rather than
@@ -525,12 +525,12 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 		{
 			VMValue params[] = { menu, (int)AuxCanvasWidth, (int)AuxCanvasHeight,
 				DesktopDesignWidth, DesktopBaselineHeight / zoom };
-			VMCall(FuncMenuCalcScale, params, MenuCalcScaleRegs, nullptr, 0);
+			VMCall(FuncLiveCalcScale, params, LiveCalcScaleRegs, nullptr, 0);
 		}
 
 		{
 			VMValue selfOnly[] = { menu };
-			VMCall(FuncMenuLayout, selfOnly, 1, nullptr, 0);
+			VMCall(FuncLiveLayout, selfOnly, 1, nullptr, 0);
 		}
 
 		// mainView.layout() with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel
@@ -539,7 +539,7 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 		// would overwrite the scale calcScale just installed.
 		{
 			VMValue viewParams[] = { mainView, 0.0, 0.0, -1.0, (int)0 };
-			VMCall(FuncMenuViewLayout, viewParams, MenuViewLayoutRegs, nullptr, 0);
+			VMCall(FuncLiveCodexLayout, viewParams, LiveCodexLayoutRegs, nullptr, 0);
 		}
 	}
 	catch (const std::exception &e)
@@ -553,11 +553,11 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 		// On a RETUNE these three reads happened while the menu was already tuned, so all three writes
 		// put back the tuned values and the block is a no-op. That is correct - undoing a second tune
 		// leaves the first one standing - but it is worth knowing it is not restoring anything pristine.
-		*(DObject **)((uint8_t *)menu + FldMenuDrawCanvas->Offset) = savedDrawCanvas;
+		*(DObject **)((uint8_t *)menu + FldLiveDrawCanvas->Offset) = savedDrawCanvas;
 		if (savedDrawCanvas != nullptr)
 			GC::WriteBarrier(menu, savedDrawCanvas);
-		*(bool *)((uint8_t *)menu + FldMenuIgnoreUIScaling->Offset) = savedIgnoreUIScaling;
-		*(void **)((uint8_t *)menu + FldMenuUIScaling->Offset) = savedUIScaling;
+		*(bool *)((uint8_t *)menu + FldLiveIgnoreUIScaling->Offset) = savedIgnoreUIScaling;
+		*(void **)((uint8_t *)menu + FldLiveUIScaling->Offset) = savedUIScaling;
 
 		if (retune)
 		{
@@ -566,47 +566,47 @@ static bool MenuTune(DObject *menu, double zoom, bool retune)
 			// hand the player a PDA laid out for 1240x1080 drawn over the game on the MAIN screen, with no
 			// way to undo it. Reported and left where it is instead, laid out for whatever the abort got to.
 			// The caller still advances the tuned zoom, so this is said once per value rather than per frame.
-			Printf(TEXTCOLOR_YELLOW "AuxMenuView: relaying out %s at zoom %g aborted (%s), the panel keeps "
-				"the layout it had\n", MenuPdaClassName, zoom, e.what());
+			Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: relaying out %s at zoom %g aborted (%s), the panel keeps "
+				"the layout it had\n", LivePdaClassName, zoom, e.what());
 			return true;
 		}
 
-		Printf(TEXTCOLOR_YELLOW "AuxMenuView: relaying out %s aborted (%s), second-screen PDA disabled\n",
-			MenuPdaClassName, e.what());
-		MenuBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxLiveCodex: relaying out %s aborted (%s), second-screen PDA disabled\n",
+			LivePdaClassName, e.what());
+		LiveBroken = true;
 		return false;
 	}
 
 	// THE FIGURES ARE THE ONES ASKED FOR, and the note is what corrects them. Mode 3 reads the installed
 	// scale back out of lastUIScale; mode 4 does not resolve that field, so rather than print a number that
-	// is silently a guess this prints the request and lets DashboardZoomLimitNote name whichever of
+	// is silently a guess this prints the request and lets CodexZoomLimitNote name whichever of
 	// calcScale's dead bands - its 0.599 floor, its 1.0 snap window, its 2.0 ceiling - swallowed it.
 	//
 	// The parenthesised token is a REVISION SENTINEL, deliberately unique to this change so it can be
 	// grepped out of the built .so to prove which revision is actually packaged - a size match has twice
 	// passed against a stale APK on this project.
-	Printf("AuxMenuView: %s relaid out for %s at zoom %g, logical box %gx%g at scale %g%s "
+	Printf("AuxLiveCodex: %s relaid out for %s at zoom %g, logical box %gx%g at scale %g%s "
 		"(aux-menu-zoom r1)\n",
-		MenuPdaClassName, AuxCanvasName, zoom, DesktopDesignWidth / zoom, DesktopBaselineHeight / zoom,
-		zoom * AuxCanvasWidth / DesktopDesignWidth, DashboardZoomLimitNote(zoom));
+		LivePdaClassName, AuxCanvasName, zoom, DesktopDesignWidth / zoom, DesktopBaselineHeight / zoom,
+		zoom * AuxCanvasWidth / DesktopDesignWidth, CodexZoomLimitNote(zoom));
 	return true;
 }
 
-// Called once per frame from I_AuxPanelFrame while aux_canvas_zscript is 4, BEFORE screen->BeginFrame.
+// Called once per frame from I_AuxPanelFrame while aux_codex_mode is 4, BEFORE screen->BeginFrame.
 //
 // Mode 4 has no phase 1: its draw is issued from DrawOverlays later in the same frame, not from here.
 // All this does is arm the guard, decide whether that draw publishes, and blank the panel when the PDA
-// closes. Everything expensive is behind MenuIsPdaOpen, so a frame with no PDA open costs a latched
+// closes. Everything expensive is behind LiveIsPdaOpen, so a frame with no PDA open costs a latched
 // bool, a null test, a menuactive compare and one IsKindOf.
-void I_AuxMenuViewFrame()
+void I_AuxLiveCodexFrame()
 {
-	const bool open = MenuIsPdaOpen();
-	MenuArmed = open;
+	const bool open = LiveIsPdaOpen();
+	LiveArmed = open;
 
-	if (open != MenuWasOpen)
+	if (open != LiveWasOpen)
 	{
-		MenuWasOpen = open;
-		MenuFramesSincePublish = 0;
+		LiveWasOpen = open;
+		LiveFramesSincePublish = 0;
 
 		if (!open)
 		{
@@ -622,8 +622,8 @@ void I_AuxMenuViewFrame()
 			I_AuxPanelRequestReadback();
 
 			// A new menu landing on the recycled address of this one must still be tuned.
-			MenuTuned = nullptr;
-			MenuWantPublish = false;
+			LiveTuned = nullptr;
+			LiveWantPublish = false;
 			return;
 		}
 	}
@@ -639,23 +639,23 @@ void I_AuxMenuViewFrame()
 	// intended 2-frame period into 4. Written this way the pending test and the interval are independent
 	// limits and the slower of the two wins, which is what "interval" is supposed to mean.
 	extern bool I_AuxPanelReadbackPending();
-	++MenuFramesSincePublish;
-	MenuWantPublish = open && !I_AuxPanelReadbackPending()
-		&& MenuFramesSincePublish >= AuxMenuPublishInterval;
+	++LiveFramesSincePublish;
+	LiveWantPublish = open && !I_AuxPanelReadbackPending()
+		&& LiveFramesSincePublish >= AuxLivePublishInterval;
 
-	if (MenuWantPublish)
-		MenuFramesSincePublish = 0;
+	if (LiveWantPublish)
+		LiveFramesSincePublish = 0;
 }
 
 FAuxMenuRedirect::FAuxMenuRedirect()
 {
-	const bool armed = MenuArmed;
-	MenuArmed = false;
+	const bool armed = LiveArmed;
+	LiveArmed = false;
 
 	// Re-test rather than trusting the arm. The arm only says the panel is live and mode 4 is selected;
 	// whether the PDA is the current menu can have changed since the top of the frame, and getting that
 	// wrong in the false direction sends the game's real menu to a screen nobody reads it back from.
-	if (!armed || !MenuIsPdaOpen() || MenuCanvas == nullptr)
+	if (!armed || !LiveIsPdaOpen() || LiveCanvas == nullptr)
 		return;
 
 	// Before the swap and before M_Drawer, because M_Drawer is what reads it (menu.cpp:903). Written
@@ -682,7 +682,7 @@ FAuxMenuRedirect::FAuxMenuRedirect()
 	menuactive = MENU_On;
 
 	Saved = twod;
-	Canvas = MenuCanvas;
+	Canvas = LiveCanvas;
 	twod = &Canvas->Drawer;
 
 	// The two things Begin() does are both required, and neither is obvious. isIn2D is per drawer and
@@ -695,35 +695,35 @@ FAuxMenuRedirect::FAuxMenuRedirect()
 	Redirected = true;
 
 	// STRICTLY EDGE-TRIGGERED ON THE ZOOM, and this compare is the single most load-bearing line in the
-	// mode. Mode 4 deliberately has NO FProjectionScope, so MenuTune's mainView.layout() reaches
+	// mode. Mode 4 deliberately has NO FProjectionScope, so LiveTune's mainView.layout() reaches
 	// PDAAppWindow.layout -> savePos -> SendNetworkEvent("pdaAppPos:...") for real - into the player's
 	// savegame and the demo stream, which is exactly what it should do for the player's own actions and
 	// exactly what must not happen because we felt like re-reading a cvar. So the zoom the live layout was
 	// built with is remembered and only a CHANGE to it re-tunes; an unchanged zoom costs one cvar read, one
 	// clamp and two compares, calls no script and emits nothing.
 	//
-	// DashboardZoom never returns NaN (i_auxvmreflect.h), which this relies on: NaN != NaN is true, so a
+	// CodexZoom never returns NaN (i_auxvmreflect.h), which this relies on: NaN != NaN is true, so a
 	// NaN would be a permanent edge and therefore a relayout and a network event on every single frame.
-	const double zoom = DashboardZoom();
-	if (MenuTuned != CurrentMenu || MenuTunedZoom != zoom)
+	const double zoom = CodexZoom();
+	if (LiveTuned != CurrentMenu || LiveTunedZoom != zoom)
 	{
 		// A zoom change on the instance we already tuned, as opposed to a first tune, which is the only
-		// thing MenuTune treats differently - it must not latch the mode off on an abort.
-		const bool retune = MenuTuned == CurrentMenu;
+		// thing LiveTune treats differently - it must not latch the mode off on an abort.
+		const bool retune = LiveTuned == CurrentMenu;
 
 		// Inside the redirect on purpose: anything the relayout reads or draws through Screen.* then
 		// sees the panel rather than the main screen, and is legal because Begin() has run.
-		if (MenuTune(CurrentMenu, zoom, retune))
+		if (LiveTune(CurrentMenu, zoom, retune))
 		{
-			MenuTuned = CurrentMenu;
+			LiveTuned = CurrentMenu;
 
 			// Advanced whether the relayout succeeded or aborted, so a zoom that aborts is tried once
 			// rather than on every frame the player leaves it set.
-			MenuTunedZoom = zoom;
+			LiveTunedZoom = zoom;
 		}
 		else
 		{
-			MenuWantPublish = false;   // MenuBroken is latched; discard this frame rather than show it
+			LiveWantPublish = false;   // LiveBroken is latched; discard this frame rather than show it
 		}
 	}
 }
@@ -740,7 +740,7 @@ FAuxMenuRedirect::~FAuxMenuRedirect()
 		twod->End();
 		twod = Saved;
 
-		if (MenuWantPublish)
+		if (LiveWantPublish)
 		{
 			// The _Screen natives do not mark the texture, so this is the only thing that gets the canvas
 			// into the AllCanvases loop at all.
@@ -762,7 +762,7 @@ FAuxMenuRedirect::~FAuxMenuRedirect()
 			Canvas->Drawer.Clear();
 		}
 
-		MenuWantPublish = false;
+		LiveWantPublish = false;
 	}
 
 	// Only if it is STILL the current menu. A menu drawer can close its own menu, and M_ClearMenus
@@ -777,44 +777,44 @@ FAuxMenuRedirect::~FAuxMenuRedirect()
 // Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
 // i_auxvmreflect.cpp for why it exists and when it runs.
 //
-// MenuResolved is the one that matters most here: MenuIsPdaOpen short-circuits MenuResolve() on it, so
+// LiveResolved is the one that matters most here: LiveIsPdaOpen short-circuits LiveResolve() on it, so
 // left set it keeps all eleven pointers below in use against a script that has been recompiled - and the
 // four PFields are used as raw byte offsets to WRITE through, which is the widest corruption primitive
 // this file has. Nothing here does VM work; every line is a store.
-void I_AuxMenuViewForgetScriptState()
+void I_AuxLiveCodexForgetScriptState()
 {
 	// Cleared, unlike the in-session behaviour where a latched verdict stays latched, because a restart can
 	// bring up a different wad set and the old verdict is about a game that is no longer running.
-	MenuAbsent = false;
-	MenuBroken = false;
-	MenuResolved = false;
+	LiveAbsent = false;
+	LiveBroken = false;
+	LiveResolved = false;
 
-	MenuPdaClass = nullptr;
-	MenuViewClass = nullptr;
-	FuncMenuCalcScale = nullptr;
-	FuncMenuLayout = nullptr;
-	FuncMenuViewLayout = nullptr;
-	MenuCalcScaleRegs = 0;
-	MenuViewLayoutRegs = 0;
-	FldMenuMainView = nullptr;
-	FldMenuUIScaling = nullptr;
-	FldMenuIgnoreUIScaling = nullptr;
-	FldMenuDrawCanvas = nullptr;
-	MenuAppWindowClass = nullptr;
-	FldMenuCurrentAppWindow = nullptr;
+	LivePdaClass = nullptr;
+	LiveCodexClass = nullptr;
+	FuncLiveCalcScale = nullptr;
+	FuncLiveLayout = nullptr;
+	FuncLiveCodexLayout = nullptr;
+	LiveCalcScaleRegs = 0;
+	LiveCodexLayoutRegs = 0;
+	FldLiveMainView = nullptr;
+	FldLiveUIScaling = nullptr;
+	FldLiveIgnoreUIScaling = nullptr;
+	FldLiveDrawCanvas = nullptr;
+	LiveAppWindowClass = nullptr;
+	FldLiveCurrentAppWindow = nullptr;
 
 	// The canvas is a DObject owned by the AUXCANVAS FCanvasTexture, which D_Cleanup's TexMan.DeleteAll()
 	// destroys. Left set, FAuxMenuRedirect would point the global twod at a freed F2DDrawer for the whole
 	// of M_Drawer, so every 2D command the engine's menu system issues would land in freed memory.
-	MenuCanvas = nullptr;
+	LiveCanvas = nullptr;
 
-	MenuTuned = nullptr;
-	MenuTunedZoom = 1.0;
-	MenuArmed = false;
-	MenuWantPublish = false;
+	LiveTuned = nullptr;
+	LiveTunedZoom = 1.0;
+	LiveArmed = false;
+	LiveWantPublish = false;
 
 	// Cleared so the first post-restart frame does not see a close edge for a PDA that belonged to the
 	// previous session and issue a canvas clear and a readback against the stale canvas.
-	MenuWasOpen = false;
-	MenuFramesSincePublish = 0;
+	LiveWasOpen = false;
+	LiveFramesSincePublish = 0;
 }

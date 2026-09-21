@@ -483,7 +483,7 @@ static bool ParseProfileFile(const char *path, ProfileSpec &spec, int &outProble
 			if (ParseDoubleValue(v, spec.screenSize)) spec.screenSizeSet = true;
 			else
 			{
-				Printf(TEXTCOLOR_YELLOW "AuxProfile: %s:%d: screen_size '%s' is not a number - aux_dashboard_zoom left alone\n",
+				Printf(TEXTCOLOR_YELLOW "AuxProfile: %s:%d: screen_size '%s' is not a number - aux_codex_size left alone\n",
 					path, lineno, v);
 				outProblems++;
 			}
@@ -659,9 +659,9 @@ bool AuxProfileApply(const char *name, AuxProfileResult &result)
 
 	if (spec.screenSizeSet)
 	{
-		if (SetNamedCVar("aux_dashboard_zoom", spec.screenSize, "screen_size"))
+		if (SetNamedCVar("aux_codex_size", spec.screenSize, "screen_size"))
 		{
-			Printf("AuxProfile: screen_size=%g (set) -> aux_dashboard_zoom=%g\n",
+			Printf("AuxProfile: screen_size=%g (set) -> aux_codex_size=%g\n",
 				spec.screenSize, spec.screenSize);
 			tally.cvarsWritten++;
 		}
@@ -672,7 +672,7 @@ bool AuxProfileApply(const char *name, AuxProfileResult &result)
 	}
 	else
 	{
-		Printf("AuxProfile: screen_size=<unset> -> aux_dashboard_zoom left alone\n");
+		Printf("AuxProfile: screen_size=<unset> -> aux_codex_size left alone\n");
 	}
 
 	if (spec.maxFpsSet)

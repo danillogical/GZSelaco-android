@@ -1,5 +1,5 @@
 /*
-** i_auxcodexview.cpp
+** i_auxstandbycodex.cpp
 ** Draws Selaco's whole PDA desktop onto the AUXCANVAS offscreen canvas, non-modally.
 **
 **---------------------------------------------------------------------------
@@ -49,9 +49,9 @@
 ** i_auxvmreflect.h.
 **
 ** ---------------------------------------------------------------------------------------------
-** MODE 3: THE WHOLE PDA DESKTOP (PDAMenu3), the read-only dashboard.
+** MODE 3: THE WHOLE PDA DESKTOP (PDAMenu3), the standby codex.
 **
-** THE DESKTOP CANNOT DODGE THE PLAYER-STATE WRITES BY CONSTRUCTION, so the engine has to refuse them.
+** THE STANDBY CODEX CANNOT DODGE THE PLAYER-STATE WRITES BY CONSTRUCTION, so the engine has to refuse them.
 ** Its app windows are necessarily parented to desktopView, and PDAReaderWindow.init ends with
 ** EventHandler.SendNetworkEvent("pdaUnreadClear") (reader.zs:538) with no branch that skips it - so
 ** merely CONSTRUCTING the desktop wipes the player's unread-datalog badges. Hence FProjectionScope
@@ -95,8 +95,8 @@
 ** is then 1920 x 1672.3 logical at scale 0.6458: full design width, extra vertical room, no clipping.
 **
 ** AND THAT IS STILL TOO SMALL TO READ on a panel this size, which is a physical problem and not a layout
-** one - so aux_dashboard_zoom divides that baseline height, deliberately trading the un-clipped layout for
-** legibility, and it retunes the LIVE desktop without a rebuild. See the block above DesktopRetune for the
+** one - so aux_codex_size divides that baseline height, deliberately trading the un-clipped layout for
+** legibility, and it retunes the LIVE desktop without a rebuild. See the block above StandbyRetune for the
 ** arithmetic and for where the usable range really ends.
 */
 
@@ -132,10 +132,10 @@ using namespace AuxView;
 
 // Mode 3's root: the whole PDA desktop. A UIMenu subclass, not a UIView, which is why it is hosted
 // through its mainView rather than directly - see MODE 3 in the header.
-static const char *const DesktopClassName = "PDAMenu3";
+static const char *const StandbyClassName = "PDAMenu3";
 
 // The tab that selects one of the desktop's apps (tabs.zs:1). Only mode 3's app selection needs it;
-// see SelectDashboardApp.
+// see SelectStandbyApp.
 static const char *const TabClassName = "PDATab";
 
 // Mode 3's two latches, deliberately distinct.
@@ -148,30 +148,30 @@ static const char *const TabClassName = "PDATab";
 //
 // The shared resolvers latch NEITHER of them, which is why they can be used by mode 4 and by the two
 // optional groups here without any of those being able to disable the desktop. Every
-// ResolveMethod/ResolveField failure that genuinely should disable it latches DesktopBroken at the
+// ResolveMethod/ResolveField failure that genuinely should disable it latches StandbyBroken at the
 // call site instead; see THE RESOLVERS LATCH NOTHING in i_auxvmreflect.h.
-static bool DesktopAbsent = false;
-static bool DesktopBroken = false;
+static bool StandbyAbsent = false;
+static bool StandbyBroken = false;
 
 // ---------------------------------------------------------------------------------------------
 // MODE 3: the whole PDA desktop. One construction, three field writes.
 // ---------------------------------------------------------------------------------------------
 
 // The live desktop and the view we actually draw. Rooted by the marker registered in
-// BuildDesktopView; mainView is a field of the menu so the GC would reach it anyway, but it is marked
+// BuildStandbyView; mainView is a field of the menu so the GC would reach it anyway, but it is marked
 // explicitly so that does not have to be reasoned about.
-static DObject *DesktopMenu = nullptr;
-static DObject *DesktopRootView = nullptr;
+static DObject *StandbyMenu = nullptr;
+static DObject *StandbyRootView = nullptr;
 
 // The codex generation the current desktop was built against.
-static unsigned DesktopGeneration = 0;
+static unsigned StandbyGeneration = 0;
 
-static VMFunction *FuncDesktopDraw = nullptr;
-static VMFunction *FuncDesktopDrawSubviews = nullptr;
+static VMFunction *FuncStandbyDraw = nullptr;
+static VMFunction *FuncStandbyDrawSubviews = nullptr;
 
 // The AUXCANVAS handle, held here rather than shared with mode 4's so the two paths have no mutable
 // state in common and a failure in one cannot disturb the other.
-static FCanvas *DesktopCanvas = nullptr;
+static FCanvas *StandbyCanvas = nullptr;
 
 // Selaco's PDAMenu3.init writes the engine's menuactive global (pda_menu.zs:82; menuactive is
 // menu.cpp:97, exported at :1059) because on the main screen it really is opening a menu. The engine
@@ -203,10 +203,10 @@ static bool SetViewAlpha(DObject *view, PClass *viewCls, const PField *alphaFiel
 }
 
 // ---------------------------------------------------------------------------------------------
-// MODE 3: WHICH APP THE DASHBOARD SHOWS - it follows the player's real PDA, and falls back to a cvar.
+// MODE 3: WHICH APP THE STANDBY CODEX SHOWS - it follows the player's real PDA, and falls back to a cvar.
 // ---------------------------------------------------------------------------------------------
 //
-// WHAT THE PANEL IS FOR. The dashboard is a read-only view of the same PDA the player opens on the second
+// WHAT THE PANEL IS FOR. The standby codex is a read-only view of the same PDA the player opens on the second
 // screen in mode 4, so when they close the real PDA on OBJECTIVES the panel should be showing OBJECTIVES.
 // The two are meant to agree.
 //
@@ -216,7 +216,7 @@ static bool SetViewAlpha(DObject *view, PClass *viewCls, const PField *alphaFiel
 //
 //     PDAAppWindow topApp = apps.size() > 0 ? PDAAppWindow(apps[apps.size() - 1]) : null;
 //
-// Sort order is the desktop's z-stacking, not "the app the player was last looking at". So the dashboard
+// Sort order is the desktop's z-stacking, not "the app the player was last looking at". So the standby codex
 // WAS coupled to the real PDA, through the savegame, but to the wrong property of it - and on top of that
 // the restore trusts `order > 0` without ever asking whether the app is UNLOCKED, which is how a save with
 // no invasion tiers ended up displaying INVASION TIERS. That last part is the real defect.
@@ -224,33 +224,33 @@ static bool SetViewAlpha(DObject *view, PClass *viewCls, const PField *alphaFiel
 // SO THIS DOES THREE THINGS, in precedence order:
 //
 //   1. Follow the live codex. Mode 4 samples PDAMenu3.currentAppWindow every frame the player's own PDA is
-//      open (see MenuSampleCurrentApp in i_auxmenuview.cpp) and leaves its CLASS in
-//      AuxView::MenuLastAppClass(). That is the app the player
+//      open (see LiveSampleCurrentApp in i_auxlivecodex.cpp) and leaves its CLASS in
+//      AuxView::LiveLastAppClass(). That is the app the player
 //      last switched to, because switchToAppWindow (pda_menu.zs:735) is the single funnel every switch goes
 //      through - the six openX() helpers, the tab handler at :880-900, and the click-to-raise at :961.
 //
-//   2. Otherwise aux_dashboard_app, defaulting to Datalogs. This is the INITIAL value - what the panel
+//   2. Otherwise aux_standby_app, defaulting to Datalogs. This is the INITIAL value - what the panel
 //      shows before the player has opened their real PDA at all this session.
 //
 //   3. Availability applies to whichever of those wins. A locked app is never displayed; the first
-//      available entry in DashboardApps order is substituted and the substitution is logged.
+//      available entry in StandbyApps order is substituted and the substitution is logged.
 //
-// AND IT IS APPLIED WITHOUT A REBUILD. The dashboard's PDAMenu3 is a SEPARATE INSTANCE from the engine's
+// AND IT IS APPLIED WITHOUT A REBUILD. The standby codex's PDAMenu3 is a SEPARATE INSTANCE from the engine's
 // CurrentMenu, and it is still alive and already built when the player closes theirs - so switching the
 // panel to the app they closed on is a switchToAppWindow plus one redraw, not a fresh init(). See the
-// re-select block in DesktopViewUpdate.
+// re-select block in StandbyViewUpdate.
 //
 // THE FOURTH THING MODE 3 INHERITS FROM init() WHETHER IT WANTS IT OR NOT, after the alpha-0 views, the
 // `usingGP` local and the frozen stat totals, and they all have one cause: the real PDA is opened, read and
 // thrown away in seconds, so nothing in it was written to be re-decided from outside.
 //
 // READ-ONLY, AND THAT IS NOT OPTIONAL. Nothing below writes PDAEntry.appSettings or any other player
-// state. What is overridden is what the dashboard DISPLAYS after init() has restored it, never what was
+// state. What is overridden is what the standby codex DISPLAYS after init() has restored it, never what was
 // restored FROM: FProjectionScope stops the netevent path, but a direct field write through reflection
 // would go straight past it and corrupt the layout of the player's real PDA.
 
 
-// The PDA_APP_ID values (pda_menu.zs:16-27), which is what aux_dashboard_app is set to.
+// The PDA_APP_ID values (pda_menu.zs:16-27), which is what aux_standby_app is set to.
 //
 // HARDCODED BECAUSE THE ENUM IS NOT THERE TO ASK, and this was checked rather than assumed. PDA_APP_ID is
 // a file-scope ZScript enum, so its members are PSymbolConstNumeric in a PNamespace's symbol table - and
@@ -261,7 +261,7 @@ static bool SetViewAlpha(DObject *view, PClass *viewCls, const PField *alphaFiel
 // Fields and methods survive it, which is exactly why everything else in this file is reachable by
 // reflection and these constants are not.
 //
-// What IS validated is the pairing: DashboardApps names the window class and the tab that each number is
+// What IS validated is the pairing: StandbyApps names the window class and the tab that each number is
 // supposed to mean, and both are resolved and type-checked. A renumbered enum would therefore show up as
 // the wrong app being displayed rather than as a crash - and note the numbers are not free to move
 // anyway, because PDAEntry.appSettings[] is indexed by appID and lives in the savegame (pda.zs:29,
@@ -274,33 +274,33 @@ static const int PdaAppObjectives = 6;   // PDA_APP_OBJECTIVES
 static const int PdaAppChallenges = 7;   // PDA_APP_CHALLENGES
 static const int PdaAppManual     = 8;   // PDA_APP_MANUAL
 
-// Which app the dashboard shows BEFORE the player has opened their own PDA this session, and the fallback
+// Which app the standby codex shows BEFORE the player has opened their own PDA this session, and the fallback
 // whenever the live codex has not told us anything usable.
 //
 // DEFAULT PDA_APP_READER - Datalogs, not the Manual. The panel is glanceable rather than read, and
 // datalogs are the thing that changes as the player plays; the manual is static reference text that the
 // player goes looking for deliberately, which is what mode 4 is for.
 //
-// Flags 0, not CVAR_ARCHIVE, the same reasoning as aux_canvas_zscript: an archived
+// Flags 0, not CVAR_ARCHIVE, the same reasoning as aux_codex_mode: an archived
 // version of this would make the panel's starting contents depend on whatever the last profile set.
-CVAR(Int, aux_dashboard_app, PdaAppReader, 0)
+CVAR(Int, aux_standby_app, PdaAppReader, 0)
 
-// The apps the dashboard can show, in FALLBACK PREFERENCE ORDER - if the requested one is locked, the
+// The apps the standby codex can show, in FALLBACK PREFERENCE ORDER - if the requested one is locked, the
 // first available entry from the top wins.
 //
 // The six with a tab in the strip, and only those. PDA_APP_MAP (3) is excluded because APP_CLASSES[3] is
 // null (pda_menu.zs:65) - it has no window class at all, and init() would abort on `new(null)` if a save
 // ever had it open - while PDA_APP_BORGIR and PDA_APP_LEVELINFO are transient tool windows with no tab,
 // so there is no availability flag to read for them.
-struct FDashboardApp
+struct FStandbyApp
 {
-	int AppID;                  // the PDA_APP_ID value aux_dashboard_app is compared against
+	int AppID;                  // the PDA_APP_ID value aux_standby_app is compared against
 	const char *EnumName;       // the constant that value IS, for the log line and for grep
 	const char *ClassName;      // PDAMenu3.APP_CLASSES[AppID] (pda_menu.zs:61-72)
 	const char *TabFieldName;   // the PDATab whose disabled flag IS this app's availability
 };
 
-static const FDashboardApp DashboardApps[] =
+static const FStandbyApp StandbyApps[] =
 {
 	{ PdaAppReader,     "PDA_APP_READER",     "PDAReaderWindow",     "readerButt" },
 	{ PdaAppObjectives, "PDA_APP_OBJECTIVES", "ObjectivesWindow",    "objectivesButt" },
@@ -312,7 +312,7 @@ static const FDashboardApp DashboardApps[] =
 
 // A THIRD latch, with the same split of meaning as the others but a much softer failure: on a broken
 // selection the desktop is left showing exactly what init() restored, which is the behaviour that
-// shipped. That is why no ResolveMethod/ResolveField below latches DesktopBroken - losing the app choice
+// shipped. That is why no ResolveMethod/ResolveField below latches StandbyBroken - losing the app choice
 // must not lose the desktop.
 static bool AppSelectResolved = false;
 static bool AppSelectBroken = false;
@@ -322,7 +322,7 @@ static bool AppSelectBroken = false;
 // dozen FindSymbols on a path that already re-runs the whole of PDAMenu3.init.
 static PClass *AppWindowClass = nullptr;
 static PClass *AppTabClass = nullptr;
-static PField *FldDesktopView = nullptr;
+static PField *FldStandbyView = nullptr;
 static PField *FldViewParentMenu = nullptr;
 static PField *FldTabDisabled = nullptr;
 static VMFunction *FuncNumSubviews = nullptr;
@@ -336,27 +336,27 @@ static int ViewAddRegs = 0;
 static int SwitchToAppRegs = 0;
 static int SetSelectedRegs = 0;
 
-static PClass *AppClasses[countof(DashboardApps)] = {};
-static VMFunction *AppVInit[countof(DashboardApps)] = {};
-static int AppVInitRegs[countof(DashboardApps)] = {};
-static PField *AppTabFields[countof(DashboardApps)] = {};
+static PClass *AppClasses[countof(StandbyApps)] = {};
+static VMFunction *AppVInit[countof(StandbyApps)] = {};
+static int AppVInitRegs[countof(StandbyApps)] = {};
+static PField *AppTabFields[countof(StandbyApps)] = {};
 
 // The menu and view classes the selection was resolved against, cached so the re-select path in
-// DesktopViewUpdate can run without looking them up again or being handed them by its caller.
+// StandbyViewUpdate can run without looking them up again or being handed them by its caller.
 static PClass *AppMenuClass = nullptr;
 static PClass *AppViewClass = nullptr;
 
-// THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3 is AuxView::MenuLastAppClass(), read by
-// DashboardWantedIndex below. The storage, the accessor pair and the whole argument for why it is
+// THE ONE DELIBERATE CHANNEL BETWEEN MODE 4 AND MODE 3 is AuxView::LiveLastAppClass(), read by
+// StandbyWantedIndex below. The storage, the accessor pair and the whole argument for why it is
 // harmless in both directions are in i_auxvmreflect.h.
 
-// The index into DashboardApps the current selection was COMPUTED FROM, and the one it settled on.
+// The index into StandbyApps the current selection was COMPUTED FROM, and the one it settled on.
 //
 // The first is what the re-select trigger compares against, and it has to be the WANTED index rather than
 // the shown one: a locked request is substituted, so comparing the wanted app against what is displayed
 // would differ forever and re-select on every single frame. -1 means nothing has been selected yet.
-static int DesktopAppWantedIndex = -1;
-static int DesktopAppShownIndex = -1;
+static int StandbyAppWantedIndex = -1;
+static int StandbyAppShownIndex = -1;
 
 // Where a wanted app came from, for the log line only.
 enum EAppSource
@@ -366,20 +366,20 @@ enum EAppSource
 	AppSource_CvarInvalid,
 };
 
-// The app the dashboard SHOULD show, before availability is considered. Silent and allocation-free: it is
+// The app the standby codex SHOULD show, before availability is considered. Silent and allocation-free: it is
 // called every frame by the re-select trigger, so it must not log and must not look anything up.
 //
-// Returns an index into DashboardApps, never negative - an unrecognised cvar value resolves to entry 0 and
+// Returns an index into StandbyApps, never negative - an unrecognised cvar value resolves to entry 0 and
 // says so through outSource, which is what makes the "not selectable" warning fire once per selection
 // rather than once per frame.
-static int DashboardWantedIndex(EAppSource *outSource)
+static int StandbyWantedIndex(EAppSource *outSource)
 {
 	// 1. THE LIVE CODEX. Matched by class rather than by PDAMenu3.currentApp, and that is not a stylistic
-	//    choice - see MenuSampleCurrentApp (i_auxmenuview.cpp) for why currentApp cannot be used.
-	PClass *const lastApp = MenuLastAppClass();
+	//    choice - see LiveSampleCurrentApp (i_auxlivecodex.cpp) for why currentApp cannot be used.
+	PClass *const lastApp = LiveLastAppClass();
 	if (lastApp != nullptr)
 	{
-		for (unsigned i = 0; i < countof(DashboardApps); i++)
+		for (unsigned i = 0; i < countof(StandbyApps); i++)
 		{
 			if (AppClasses[i] == lastApp)
 			{
@@ -395,10 +395,10 @@ static int DashboardWantedIndex(EAppSource *outSource)
 	}
 
 	// 2. THE CVAR, which is the starting value until the player opens their own PDA.
-	const int wanted = aux_dashboard_app;
-	for (unsigned i = 0; i < countof(DashboardApps); i++)
+	const int wanted = aux_standby_app;
+	for (unsigned i = 0; i < countof(StandbyApps); i++)
 	{
-		if (DashboardApps[i].AppID == wanted)
+		if (StandbyApps[i].AppID == wanted)
 		{
 			if (outSource != nullptr)
 				*outSource = AppSource_Cvar;
@@ -414,8 +414,8 @@ static int DashboardWantedIndex(EAppSource *outSource)
 // Rooted only between CreateNew and desktopView.add. vInit allocates dozens of DObjects and any of those
 // allocations can run a GC step, so a window that is not yet in anyone's subviews array would be white,
 // unreferenced and swept part way through its own construction - the same hazard, and the same fix, as
-// the menu itself. Marked by the marker function BuildDesktopView registers.
-static DObject *DesktopPendingApp = nullptr;
+// the menu itself. Marked by the marker function BuildStandbyView registers.
+static DObject *StandbyPendingApp = nullptr;
 
 static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 {
@@ -434,45 +434,45 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 	// numSubviews() and viewAt(int) are the game's OWN accessors for desktopView.subviews (view.zs:993,
 	// :997), used in preference to walking the TArray from C++ so that nothing here depends on its layout
 	// - and viewAt does a raw `subviews[idx]`, so every call below is bounded by numSubviews().
-	VMFunction *funcNum = classesOk ? ResolveMethod(viewCls, "numSubviews", "AuxDesktopView", nullptr, 0, &numRegs) : nullptr;
-	VMFunction *funcAt = funcNum != nullptr ? ResolveMethod(viewCls, "viewAt", "AuxDesktopView", IntArg, 1, &ViewAtRegs) : nullptr;
+	VMFunction *funcNum = classesOk ? ResolveMethod(viewCls, "numSubviews", "AuxStandbyCodex", nullptr, 0, &numRegs) : nullptr;
+	VMFunction *funcAt = funcNum != nullptr ? ResolveMethod(viewCls, "viewAt", "AuxStandbyCodex", IntArg, 1, &ViewAtRegs) : nullptr;
 	// add(UIView) is virtual (view.zs:936); desktopView is proved to be EXACTLY UIView before it is used
 	// as self, the same argument the file already makes for mainView.
 	VMFunction *funcAdd = funcAt != nullptr
-		? ResolveMethod(viewCls, "add", "AuxDesktopView", ObjArg, 1, &ViewAddRegs, viewCls) : nullptr;
+		? ResolveMethod(viewCls, "add", "AuxStandbyCodex", ObjArg, 1, &ViewAddRegs, viewCls) : nullptr;
 	// close() is PDAAppWindow's own, takes no arguments, and is non-virtual and unique in the whole tree
 	// (app_window.zs:139) - so resolving it on the base is what runs for every subclass.
-	VMFunction *funcClose = funcAdd != nullptr ? ResolveMethod(appCls, "close", "AuxDesktopView", nullptr, 0, &closeRegs) : nullptr;
+	VMFunction *funcClose = funcAdd != nullptr ? ResolveMethod(appCls, "close", "AuxStandbyCodex", nullptr, 0, &closeRegs) : nullptr;
 	// switchToAppWindow is declared `private` (pda_menu.zs:718). private and protected are COMPILE-TIME
 	// checks in ZScript - the compiler refuses the access at parse time and nothing about the symbol
 	// itself changes - so PClass::FindSymbol still returns it and VMCall still invokes it. Validated
 	// exactly as strictly as every public symbol here, because VMFillParams does not care how it was
 	// declared: it walks the CALLEE's NumArgs regardless.
 	VMFunction *funcSwitch = funcClose != nullptr
-		? ResolveMethod(menuCls, "switchToAppWindow", "AuxDesktopView", ObjArg, 1, &SwitchToAppRegs, appCls) : nullptr;
+		? ResolveMethod(menuCls, "switchToAppWindow", "AuxStandbyCodex", ObjArg, 1, &SwitchToAppRegs, appCls) : nullptr;
 	// setSelected(bool s = true, bool sound = true) - button.zs:743. Both optional, so it is two declared
 	// arguments and three registers with self.
 	VMFunction *funcSel = funcSwitch != nullptr
-		? ResolveMethod(tabCls, "setSelected", "AuxDesktopView", BoolBoolArgs, 2, &SetSelectedRegs) : nullptr;
+		? ResolveMethod(tabCls, "setSelected", "AuxStandbyCodex", BoolBoolArgs, 2, &SetSelectedRegs) : nullptr;
 
-	PField *fldDesktop = funcSel != nullptr ? ResolveField(menuCls, "desktopView", Field_ViewPtr, viewCls) : nullptr;
+	PField *fldStandby = funcSel != nullptr ? ResolveField(menuCls, "desktopView", Field_ViewPtr, viewCls) : nullptr;
 	// parentMenu takes the MENU class as the expected pointee ancestor, not viewCls - see Field_MenuPtr.
-	PField *fldParentMenu = fldDesktop != nullptr
+	PField *fldParentMenu = fldStandby != nullptr
 		? ResolveField(viewCls, "parentMenu", Field_MenuPtr, menuCls) : nullptr;
 	// UIControl.disabled (view.zs:1356) is `protected`, reachable for exactly the same reason
-	// switchToAppWindow is. This is the availability flag; see SelectDashboardApp.
+	// switchToAppWindow is. This is the availability flag; see SelectStandbyApp.
 	PField *fldDisabled = fldParentMenu != nullptr ? ResolveField(tabCls, "disabled", Field_Bool, viewCls) : nullptr;
 
 	bool ok = fldDisabled != nullptr;
 
-	for (unsigned i = 0; ok && i < countof(DashboardApps); i++)
+	for (unsigned i = 0; ok && i < countof(StandbyApps); i++)
 	{
-		PClass *cls = PClass::FindClass(DashboardApps[i].ClassName);
+		PClass *cls = PClass::FindClass(StandbyApps[i].ClassName);
 		if (cls == nullptr || !cls->IsDescendantOf(appCls) || cls->bAbstract || cls->ConstructNative == nullptr)
 		{
 			// CreateNew calls I_Error on the last two rather than returning null (dobjtype.cpp:433-437).
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s is not an instantiable %s\n",
-				DashboardApps[i].ClassName, AppWindowClassName);
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s is not an instantiable %s\n",
+				StandbyApps[i].ClassName, AppWindowClassName);
 			ok = false;
 			break;
 		}
@@ -481,10 +481,10 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 		// vInit(Vector2, Vector2) is the virtual constructor init() itself uses (app_window.zs:14,
 		// pda_menu.zs:419), so a subclass override is what runs - ResolveMethod dispatches through the
 		// instance's own vtable for exactly that reason.
-		AppVInit[i] = ResolveMethod(cls, "vInit", "AuxDesktopView", VInitArgs, 2, &AppVInitRegs[i]);
+		AppVInit[i] = ResolveMethod(cls, "vInit", "AuxStandbyCodex", VInitArgs, 2, &AppVInitRegs[i]);
 		// The tab is expected to be a PDATab, which is what the disabled read below assumes.
 		AppTabFields[i] = AppVInit[i] != nullptr
-			? ResolveField(menuCls, DashboardApps[i].TabFieldName, Field_ViewPtr, tabCls) : nullptr;
+			? ResolveField(menuCls, StandbyApps[i].TabFieldName, Field_ViewPtr, tabCls) : nullptr;
 		if (AppTabFields[i] == nullptr)
 		{
 			ok = false;
@@ -497,8 +497,8 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 		// ResolveMethod/ResolveField already printed which symbol failed; all that is left is to record it
 		// against the app selection. Neither resolver latches anything of its own, so nothing here has to
 		// be undone - see i_auxvmreflect.h.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s does not expose the app switch this was written "
-			"against - the dashboard will show whatever the savegame had open\n", DesktopClassName);
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s does not expose the app switch this was written "
+			"against - the standby codex will show whatever the savegame had open\n", StandbyClassName);
 		AppSelectBroken = true;
 		return false;
 	}
@@ -507,7 +507,7 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 	AppTabClass = tabCls;
 	AppMenuClass = menuCls;
 	AppViewClass = viewCls;
-	FldDesktopView = fldDesktop;
+	FldStandbyView = fldStandby;
 	FldViewParentMenu = fldParentMenu;
 	FldTabDisabled = fldDisabled;
 	FuncNumSubviews = funcNum;
@@ -518,8 +518,8 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 	FuncTabSetSelected = funcSel;
 	AppSelectResolved = true;
 
-	Printf("AuxDesktopView: dashboard app switch resolved on %s, %u apps selectable\n",
-		DesktopClassName, (unsigned)countof(DashboardApps));
+	Printf("AuxStandbyCodex: standby app switch resolved on %s, %u apps selectable\n",
+		StandbyClassName, (unsigned)countof(StandbyApps));
 	return true;
 }
 
@@ -529,12 +529,12 @@ static bool AppSelectResolve(PClass *menuCls, PClass *viewCls)
 // decides availability - tiersButt.setDisabled(numInvasionTiers <= 0) at pda_menu.zs:326, from the
 // player's InvasiontierItem at :319-325, and mapButt.setDisabled on countInv("ChallengesUnlocked") at
 // :259 - and UIControl.disabled is where the answer lands and what greys the tab out on the panel.
-// Reading that field means the dashboard and the tab strip are physically incapable of disagreeing, and
+// Reading that field means the standby codex and the tab strip are physically incapable of disagreeing, and
 // it needs no second copy of Selaco's unlock rules to rot. The other four tabs are never disabled, so
 // they read available, which is correct.
 //
 // A missing or wrong-typed tab reads UNAVAILABLE. Fail-closed: showing a locked app is the bug.
-static bool DashboardAppIsAvailable(DObject *menu, unsigned index)
+static bool StandbyAppIsAvailable(DObject *menu, unsigned index)
 {
 	DObject *tab = ReadObjectField(menu, AppTabFields[index]);
 	if (tab == nullptr || !tab->IsKindOf(AppTabClass))
@@ -563,22 +563,22 @@ static DObject *CallViewAt(DObject *view, int index)
 	return (DObject *)sub;
 }
 
-// Point the dashboard at exactly one app: the one the player last had open in their real PDA if there is
-// one, otherwise aux_dashboard_app, and in either case only if it is unlocked.
+// Point the standby codex at exactly one app: the one the player last had open in their real PDA if there is
+// one, otherwise aux_standby_app, and in either case only if it is unlocked.
 //
 // TWO CALLERS, AND THEY ARE DIFFERENT SHAPES.
 //
-//   BuildDesktopView, after setCanvas and before the relayout. Both halves of that matter: add()
+//   BuildStandbyView, after setCanvas and before the relayout. Both halves of that matter: add()
 //   propagates desktopView's canvas to a window added after it (view.zs:941), and the relayout that
 //   follows sizes whatever changed.
 //
-//   DesktopViewUpdate, on an ALREADY BUILT desktop, when the wanted app has changed - which is the falling
+//   StandbyViewUpdate, on an ALREADY BUILT desktop, when the wanted app has changed - which is the falling
 //   edge of the player closing their PDA. No init(), no rebuild; the new window's own requiresLayout is
 //   what gets it laid out by the next draw (view.zs:797, :464).
 //
 // Returns false if nothing was changed, which is not a failure state - the desktop is valid and drawable
 // either way, it just keeps whatever app set it already had.
-static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
+static bool SelectStandbyApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 {
 	if (AppSelectBroken)
 		return false;
@@ -587,32 +587,32 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 		return false;
 
 	EAppSource source = AppSource_Cvar;
-	const int index = DashboardWantedIndex(&source);
+	const int index = StandbyWantedIndex(&source);
 
 	if (source == AppSource_CvarInvalid)
 	{
-		// Logged here rather than in DashboardWantedIndex, which runs every frame.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: aux_dashboard_app %d is not a selectable dashboard app, "
-			"using %s\n", (int)aux_dashboard_app, DashboardApps[0].EnumName);
+		// Logged here rather than in StandbyWantedIndex, which runs every frame.
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: aux_standby_app %d is not a selectable standby app, "
+			"using %s\n", (int)aux_standby_app, StandbyApps[0].EnumName);
 	}
 
-	DObject *desktop = ReadObjectField(menu, FldDesktopView);
+	DObject *desktop = ReadObjectField(menu, FldStandbyView);
 	if (desktop == nullptr || desktop->GetClass() != viewCls)
 	{
 		// Exactly UIView, not merely a subclass: add/viewAt/numSubviews were resolved against UIView's
 		// vtable and a subclass could override any of them with something this code has not read.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.desktopView is not a plain %s, "
-			"the dashboard will show whatever the savegame had open\n", DesktopClassName, ViewClassName);
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.desktopView is not a plain %s, "
+			"the standby codex will show whatever the savegame had open\n", StandbyClassName, ViewClassName);
 		AppSelectBroken = true;
 		return false;
 	}
 
-	int chosen = DashboardAppIsAvailable(menu, (unsigned)index) ? index : -1;
+	int chosen = StandbyAppIsAvailable(menu, (unsigned)index) ? index : -1;
 	if (chosen < 0)
 	{
-		for (unsigned i = 0; i < countof(DashboardApps); i++)
+		for (unsigned i = 0; i < countof(StandbyApps); i++)
 		{
-			if ((int)i != index && DashboardAppIsAvailable(menu, i))
+			if ((int)i != index && StandbyAppIsAvailable(menu, i))
 			{
 				chosen = (int)i;
 				break;
@@ -629,26 +629,26 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 			// Availability is fixed for the life of one desktop instance - PDAMenu3.init is the only thing
 			// that calls setDisabled on the tabs - so retrying against the same menu could only ever produce
 			// the same answer. A rebuild resets it to -1 and the question is asked again, and so does the
-			// player changing aux_dashboard_app to something else.
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: no dashboard app is available in this save, "
-				"leaving the dashboard's app set alone\n");
-			DesktopAppWantedIndex = index;
+			// player changing aux_standby_app to something else.
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: no standby app is available in this save, "
+				"leaving the standby codex's app set alone\n");
+			StandbyAppWantedIndex = index;
 			return false;
 		}
 
 		// THE USER'S ORIGINAL BUG, and the one thing here that must never regress: a save with no unlocked
 		// invasion tiers must not display INVASION TIERS, however the choice arrived.
-		Printf("AuxDesktopView: %s is not unlocked in this save, showing %s instead\n",
-			DashboardApps[index].EnumName, DashboardApps[chosen].EnumName);
+		Printf("AuxStandbyCodex: %s is not unlocked in this save, showing %s instead\n",
+			StandbyApps[index].EnumName, StandbyApps[chosen].EnumName);
 	}
 
 	// ALREADY THERE. Reached when the wanted app moved but resolves to what is on screen anyway - the same
 	// app arriving from the live codex instead of from the cvar, or two different locked requests both
 	// substituting to Datalogs. The sweep and the switch would be idempotent, but the redraw they would ask
 	// for costs a ~30 ms readback (see i_auxpanel.cpp), so the wanted index is advanced and nothing is done.
-	if (DesktopAppShownIndex >= 0 && chosen == DesktopAppShownIndex)
+	if (StandbyAppShownIndex >= 0 && chosen == StandbyAppShownIndex)
 	{
-		DesktopAppWantedIndex = index;
+		StandbyAppWantedIndex = index;
 		return false;
 	}
 
@@ -656,7 +656,7 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 
 	try
 	{
-		// NESTED WHEN BuildDesktopView CALLS US, AND THE ONLY ONE ON THE RE-SELECT PATH. FProjectionScope is
+		// NESTED WHEN BuildStandbyView CALLS US, AND THE ONLY ONE ON THE RE-SELECT PATH. FProjectionScope is
 		// depth-counted precisely so the first is harmless, and the second is load-bearing: close() reaches
 		// savePos(0) and a newly added window's first layout reaches savePos(), both of which are
 		// SendNetworkEvents that would write PDA geometry into the player's savegame.
@@ -698,7 +698,7 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 			// BEFORE the close sweep, not after, so that a failure here leaves the app set init() restored
 			// completely untouched - which is what the log line then claims.
 			DObject *view = AppClasses[chosen]->CreateNew();
-			DesktopPendingApp = view;
+			StandbyPendingApp = view;
 			GC::WriteBarrier(view);
 
 			void *returned = nullptr;
@@ -712,9 +712,9 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 				// vInit returns self on every path in the game's source; anything else means it took a
 				// branch this code has not read. Nothing has been added or closed yet, so dropping the root
 				// is the whole cleanup - the window is collected and the desktop is exactly as init() left it.
-				DesktopPendingApp = nullptr;
-				Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.vInit did not return self, "
-					"the dashboard will show whatever the savegame had open\n", DashboardApps[chosen].ClassName);
+				StandbyPendingApp = nullptr;
+				Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.vInit did not return self, "
+					"the standby codex will show whatever the savegame had open\n", StandbyApps[chosen].ClassName);
 				AppSelectBroken = true;
 				return false;
 			}
@@ -726,7 +726,7 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 			VMCall(FuncViewAdd, addParams, ViewAddRegs, nullptr, 0);
 
 			// In desktopView.subviews now, so the menu's own graph keeps it alive.
-			DesktopPendingApp = nullptr;
+			StandbyPendingApp = nullptr;
 			target = view;
 			constructed = true;
 		}
@@ -743,7 +743,7 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 		//
 		// It also covers the two apps switchToAppWindow ignores entirely. BBWindow and LevelInfoWindow are
 		// PDAAppWindows but NOT fullscreen ones (bb_window.zs:1, level_info_window.zs:1), so its cast
-		// yields null for them and either would sit on top of the dashboard at its saved position purely
+		// yields null for them and either would sit on top of the standby codex at its saved position purely
 		// because the player left it open - the same savegame coupling by another route. The one case not
 		// covered is a BBWindow under `developer > 1`, which init() puts in innerView instead of
 		// desktopView (pda_menu.zs:422); that is a dev-only state and only desktopView is swept.
@@ -778,7 +778,7 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 		//
 		// sound: false. The selected states were created without a sound (pda_menu.zs:218-220) so nothing
 		// would play anyway, but a projection nobody asked for must not be able to make a noise.
-		for (unsigned i = 0; i < countof(DashboardApps); i++)
+		for (unsigned i = 0; i < countof(StandbyApps); i++)
 		{
 			DObject *tab = ReadObjectField(menu, AppTabFields[i]);
 			if (tab == nullptr || !tab->IsKindOf(AppTabClass))
@@ -791,35 +791,35 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 	catch (const std::exception &e)
 	{
 		// Latch the SELECTION only, and not the desktop: the desktop is already built and drawing, and the
-		// relayout in BuildDesktopView still runs. An abort part way through the sweep can leave fewer apps
+		// relayout in BuildStandbyView still runs. An abort part way through the sweep can leave fewer apps
 		// open than init() restored, which is why this says "incomplete" rather than claiming the savegame's
 		// set is intact.
-		DesktopPendingApp = nullptr;
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: selecting the dashboard app aborted (%s), the dashboard's "
+		StandbyPendingApp = nullptr;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: selecting the standby app aborted (%s), the standby codex's "
 			"app set is incomplete for this build\n", e.what());
 		AppSelectBroken = true;
 		return false;
 	}
 
-	static const char *const SourceNames[] = { "live codex", "aux_dashboard_app", "aux_dashboard_app fallback" };
-	const char *const from = DesktopAppShownIndex >= 0 && DesktopAppShownIndex != chosen
-		? DashboardApps[DesktopAppShownIndex].EnumName : nullptr;
+	static const char *const SourceNames[] = { "live codex", "aux_standby_app", "aux_standby_app fallback" };
+	const char *const from = StandbyAppShownIndex >= 0 && StandbyAppShownIndex != chosen
+		? StandbyApps[StandbyAppShownIndex].EnumName : nullptr;
 
 	// Advanced only on success, and it is the WANTED index rather than the chosen one - see the declaration.
 	// Until this moves, the re-select trigger keeps asking, which is what makes a transient failure retry.
-	DesktopAppWantedIndex = index;
-	DesktopAppShownIndex = chosen;
+	StandbyAppWantedIndex = index;
+	StandbyAppShownIndex = chosen;
 
 	if (from != nullptr)
 	{
-		Printf("AuxDesktopView: dashboard switching from %s to %s (%s, from the %s, %s)\n",
-			from, DashboardApps[chosen].EnumName, DashboardApps[chosen].ClassName,
+		Printf("AuxStandbyCodex: standby codex switching from %s to %s (%s, from the %s, %s)\n",
+			from, StandbyApps[chosen].EnumName, StandbyApps[chosen].ClassName,
 			SourceNames[source], constructed ? "constructed" : "already open");
 	}
 	else
 	{
-		Printf("AuxDesktopView: dashboard showing %s (%s, from the %s, %s)\n",
-			DashboardApps[chosen].EnumName, DashboardApps[chosen].ClassName,
+		Printf("AuxStandbyCodex: standby codex showing %s (%s, from the %s, %s)\n",
+			StandbyApps[chosen].EnumName, StandbyApps[chosen].ClassName,
 			SourceNames[source], constructed ? "constructed" : "already open");
 	}
 	return true;
@@ -886,61 +886,61 @@ static bool SelectDashboardApp(DObject *menu, PClass *menuCls, PClass *viewCls)
 // value keeps loading that value, because that is what CVAR_ARCHIVE means - the saved value wins over the
 // declaration. That is expected rather than a bug: an existing profile keeps the size it was last seen at,
 // and a fresh one starts at the size the panel was tuned for.
-CVAR(Float, aux_dashboard_zoom, 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+CVAR(Float, aux_codex_size, 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
 
 // 0.5 - 2.0. The lower half is kept even though calcScale's floor swallows most of it, because a clamp
 // that silently rewrites a value the player typed is worse than a range with a documented dead zone.
-static const double DashboardZoomMin = 0.5;
-static const double DashboardZoomMax = 2.0;
+static const double CodexZoomMin = 0.5;
+static const double CodexZoomMax = 2.0;
 
 // calcScale's own limits expressed as zoom values - the numbers quoted in the table above. Derived from
 // the canvas constants rather than written out so they follow a canvas resize; the literals are
 // calcScale's own, the 0.599/2.0 CLAMP and the 0.08 snap window around 1.0 (pda_menu.zs:791-797).
-static const double DashboardZoomAtFloor = 0.599 * DesktopBaselineHeight / AuxCanvasHeight;
-static const double DashboardZoomAtSnapLow = 0.92 * DesktopBaselineHeight / AuxCanvasHeight;
-static const double DashboardZoomAtSnapHigh = 1.08 * DesktopBaselineHeight / AuxCanvasHeight;
-static const double DashboardZoomAtCeiling = 2.0 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double CodexZoomAtFloor = 0.599 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double CodexZoomAtSnapLow = 0.92 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double CodexZoomAtSnapHigh = 1.08 * DesktopBaselineHeight / AuxCanvasHeight;
+static const double CodexZoomAtCeiling = 2.0 * DesktopBaselineHeight / AuxCanvasHeight;
 
 // The zoom the relayout will actually use. The in-range test comes first so that a NaN - which fails every
 // comparison, including both of the ones below it - lands on the no-zoom 1.0 rather than on a limit.
 //
-// NEVER NaN is the property mode 4 depends on, not merely a tidy fallback: i_auxmenuview.cpp edge-triggers
+// NEVER NaN is the property mode 4 depends on, not merely a tidy fallback: i_auxlivecodex.cpp edge-triggers
 // its relayout on this value changing, and NaN != NaN would fire that every frame - a savePos netevent into
 // the player's savegame per frame. See the declaration in i_auxvmreflect.h.
 //
 // Not static: mode 4 divides its own baseline by the same clamped value, and the declaration in
 // i_auxvmreflect.h says why that clamp is shared rather than written twice.
-double DashboardZoom()
+double CodexZoom()
 {
-	const double zoom = aux_dashboard_zoom;
-	if (zoom >= DashboardZoomMin && zoom <= DashboardZoomMax)
+	const double zoom = aux_codex_size;
+	if (zoom >= CodexZoomMin && zoom <= CodexZoomMax)
 		return zoom;
-	if (zoom > DashboardZoomMax)
-		return DashboardZoomMax;
-	if (zoom < DashboardZoomMin)
-		return DashboardZoomMin;
+	if (zoom > CodexZoomMax)
+		return CodexZoomMax;
+	if (zoom < CodexZoomMin)
+		return CodexZoomMin;
 	return 1.0;
 }
 
 // The wide-box relayout's symbols, cached so the live retune can re-run it without resolving anything
-// again. All null unless the OPTIONAL group in BuildDesktopView resolved; FuncDesktopCalcScale doubles as
+// again. All null unless the OPTIONAL group in BuildStandbyView resolved; FuncStandbyCalcScale doubles as
 // that group's flag, and with it null the zoom is inert and the layoutChange fallback is what runs.
-static VMFunction *FuncDesktopCalcScale = nullptr;
-static VMFunction *FuncDesktopMenuLayout = nullptr;
-static VMFunction *FuncDesktopViewLayout = nullptr;
-static PField *FldDesktopUIScaling = nullptr;
-static PField *FldDesktopLastUIScale = nullptr;
-static int DesktopCalcScaleRegs = 0;
-static int DesktopViewLayoutRegs = 0;
+static VMFunction *FuncStandbyCalcScale = nullptr;
+static VMFunction *FuncStandbyMenuLayout = nullptr;
+static VMFunction *FuncStandbyViewLayout = nullptr;
+static PField *FldStandbyUIScaling = nullptr;
+static PField *FldStandbyLastUIScale = nullptr;
+static int StandbyCalcScaleRegs = 0;
+static int StandbyViewLayoutRegs = 0;
 
 // The two classes the relayout hands TightenTabStrip, cached for the same reason as everything above: the
 // live retune re-runs the relayout with nothing but the two globals in scope, so it cannot look them up.
-static PClass *DesktopPdaClass = nullptr;
-static PClass *DesktopViewClass = nullptr;
+static PClass *StandbyPdaClass = nullptr;
+static PClass *StandbyViewClass = nullptr;
 
-// The zoom the live desktop is laid out for. The seed is inert in practice - BuildDesktopView writes it
+// The zoom the live desktop is laid out for. The seed is inert in practice - BuildStandbyView writes it
 // before anything the retune needs is non-null - and is the no-zoom value so a read before that says so.
-static double DesktopLayoutZoom = 1.0;
+static double StandbyLayoutZoom = 1.0;
 
 // The relayout, factored out so the live retune re-runs EXACTLY what the build ran. Five steps: narrow the
 // tab strip, null the menu's ui_scaling handle, calcScale with the zoomed baseline, then the remaining two
@@ -949,12 +949,12 @@ static double DesktopLayoutZoom = 1.0;
 // THE CALLER OWNS THE PROJECTION SCOPE AND THE TRY/CATCH. Every call here can reach script - mainView
 // .layout() reaches PDAAppWindow.layout -> savePos, which is a SendNetworkEvent into the player's savegame -
 // so there is no safe way to call this outside one, and both call sites are already inside theirs.
-static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
+static void StandbyRelayout(DObject *menu, DObject *mainView, double zoom)
 {
 	// The tab strip goes first because it only writes fields and pins: it needs the layout below to take
 	// effect, and folding it in here is what keeps it from costing a second pass. Fails soft on its own and
 	// latches nothing, so its return value is not worth testing - a clipped strip beats no desktop.
-	TightenTabStrip(menu, DesktopPdaClass, DesktopViewClass);
+	TightenTabStrip(menu, StandbyPdaClass, StandbyViewClass);
 
 	// Force uscale to 1.0 by nulling the menu's own cvar handle. calcScale's read of it is
 	// `ui_scaling ? ui_scaling.getFloat() : 1.0` (pda_menu.zs:787), so null IS the 1.0 path. Left null
@@ -962,7 +962,7 @@ static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
 	// :206), both null-guarded, and this menu is never ticked. Never the CVAR - `ui_scaling` is
 	// CVAR_USERINFO (d_main.cpp:1757) and writing it would push a DEM_UINFCHANGED into the demo/net
 	// stream, the very class of player-state write FProjectionScope exists to stop.
-	*(void **)((uint8_t *)menu + FldDesktopUIScaling->Offset) = nullptr;
+	*(void **)((uint8_t *)menu + FldStandbyUIScaling->Offset) = nullptr;
 
 	// calcScale(int screenWidth, int screenHeight, Vector2 baselineResolution) - the Vector2 is two
 	// consecutive registers, hence five VMValues for three declared arguments. Dividing the baseline height
@@ -970,13 +970,13 @@ static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
 	// un-zoomed build passed.
 	VMValue params[] = { menu, (int)AuxCanvasWidth, (int)AuxCanvasHeight,
 		DesktopDesignWidth, DesktopBaselineHeight / zoom };
-	VMCall(FuncDesktopCalcScale, params, DesktopCalcScaleRegs, nullptr, 0);
+	VMCall(FuncStandbyCalcScale, params, StandbyCalcScaleRegs, nullptr, 0);
 
 	// hasLayedOutOnce is deliberately NOT set: its only reader is UIMenu.drawer (menu.zs:261), which we
 	// never call, and setting it would arm a relayout at the default (1920, 1080) baseline if anything ever
 	// did - undoing both the wide box and the zoom.
 	VMValue selfOnly[] = { menu };
-	VMCall(FuncDesktopMenuLayout, selfOnly, 1, nullptr, 0);
+	VMCall(FuncStandbyMenuLayout, selfOnly, 1, nullptr, 0);
 
 	// mainView.layout() with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel that makes
 	// UIView.layout derive cScale from the view's own scale chain (view.zs:763) instead of taking ours, and
@@ -985,7 +985,7 @@ static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
 	// honouring requiresLayout, which is what makes this sufficient on a retune: nothing in the tree is
 	// left holding the old scale.
 	VMValue viewParams[] = { mainView, 0.0, 0.0, -1.0, (int)0 };
-	VMCall(FuncDesktopViewLayout, viewParams, DesktopViewLayoutRegs, nullptr, 0);
+	VMCall(FuncStandbyViewLayout, viewParams, StandbyViewLayoutRegs, nullptr, 0);
 }
 
 // The scale calcScale actually installed, which the logical box follows from.
@@ -999,13 +999,13 @@ static void DesktopRelayout(DObject *menu, DObject *mainView, double zoom)
 // lastUIScale is OPTIONAL: its absence costs the accuracy of a log line and must not cost the wide box, so
 // the arithmetic is used instead and the line says "predicted" rather than "measured". A number that is
 // silently a guess is worse than one labelled as one.
-static double DesktopInstalledScale(DObject *menu, double zoom, bool *outMeasured)
+static double StandbyInstalledScale(DObject *menu, double zoom, bool *outMeasured)
 {
-	if (FldDesktopLastUIScale != nullptr && menu != nullptr)
+	if (FldStandbyLastUIScale != nullptr && menu != nullptr)
 	{
 		if (outMeasured != nullptr)
 			*outMeasured = true;
-		return *(const double *)((const uint8_t *)menu + FldDesktopLastUIScale->Offset);
+		return *(const double *)((const uint8_t *)menu + FldStandbyLastUIScale->Offset);
 	}
 
 	if (outMeasured != nullptr)
@@ -1025,24 +1025,24 @@ static double DesktopInstalledScale(DObject *menu, double zoom, bool *outMeasure
 }
 
 // Which of calcScale's own limits swallowed this zoom, if any. Empty for the normal case, where the zoom
-// asked for is the zoom that came back. Not static, for the same reason DashboardZoom is not: mode 4 hits
+// asked for is the zoom that came back. Not static, for the same reason CodexZoom is not: mode 4 hits
 // the same three bands and needs the same phrase to say so.
-const char *DashboardZoomLimitNote(double zoom)
+const char *CodexZoomLimitNote(double zoom)
 {
-	if (zoom <= DashboardZoomAtFloor)
+	if (zoom <= CodexZoomAtFloor)
 		return " - held at calcScale's 0.599 floor, no smaller zoom changes anything";
-	if (zoom >= DashboardZoomAtSnapLow && zoom <= DashboardZoomAtSnapHigh)
+	if (zoom >= CodexZoomAtSnapLow && zoom <= CodexZoomAtSnapHigh)
 		return " - inside calcScale's 1.0 snap window, this whole band draws identically";
-	if (zoom >= DashboardZoomAtCeiling)
+	if (zoom >= CodexZoomAtCeiling)
 		return " - held at calcScale's 2.0 ceiling, no larger zoom changes anything";
 	return "";
 }
 
-// LIVE RETUNE: apply a changed aux_dashboard_zoom to the desktop that is ALREADY BUILT.
+// LIVE RETUNE: apply a changed aux_codex_size to the desktop that is ALREADY BUILT.
 //
 // A RELAYOUT, NOT A REBUILD, and the difference is a dropped frame per value tried. PDAMenu3.init allocates
 // 100+ DObjects, re-runs the app selection and fires the whole suppression machinery; the four calls in
-// DesktopRelayout are the game's OWN answer to "the screen you are laid out for is not the screen you are
+// StandbyRelayout are the game's OWN answer to "the screen you are laid out for is not the screen you are
 // on" and are what layoutChange would do to a live menu on a resolution change. Since layoutSubviews
 // recurses unconditionally, that reaches every view in the tree - so there is nothing a rebuild would fix.
 //
@@ -1050,16 +1050,16 @@ const char *DashboardZoomLimitNote(double zoom)
 // panel holds the last pixels Java was pushed and the readback is edge-triggered (i_auxpanel.cpp), so
 // without *outNeedsRedraw the new layout would sit in the canvas unread and the player would keep seeing
 // the pre-zoom image - the cvar would read as broken while working perfectly.
-static void DesktopRetune(bool *outNeedsRedraw)
+static void StandbyRetune(bool *outNeedsRedraw)
 {
-	if (DesktopMenu == nullptr || DesktopRootView == nullptr)
+	if (StandbyMenu == nullptr || StandbyRootView == nullptr)
 		return;
 
 	// Gated on the OPTIONAL wide-box group, so a build that fell back to layoutChange keeps exactly the
 	// behaviour it had and the zoom is simply inert. Failing soft here is one unchanged panel, not a
 	// broken one.
-	const double zoom = DashboardZoom();
-	if (FuncDesktopCalcScale != nullptr && zoom != DesktopLayoutZoom)
+	const double zoom = CodexZoom();
+	if (FuncStandbyCalcScale != nullptr && zoom != StandbyLayoutZoom)
 	{
 		try
 		{
@@ -1069,31 +1069,31 @@ static void DesktopRetune(bool *outNeedsRedraw)
 			FProjectionScope projection;
 			FMenuActiveKeeper keepMenuState;
 
-			DesktopRelayout(DesktopMenu, DesktopRootView, zoom);
+			StandbyRelayout(StandbyMenu, StandbyRootView, zoom);
 		}
 		catch (const std::exception &e)
 		{
 			// Nothing is latched beyond refusing to retry this value: the desktop is still built and still
 			// drawable, laid out for whatever scale the abort left it at. A VM abort here must not take the
 			// frame - and therefore the main screen - down.
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: relaying the dashboard out at zoom %g aborted (%s)\n",
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: relaying the standby codex out at zoom %g aborted (%s)\n",
 				zoom, e.what());
 		}
 
 		// Advanced whether or not it threw, so the line above is said once per value rather than per frame.
-		DesktopLayoutZoom = zoom;
+		StandbyLayoutZoom = zoom;
 
 		bool measured = false;
-		const double scale = DesktopInstalledScale(DesktopMenu, zoom, &measured);
+		const double scale = StandbyInstalledScale(StandbyMenu, zoom, &measured);
 
 		// The parenthesised token is a REVISION SENTINEL, deliberately unique to this change so it can be
 		// grepped out of the built .so to prove which revision is actually packaged - a size match has
 		// twice passed against a stale APK on this project.
-		Printf("AuxDesktopView: dashboard zoom %g%s, logical box %gx%g at %s scale %g%s "
-			"(aux-dashboard-zoom r1)\n",
-			zoom, zoom != (double)aux_dashboard_zoom ? " (clamped)" : "",
+		Printf("AuxStandbyCodex: standby codex zoom %g%s, logical box %gx%g at %s scale %g%s "
+			"(aux-codex-size r2)\n",
+			zoom, zoom != (double)aux_codex_size ? " (clamped)" : "",
 			AuxCanvasWidth / scale, AuxCanvasHeight / scale, measured ? "measured" : "predicted", scale,
-			DashboardZoomLimitNote(zoom));
+			CodexZoomLimitNote(zoom));
 
 		if (outNeedsRedraw != nullptr)
 			*outNeedsRedraw = true;
@@ -1101,9 +1101,9 @@ static void DesktopRetune(bool *outNeedsRedraw)
 }
 
 // Drop the built desktop and unroot it. Defined further down, next to the reasoning about PDAMenu3's
-// onDestroy; forward-declared here because BuildDesktopView's own failure paths run AFTER the menu has
+// onDestroy; forward-declared here because BuildStandbyView's own failure paths run AFTER the menu has
 // been created and rooted, and every one of them has to hand it back.
-static void DesktopViewDiscard();
+static void StandbyViewDiscard();
 
 // Build the desktop. Runs once; every failure latches.
 //
@@ -1112,11 +1112,11 @@ static void DesktopViewDiscard();
 // told to come back later. The cost is that the "not the full Selaco" line below only appears once a
 // level is loaded, which is a delayed diagnostic rather than a missing one.
 //
-// EVERY FAILURE AFTER cls->CreateNew() DISCARDS THE MENU, which is not tidying: DesktopMenu is marked by
+// EVERY FAILURE AFTER cls->CreateNew() DISCARDS THE MENU, which is not tidying: StandbyMenu is marked by
 // the marker function registered below, so a bare `return false` would leave a half-built PDAMenu3 and the
 // 100+ DObjects init() allocated rooted for the life of the process - and its onDestroy, which writes the
 // music volume, would then never run at a controlled moment either.
-static bool BuildDesktopView()
+static bool BuildStandbyView()
 {
 	// PDAMenu3.init dereferences players[consoleplayer].mo unguarded (pda_menu.zs:320,368,372,385,390)
 	// and reads Level.LevelName/maptime/MusicVolume, so this is all or nothing - there is no half-built
@@ -1137,12 +1137,12 @@ static bool BuildDesktopView()
 		return false;
 	}
 
-	PClass *cls = PClass::FindClass(DesktopClassName);
+	PClass *cls = PClass::FindClass(StandbyClassName);
 	if (cls == nullptr)
 	{
 		// The Doom and demo path, and the only outcome here that is not a diagnostic.
-		Printf("AuxDesktopView: no %s class - not the full Selaco, desktop view unavailable\n", DesktopClassName);
-		DesktopAbsent = true;
+		Printf("AuxStandbyCodex: no %s class - not the full Selaco, desktop view unavailable\n", StandbyClassName);
+		StandbyAbsent = true;
 		return false;
 	}
 
@@ -1150,33 +1150,33 @@ static bool BuildDesktopView()
 	// parameter and the menuactive write make sense; UIMenu is what guarantees mainView exists.
 	if (!cls->IsDescendantOf(RUNTIME_CLASS(DMenu)) || !cls->IsDescendantOf(FName(MenuClassName, true)))
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s is not a %s, desktop view disabled\n",
-			DesktopClassName, MenuClassName);
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s is not a %s, second-screen view disabled\n",
+			StandbyClassName, MenuClassName);
+		StandbyBroken = true;
 		return false;
 	}
 
 	if (cls->bAbstract || cls->ConstructNative == nullptr)
 	{
 		// CreateNew calls I_Error on either of these rather than returning null (dobjtype.cpp:433-437).
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s cannot be instantiated, desktop view disabled\n", DesktopClassName);
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s cannot be instantiated, second-screen view disabled\n", StandbyClassName);
+		StandbyBroken = true;
 		return false;
 	}
 
 	PClass *viewCls = PClass::FindClass(ViewClassName);
 	if (viewCls == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: no %s class, desktop view disabled\n", ViewClassName);
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: no %s class, second-screen view disabled\n", ViewClassName);
+		StandbyBroken = true;
 		return false;
 	}
 
 	FCanvas *canvas = GetTextureCanvas(AuxCanvasName);
 	if (canvas == nullptr || canvas->Tex == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s is not a canvas texture, desktop view disabled\n", AuxCanvasName);
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s is not a canvas texture, second-screen view disabled\n", AuxCanvasName);
+		StandbyBroken = true;
 		return false;
 	}
 
@@ -1188,22 +1188,22 @@ static bool BuildDesktopView()
 	static const EArgKind LayoutChangeArgs[] = { Arg_Int, Arg_Int };
 
 	int initRegs = 0, canvasRegs = 0, layoutChangeRegs = 0, drawRegs = 0, subviewRegs = 0;
-	VMFunction *funcInit = ResolveMethod(cls, "init", "AuxDesktopView", InitArgs, 1, &initRegs);
+	VMFunction *funcInit = ResolveMethod(cls, "init", "AuxStandbyCodex", InitArgs, 1, &initRegs);
 	// layoutChange(int, int) is the game's OWN entry point for "the screen you are laid out for is not
 	// the screen you are on" (menu.zs:113-121, overridden at pda_menu.zs:775): it calls calcScale,
 	// refreshes background.freeze, then relayouts. Using it is why nothing here writes mainView.frame.
 	VMFunction *funcLayoutChange = funcInit != nullptr
-		? ResolveMethod(cls, "layoutChange", "AuxDesktopView", LayoutChangeArgs, 2, &layoutChangeRegs) : nullptr;
+		? ResolveMethod(cls, "layoutChange", "AuxStandbyCodex", LayoutChangeArgs, 2, &layoutChangeRegs) : nullptr;
 	VMFunction *funcSetCanvas = funcLayoutChange != nullptr
-		? ResolveMethod(viewCls, "setCanvas", "AuxDesktopView", CanvasArgs, 1, &canvasRegs) : nullptr;
-	VMFunction *funcDraw = funcSetCanvas != nullptr ? ResolveMethod(viewCls, "draw", "AuxDesktopView", nullptr, 0, &drawRegs) : nullptr;
+		? ResolveMethod(viewCls, "setCanvas", "AuxStandbyCodex", CanvasArgs, 1, &canvasRegs) : nullptr;
+	VMFunction *funcDraw = funcSetCanvas != nullptr ? ResolveMethod(viewCls, "draw", "AuxStandbyCodex", nullptr, 0, &drawRegs) : nullptr;
 	VMFunction *funcDrawSubviews = funcDraw != nullptr
-		? ResolveMethod(viewCls, "drawSubviews", "AuxDesktopView", nullptr, 0, &subviewRegs) : nullptr;
+		? ResolveMethod(viewCls, "drawSubviews", "AuxStandbyCodex", nullptr, 0, &subviewRegs) : nullptr;
 	if (funcDrawSubviews == nullptr)
 	{
 		// ResolveMethod already logged which check failed; it latches nothing, so mode 3 records its own
 		// required-symbol failures here. Same for the two groups below.
-		DesktopBroken = true;
+		StandbyBroken = true;
 		return false;
 	}
 
@@ -1215,7 +1215,7 @@ static bool BuildDesktopView()
 	PField *fldAlpha = fldHidden != nullptr ? ResolveField(viewCls, "alpha", Field_Float, viewCls) : nullptr;
 	if (fldAlpha == nullptr)
 	{
-		DesktopBroken = true;
+		StandbyBroken = true;
 		return false;
 	}
 
@@ -1232,7 +1232,7 @@ static bool BuildDesktopView()
 		fldTabs[i] = ResolveField(cls, TabFieldNames[i], Field_ViewPtr, viewCls);
 		if (fldTabs[i] == nullptr)
 		{
-			DesktopBroken = true;
+			StandbyBroken = true;
 			return false;
 		}
 	}
@@ -1252,7 +1252,7 @@ static bool BuildDesktopView()
 	//
 	// If any of this does not resolve, the code falls back to layoutChange - which is what shipped and
 	// is correct in every respect except the clipping. Neither resolver latches anything, so nothing here
-	// touches DesktopBroken: a clipped tab bar beats no desktop.
+	// touches StandbyBroken: a clipped tab bar beats no desktop.
 	// ------------------------------------------------------------------------------------------
 	static const EArgKind CalcScaleArgs[] = { Arg_Int, Arg_Int, Arg_Vector2 };
 	static const EArgKind ViewLayoutArgs[] = { Arg_Vector2, Arg_Float, Arg_Bool };
@@ -1260,18 +1260,18 @@ static bool BuildDesktopView()
 	int calcScaleRegs = 0, menuLayoutRegs = 0, viewLayoutRegs = 0;
 	// calcScale(int, int, Vector2) is FIVE registers, not four - a Vector2 is one declared argument and
 	// two registers (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxDesktopView", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxStandbyCodex", CalcScaleArgs, 3, &calcScaleRegs);
 	// PDAMenu3.layout() - pda_menu.zs:771, non-virtual, self only. All it does is refresh
 	// background.freeze, which is moot while background.hidden is true, but it is what layoutChange
 	// calls and there may be more in it later.
 	VMFunction *funcMenuLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", "AuxDesktopView", nullptr, 0, &menuLayoutRegs) : nullptr;
+		? ResolveMethod(cls, "layout", "AuxStandbyCodex", nullptr, 0, &menuLayoutRegs) : nullptr;
 	// mainView.layout(), with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel that
 	// makes UIView.layout derive cScale from the view's own scale chain (view.zs:763) instead of taking
 	// ours, and parentAlpha -1 does the same for alpha (:764). Passing (1,1)/1.0 instead would overwrite
 	// the 0.6458 scale calcScale just installed.
 	VMFunction *funcViewLayout = funcMenuLayout != nullptr
-		? ResolveMethod(viewCls, "layout", "AuxDesktopView", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+		? ResolveMethod(viewCls, "layout", "AuxStandbyCodex", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
 	// PDAMenu3.calcScale reads ui_scaling unconditionally (pda_menu.zs:787) - unlike UIMenu.calcScale
 	// it does not honour ignoreUIScaling (menu.zs:125) - and Selaco's handheld profile sets that cvar
 	// to 1.2 (SetSteamdeckPresets, forced on for Android at d_main.cpp:3513). A baseline cannot absorb
@@ -1284,26 +1284,26 @@ static bool BuildDesktopView()
 	if (fldUIScaling == nullptr)
 	{
 		funcCalcScale = nullptr;
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: no wide-box relayout, falling back to layoutChange - "
-			"the tab bar will clip horizontally and aux_dashboard_zoom will do nothing\n");
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: no wide-box relayout, falling back to layoutChange - "
+			"the tab bar will clip horizontally and aux_codex_size will do nothing\n");
 	}
 
-	// Cached for the live retune, which re-runs exactly this relayout when aux_dashboard_zoom moves.
-	// Assigned on the failure path too, because FuncDesktopCalcScale is what DesktopRetune tests to decide
+	// Cached for the live retune, which re-runs exactly this relayout when aux_codex_size moves.
+	// Assigned on the failure path too, because FuncStandbyCalcScale is what StandbyRetune tests to decide
 	// whether the zoom can do anything at all.
-	FuncDesktopCalcScale = funcCalcScale;
-	FuncDesktopMenuLayout = funcMenuLayout;
-	FuncDesktopViewLayout = funcViewLayout;
-	FldDesktopUIScaling = fldUIScaling;
-	DesktopCalcScaleRegs = calcScaleRegs;
-	DesktopViewLayoutRegs = viewLayoutRegs;
-	DesktopPdaClass = cls;
-	DesktopViewClass = viewCls;
+	FuncStandbyCalcScale = funcCalcScale;
+	FuncStandbyMenuLayout = funcMenuLayout;
+	FuncStandbyViewLayout = funcViewLayout;
+	FldStandbyUIScaling = fldUIScaling;
+	StandbyCalcScaleRegs = calcScaleRegs;
+	StandbyViewLayoutRegs = viewLayoutRegs;
+	StandbyPdaClass = cls;
+	StandbyViewClass = viewCls;
 
 	// lastUIScale is where PDAMenu3.calcScale leaves the scale it settled on, and the only use made of it
 	// here is the log line - so it is resolved apart from the group above and its absence costs the accuracy
-	// of that line and nothing else. See DesktopInstalledScale.
-	FldDesktopLastUIScale = funcCalcScale != nullptr
+	// of that line and nothing else. See StandbyInstalledScale.
+	FldStandbyLastUIScale = funcCalcScale != nullptr
 		? ResolveField(cls, "lastUIScale", Field_Float, viewCls) : nullptr;
 
 	// Root before anything can allocate: init() creates well over a hundred DObjects and any of those
@@ -1316,12 +1316,12 @@ static bool BuildDesktopView()
 	static bool markerRegistered = false;
 	if (!markerRegistered)
 	{
-		GC::AddMarkerFunc([]() { GC::Mark(DesktopMenu); GC::Mark(DesktopRootView); GC::Mark(DesktopPendingApp); });
+		GC::AddMarkerFunc([]() { GC::Mark(StandbyMenu); GC::Mark(StandbyRootView); GC::Mark(StandbyPendingApp); });
 		markerRegistered = true;
 	}
 
 	DObject *menu = cls->CreateNew();
-	DesktopMenu = menu;
+	StandbyMenu = menu;
 	GC::WriteBarrier(menu);   // the pointer is not inside an object, same case as menu.cpp:372
 
 	try
@@ -1350,10 +1350,10 @@ static bool BuildDesktopView()
 			// Exactly UIView, not merely a subclass: draw/drawSubviews/setCanvas were resolved against
 			// UIView's vtable, and a subclass could override any of them with something this code has
 			// not read. Re-resolving against the real class would be the fix if Selaco ever changes it.
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.mainView is not a plain %s, desktop view disabled\n",
-				DesktopClassName, ViewClassName);
-			DesktopBroken = true;
-			DesktopViewDiscard();
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.mainView is not a plain %s, second-screen view disabled\n",
+				StandbyClassName, ViewClassName);
+			StandbyBroken = true;
+			StandbyViewDiscard();
 			return false;
 		}
 
@@ -1363,10 +1363,10 @@ static bool BuildDesktopView()
 		DObject *background = ReadObjectField(menu, fldBackground);
 		if (background == nullptr || !background->IsKindOf(viewCls))
 		{
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.background is not a %s, desktop view disabled\n",
-				DesktopClassName, ViewClassName);
-			DesktopBroken = true;
-			DesktopViewDiscard();
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.background is not a %s, second-screen view disabled\n",
+				StandbyClassName, ViewClassName);
+			StandbyBroken = true;
+			StandbyViewDiscard();
 			return false;
 		}
 		*(bool *)((uint8_t *)background + fldHidden->Offset) = true;
@@ -1375,10 +1375,10 @@ static bool BuildDesktopView()
 		// ticker(). Without this the desktop is laid out and drawn perfectly at alpha 0 - i.e. blank.
 		if (!SetViewAlpha(ReadObjectField(menu, fldInnerView), viewCls, fldAlpha, 1.0))
 		{
-			Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.innerView is not a %s, desktop view disabled\n",
-				DesktopClassName, ViewClassName);
-			DesktopBroken = true;
-			DesktopViewDiscard();
+			Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.innerView is not a %s, second-screen view disabled\n",
+				StandbyClassName, ViewClassName);
+			StandbyBroken = true;
+			StandbyViewDiscard();
 			return false;
 		}
 
@@ -1386,10 +1386,10 @@ static bool BuildDesktopView()
 		{
 			if (!SetViewAlpha(ReadObjectField(menu, fldTabs[i]), viewCls, fldAlpha, 1.0))
 			{
-				Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s.%s is not a %s, desktop view disabled\n",
-					DesktopClassName, TabFieldNames[i], ViewClassName);
-				DesktopBroken = true;
-				DesktopViewDiscard();
+				Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s.%s is not a %s, second-screen view disabled\n",
+					StandbyClassName, TabFieldNames[i], ViewClassName);
+				StandbyBroken = true;
+				StandbyViewDiscard();
 				return false;
 			}
 		}
@@ -1403,11 +1403,11 @@ static bool BuildDesktopView()
 		}
 
 		// WHICH APP THE PANEL SHOWS - the live codex's last tab if there is one, otherwise
-		// aux_dashboard_app, and never a locked app. See the block above SelectDashboardApp. Placed after
+		// aux_standby_app, and never a locked app. See the block above SelectStandbyApp. Placed after
 		// setCanvas so a window added now inherits the canvas (view.zs:941), and before the relayout below so
 		// that whatever changed gets laid out by it. A false return is not a failure: the desktop then keeps
 		// the app set init() restored, which is what shipped, so it is deliberately not checked.
-		SelectDashboardApp(menu, cls, viewCls);
+		SelectStandbyApp(menu, cls, viewCls);
 
 		// SUPPRESSION 3 - and the reason mainView's frame is never written by hand. UIMenu.init sized
 		// mainView from Screen.GetWidth()/GetHeight() (menu.zs:157-163) and scaled it with calcScale
@@ -1419,12 +1419,12 @@ static bool BuildDesktopView()
 		// The difference from layoutChange is the BASELINE, and only the baseline: layoutChange would
 		// let calcScale default to (1920, 1080), which makes the logical box the canvas width and clips
 		// a 1920-wide design at both edges. See DesktopBaselineHeight for the arithmetic, and
-		// aux_dashboard_zoom for the divisor the player can move - at zoom 1.0 this is exactly what
+		// aux_codex_size for the divisor the player can move - at zoom 1.0 this is exactly what
 		// shipped.
 		if (funcCalcScale != nullptr)
 		{
-			DesktopLayoutZoom = DashboardZoom();
-			DesktopRelayout(menu, mainView, DesktopLayoutZoom);
+			StandbyLayoutZoom = CodexZoom();
+			StandbyRelayout(menu, mainView, StandbyLayoutZoom);
 		}
 		else
 		{
@@ -1432,7 +1432,7 @@ static bool BuildDesktopView()
 			VMCall(funcLayoutChange, params, layoutChangeRegs, nullptr, 0);
 		}
 
-		DesktopRootView = mainView;
+		StandbyRootView = mainView;
 		GC::WriteBarrier(mainView);
 
 		if (FProjectionScope::Suppressed != suppressedBefore
@@ -1441,16 +1441,16 @@ static bool BuildDesktopView()
 			// Not a warning. This is the evidence that the projection scope is load-bearing rather than
 			// decorative, and the counts are what a future app's writes and chirps would show up in. The
 			// sound count is the one to read after a rebuild: it should be 1 for PDAMenu3.init's own
-			// MenuSound("codex/open") (pda_menu.zs:90) plus one per app window SelectDashboardApp closed
+			// MenuSound("codex/open") (pda_menu.zs:90) plus one per app window SelectStandbyApp closed
 			// (app_window.zs:136), and a 0 there means the guard in s_doomsound.cpp is not in this binary.
 			//
 			// The parenthesised token is a REVISION SENTINEL, deliberately unique to this change so it can
 			// be grepped out of the built .so to prove which revision is actually packaged - a size match
 			// has twice passed against a stale APK on this project.
-			Printf("AuxDesktopView: suppressed %d player-state write(s) and silenced %d UI sound(s) "
+			Printf("AuxStandbyCodex: suppressed %d player-state write(s) and silenced %d UI sound(s) "
 				"while building %s (projection-mute r1)\n",
 				FProjectionScope::Suppressed - suppressedBefore,
-				FProjectionScope::SuppressedSounds - silencedBefore, DesktopClassName);
+				FProjectionScope::SuppressedSounds - silencedBefore, StandbyClassName);
 		}
 	}
 	catch (const std::exception &e)
@@ -1458,35 +1458,35 @@ static bool BuildDesktopView()
 		// A VM abort is a CVMAbortException, deriving from std::exception (vm.h:107,
 		// engineerrors.h:46). Catching it is what keeps a bug in game code we are calling unusually
 		// from taking the frame - and therefore the main screen - down with it.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: building %s aborted (%s), desktop view disabled\n",
-			DesktopClassName, e.what());
-		DesktopBroken = true;
-		DesktopViewDiscard();
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: building %s aborted (%s), second-screen view disabled\n",
+			StandbyClassName, e.what());
+		StandbyBroken = true;
+		StandbyViewDiscard();
 		return false;
 	}
 
-	DesktopCanvas = canvas;
-	FuncDesktopDraw = funcDraw;
-	FuncDesktopDrawSubviews = funcDrawSubviews;
+	StandbyCanvas = canvas;
+	FuncStandbyDraw = funcDraw;
+	FuncStandbyDrawSubviews = funcDrawSubviews;
 
 	// The logical box is what to check a screenshot against: at 1240x1080 with the derived baseline and zoom
 	// 1.0 it is 1920 x 1672.3 at scale 0.6458, so the whole 1920-wide design fits across the panel.
 	// The scale is read back from the menu rather than computed, so this shows what calcScale's own CLAMP and
-	// snap settled on rather than what was asked for - see DesktopInstalledScale.
+	// snap settled on rather than what was asked for - see StandbyInstalledScale.
 	if (funcCalcScale != nullptr)
 	{
 		bool measured = false;
-		const double scale = DesktopInstalledScale(menu, DesktopLayoutZoom, &measured);
-		Printf("AuxDesktopView: %s built at %gx%g on %s, logical box %gx%g at %s scale %g, zoom %g%s\n",
-			DesktopClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
+		const double scale = StandbyInstalledScale(menu, StandbyLayoutZoom, &measured);
+		Printf("AuxStandbyCodex: %s built at %gx%g on %s, logical box %gx%g at %s scale %g, zoom %g%s\n",
+			StandbyClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
 			AuxCanvasWidth / scale, AuxCanvasHeight / scale, measured ? "measured" : "predicted", scale,
-			DesktopLayoutZoom, DashboardZoomLimitNote(DesktopLayoutZoom));
+			StandbyLayoutZoom, CodexZoomLimitNote(StandbyLayoutZoom));
 	}
 	else
 	{
-		Printf("AuxDesktopView: %s built at %gx%g on %s, logical box %gx%g at scale 1 "
-			"(layoutChange fallback, aux_dashboard_zoom inert)\n",
-			DesktopClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
+		Printf("AuxStandbyCodex: %s built at %gx%g on %s, logical box %gx%g at scale 1 "
+			"(layoutChange fallback, aux_codex_size inert)\n",
+			StandbyClassName, AuxCanvasWidth, AuxCanvasHeight, AuxCanvasName,
 			AuxCanvasWidth, AuxCanvasHeight);
 	}
 	return true;
@@ -1563,12 +1563,12 @@ static bool StatsHashValid = false;
 // be inside the cooldown. I_msTimeF and never I_msTimeFS: the latter is measured from
 // FirstFrameStartTime, which I_FreezeTime and I_ResetFrameTime both ADVANCE, so a level transition would
 // make the delta go sharply negative - the same trap d_main.cpp's BenchTickMs comment records.
-static const double DesktopRebuildCooldownMs = 3000.0;
+static const double StandbyRebuildCooldownMs = 3000.0;
 
 // Wall time of the last rebuild, and how many distinct changes have been detected since. Zero-initialised
 // rather than seeded, so the very first change is always a leading edge and rebuilds at once.
-static double DesktopLastRebuildMs = 0.0;
-static int DesktopPendingChanges = 0;
+static double StandbyLastRebuildMs = 0.0;
+static int StandbyPendingChanges = 0;
 
 static bool StatsProbeResolve()
 {
@@ -1576,7 +1576,7 @@ static bool StatsProbeResolve()
 	PClassActor *statsCls = statsName != NAME_None ? PClass::FindActor(statsName) : nullptr;
 	if (statsCls == nullptr)
 	{
-		Printf("AuxDesktopView: no %s inventory class - stat totals unreadable, "
+		Printf("AuxStandbyCodex: no %s inventory class - stat totals unreadable, "
 			"the desktop will not refresh\n", StatsClassName);
 		StatsProbeBroken = true;
 		return false;
@@ -1585,14 +1585,14 @@ static bool StatsProbeResolve()
 	PClass *trackerCls = PClass::FindClass(StatTrackerClassName);
 	if (trackerCls == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: no %s class, the desktop will not refresh\n",
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: no %s class, the desktop will not refresh\n",
 			StatTrackerClassName);
 		StatsProbeBroken = true;
 		return false;
 	}
 
 	// A failure to read the stats must NOT disable the desktop - a static desktop is the whole
-	// pre-existing behaviour and is far better than none - so nothing here touches DesktopBroken and the
+	// pre-existing behaviour and is far better than none - so nothing here touches StandbyBroken and the
 	// failure is recorded against StatsProbeBroken instead. ResolveField latches nothing of its own.
 	PField *fldTrackers = ResolveField(statsCls, "trackers", Field_ObjArray, trackerCls);
 	PField *fldValue = fldTrackers != nullptr ? ResolveField(trackerCls, "value", Field_Float, trackerCls) : nullptr;
@@ -1601,7 +1601,7 @@ static bool StatsProbeResolve()
 
 	if (fldPossible == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: %s does not look the way this code was written against, "
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: %s does not look the way this code was written against, "
 			"the desktop will not refresh\n", StatsClassName);
 		StatsProbeBroken = true;
 		return false;
@@ -1615,7 +1615,7 @@ static bool StatsProbeResolve()
 	StatsTrackerCount = static_cast<PArray *>(fldTrackers->Type)->ElementCount;
 	StatsProbeResolved = true;
 
-	Printf("AuxDesktopView: %s.trackers resolved, %u trackers, desktop refreshes on stat changes\n",
+	Printf("AuxStandbyCodex: %s.trackers resolved, %u trackers, desktop refreshes on stat changes\n",
 		StatsClassName, StatsTrackerCount);
 	return true;
 }
@@ -1702,11 +1702,11 @@ static bool StatsProbeHash(uint64_t &out)
 //
 // NOTE WHAT THE BUG ACTUALLY IS, because it is not the pair of writes it looks like. init() does NOT duck
 // the music: it only sets curMusicVolume/targetMusicVolume/musicVolumeSteps (pda_menu.zs:83-85), and the
-// SetMusicVolume that acts on them is in ticker() at :821-824, which the dashboard never calls. So the
-// dashboard ducks nothing and only ever performs the RESTORE - and it performs it at an arbitrary moment,
+// SetMusicVolume that acts on them is in ticker() at :821-824, which the standby codex never calls. So the
+// standby codex ducks nothing and only ever performs the RESTORE - and it performs it at an arbitrary moment,
 // whenever the GC happens to sweep, with no relationship to what the audio state is by then. The case that
 // actually hurts: the player opens their real PDA, which legitimately ducks the music to 25% because that
-// menu IS ticked, and a dashboard collected during that window snaps it back to full while they are reading.
+// menu IS ticked, and a standby codex collected during that window snaps it back to full while they are reading.
 //
 // SO THE DESTROY IS MADE EXPLICIT AND NEUTRALISED, rather than left to the sweep. Destroying it here means
 // the one script line runs at a known instant, inside a projection scope and a try/catch like every other
@@ -1719,24 +1719,24 @@ static bool StatsProbeHash(uint64_t &out)
 // never called from here, so the discard path has nothing for the CHANF_UI guard to refuse. Music volume
 // and UI sound are separate subsystems reached by separate natives - SetMusicVolume lands on
 // I_SetMusicVolume, not on S_StartSound - so this snapshot stays exactly as load-bearing as it was.
-static void DesktopViewDiscard()
+static void StandbyViewDiscard()
 {
-	DObject *menu = DesktopMenu;
+	DObject *menu = StandbyMenu;
 
-	DesktopMenu = nullptr;
-	DesktopRootView = nullptr;
+	StandbyMenu = nullptr;
+	StandbyRootView = nullptr;
 
 	// Cleared so nothing can draw through a stale root between the discard and the rebuild. Everything
-	// else BuildDesktopView caches is reassigned by it, and DesktopAbsent/DesktopBroken are deliberately
+	// else BuildStandbyView caches is reassigned by it, and StandbyAbsent/StandbyBroken are deliberately
 	// untouched: a latched failure must stay latched.
-	FuncDesktopDraw = nullptr;
-	FuncDesktopDrawSubviews = nullptr;
-	DesktopCanvas = nullptr;
+	FuncStandbyDraw = nullptr;
+	FuncStandbyDrawSubviews = nullptr;
+	StandbyCanvas = nullptr;
 
 	// Reset so the rebuilt desktop always re-selects, and so a selection that failed on the old menu is not
 	// mistaken for one that succeeded on the new one.
-	DesktopAppWantedIndex = -1;
-	DesktopAppShownIndex = -1;
+	StandbyAppWantedIndex = -1;
+	StandbyAppShownIndex = -1;
 
 	if (menu == nullptr || (menu->ObjectFlags & OF_EuthanizeMe))
 		return;
@@ -1756,26 +1756,26 @@ static void DesktopViewDiscard()
 	{
 		// A VM abort in onDestroy would otherwise take the frame - and therefore the main screen - down.
 		// Nothing to latch: the menu is already unrooted, so the worst case is the sweep finishing the job.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: destroying %s aborted (%s)\n", DesktopClassName, e.what());
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: destroying %s aborted (%s)\n", StandbyClassName, e.what());
 	}
 
 	if (relative_volume != savedRelativeVolume)
 		I_SetMusicVolume(savedRelativeVolume);
 }
 
-static bool DesktopViewUpdate(bool *outNeedsRedraw)
+static bool StandbyViewUpdate(bool *outNeedsRedraw)
 {
-	if (DesktopAbsent || DesktopBroken)
+	if (StandbyAbsent || StandbyBroken)
 		return false;
 
-	if (DesktopMenu != nullptr && (DesktopMenu->ObjectFlags & OF_EuthanizeMe))
+	if (StandbyMenu != nullptr && (StandbyMenu->ObjectFlags & OF_EuthanizeMe))
 	{
 		// Nothing should be able to destroy it - it is not in the menu stack and is referenced only
 		// from here - so this is "the world is not what this code assumes", not a state to recover.
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: the desktop was destroyed, desktop view disabled\n");
-		DesktopMenu = nullptr;
-		DesktopRootView = nullptr;
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: the desktop was destroyed, second-screen view disabled\n");
+		StandbyMenu = nullptr;
+		StandbyRootView = nullptr;
+		StandbyBroken = true;
 		return false;
 	}
 
@@ -1786,11 +1786,11 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 	// alone leaves the desktop showing stale content.
 	//
 	// GATED ON THE REBUILD'S OWN PRECONDITIONS, which is not belt-and-braces. A discard is only safe if
-	// the rebuild that follows it can actually succeed: BuildDesktopView refuses outside GS_LEVEL and
+	// the rebuild that follows it can actually succeed: BuildStandbyView refuses outside GS_LEVEL and
 	// without a pawn, so discarding during a map change would throw away a WORKING desktop and leave
 	// i_auxpanel.cpp falling back to the C++ test pattern until the next level finished loading. Waiting
 	// costs nothing - the content is stale either way - and the triggers are still true when we get here.
-	if (DesktopMenu != nullptr && gamestate == GS_LEVEL
+	if (StandbyMenu != nullptr && gamestate == GS_LEVEL
 		&& consoleplayer >= 0 && consoleplayer < MAXPLAYERS && playeringame[consoleplayer]
 		&& players[consoleplayer].mo != nullptr)
 	{
@@ -1798,9 +1798,9 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 
 		extern unsigned I_AuxCodexGeneration();
 		const unsigned generation = I_AuxCodexGeneration();
-		if (generation != DesktopGeneration)
+		if (generation != StandbyGeneration)
 		{
-			DesktopGeneration = generation;
+			StandbyGeneration = generation;
 			changed = true;
 		}
 
@@ -1820,14 +1820,14 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 		}
 
 		// A THIRD trigger is deliberately ABSENT here. Changing which app is shown - whether from the player
-		// closing their real PDA or from aux_dashboard_app moving - does NOT rebuild: it is handled by the
+		// closing their real PDA or from aux_standby_app moving - does NOT rebuild: it is handled by the
 		// re-select block below, on the desktop that is already built. See there for why.
 
 		// The baseline is advanced ABOVE, as each change is detected, rather than at the rebuild. That is
 		// what makes coalescing lossless: every distinct change is counted exactly once and the eventual
 		// rebuild reads whatever the totals are by then, so nothing is missed by not rebuilding for it.
 		if (changed)
-			DesktopPendingChanges++;
+			StandbyPendingChanges++;
 
 		// LEADING-EDGE DEBOUNCE WITH COOLDOWN, and the leading edge is the point. A hash change after a
 		// quiet spell rebuilds on the SAME frame - finding a secret out of combat still feels instant,
@@ -1841,51 +1841,51 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 		// unbounded correctness bug after a game patch. Debouncing keeps the whole-array hash and its
 		// completeness property intact.
 		const double nowMs = I_msTimeF();
-		if (DesktopPendingChanges > 0 && nowMs - DesktopLastRebuildMs >= DesktopRebuildCooldownMs)
+		if (StandbyPendingChanges > 0 && nowMs - StandbyLastRebuildMs >= StandbyRebuildCooldownMs)
 		{
 			// Rebuilt rather than updated - see the header above this section. The remaining cost is accepted
 			// and deliberately not made configurable: the whole init plus a ~30 ms readback drops a frame.
 			// The codex no longer CHIRPS, which used to be the cost the player actually noticed here -
 			// MenuSound("codex/open") still fires from PDAMenu3.init (pda_menu.zs:90), but it is a CHANF_UI
-			// sound inside a projection scope and BuildDesktopView refuses it (projectionscope.h).
-			// The app on show is NOT one of the costs any more: SelectDashboardApp runs at the end of the
+			// sound inside a projection scope and BuildStandbyView refuses it (projectionscope.h).
+			// The app on show is NOT one of the costs any more: SelectStandbyApp runs at the end of the
 			// rebuild with the same precedence as everywhere else, so the desktop comes back on the live
 			// codex's last tab rather than on the default.
 			//
 			// The count is logged because a debounce and a MISSED DETECTION look identical on a device -
 			// both are "the panel did not update when I expected". A number greater than 1 is positive proof
 			// that the coalescing is what deferred the rebuild rather than the hash failing to notice.
-			Printf("AuxDesktopView: stat or unlock change, rebuilding the desktop (%d change%s coalesced)\n",
-				DesktopPendingChanges, DesktopPendingChanges == 1 ? "" : "s");
-			DesktopViewDiscard();
+			Printf("AuxStandbyCodex: stat or unlock change, rebuilding the desktop (%d change%s coalesced)\n",
+				StandbyPendingChanges, StandbyPendingChanges == 1 ? "" : "s");
+			StandbyViewDiscard();
 		}
 	}
 
-	if (DesktopMenu == nullptr)
+	if (StandbyMenu == nullptr)
 	{
-		if (!BuildDesktopView())
+		if (!BuildStandbyView())
 			return false;
 
 		// Re-baseline both triggers against the desktop that was just built, so the very next frame does
 		// not immediately consider it stale again.
 		extern unsigned I_AuxCodexGeneration();
-		DesktopGeneration = I_AuxCodexGeneration();
+		StandbyGeneration = I_AuxCodexGeneration();
 		if (StatsProbeHash(StatsHashValue))
 			StatsHashValid = true;
 
 		// Start the cooldown from the rebuild that actually happened, not from the change that asked for
 		// it, so the window is "time since the last rebuild" rather than "time since the last pickup".
-		DesktopPendingChanges = 0;
-		DesktopLastRebuildMs = I_msTimeF();
+		StandbyPendingChanges = 0;
+		StandbyLastRebuildMs = I_msTimeF();
 
 		if (outNeedsRedraw != nullptr)
 			*outNeedsRedraw = true;
 	}
-	else if (AppSelectResolved && !AppSelectBroken && DashboardWantedIndex(nullptr) != DesktopAppWantedIndex)
+	else if (AppSelectResolved && !AppSelectBroken && StandbyWantedIndex(nullptr) != StandbyAppWantedIndex)
 	{
 		// THE FALLING EDGE OF THE PLAYER CLOSING THEIR PDA, AND WHY IT IS NOT A REBUILD.
 		//
-		// The dashboard's PDAMenu3 is a DIFFERENT INSTANCE from the engine's CurrentMenu - mode 3 constructs
+		// The standby codex's PDAMenu3 is a DIFFERENT INSTANCE from the engine's CurrentMenu - mode 3 constructs
 		// its own with PClass::CreateNew and never puts it in the menu stack - so when the player closes
 		// theirs, ours is untouched, still rooted, still laid out, still drawable. Everything that has to
 		// change is one switchToAppWindow, the close sweep and six setSelected calls. Rebuilding instead
@@ -1894,8 +1894,8 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 		//
 		// It is not on an edge detector either, but on "what we want differs from what we selected", which
 		// covers three cases with one test and no state machine: the player closed their PDA on a different
-		// app, aux_dashboard_app moved, or the first sample from the live codex arrived. Cheap enough to sit
-		// on the per-frame path - DashboardWantedIndex is at most twelve pointer and int compares with no
+		// app, aux_standby_app moved, or the first sample from the live codex arrived. Cheap enough to sit
+		// on the per-frame path - StandbyWantedIndex is at most twelve pointer and int compares with no
 		// lookups, no allocation and no VM call.
 		//
 		// IN MODE 5 THIS RUNS ON EXACTLY THE RIGHT FRAMES. i_auxpanel.cpp resolves the mode per frame and
@@ -1907,9 +1907,9 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 		// it walks (view.zs:464) and UIView.draw calls it on itself (:439), and layoutIfNecessary's
 		// argument-less layout() takes the (0,0)/-1 sentinels that derive cScale and cAlpha from the view's
 		// own chain (view.zs:762-764) - so it inherits the scale calcScale installed at build time instead
-		// of overwriting it. That first layout reaches savePos(), which is why DesktopViewDraw's own
+		// of overwriting it. That first layout reaches savePos(), which is why StandbyViewDraw's own
 		// FProjectionScope is load-bearing here too.
-		if (SelectDashboardApp(DesktopMenu, AppMenuClass, AppViewClass) && outNeedsRedraw != nullptr)
+		if (SelectStandbyApp(StandbyMenu, AppMenuClass, AppViewClass) && outNeedsRedraw != nullptr)
 			*outNeedsRedraw = true;
 	}
 
@@ -1918,14 +1918,14 @@ static bool DesktopViewUpdate(bool *outNeedsRedraw)
 	// current zoom itself and baselines it, so this is a no-op on that frame, and a re-select changes
 	// which app is on top without changing the box it is drawn in. Cheap on the unchanged path - one clamped
 	// cvar read and one double compare, no lookups, no allocation and no VM call.
-	DesktopRetune(outNeedsRedraw);
+	StandbyRetune(outNeedsRedraw);
 
 	return true;
 }
 
-static void DesktopViewDraw()
+static void StandbyViewDraw()
 {
-	if (DesktopAbsent || DesktopBroken || DesktopRootView == nullptr)
+	if (StandbyAbsent || StandbyBroken || StandbyRootView == nullptr)
 		return;
 
 	try
@@ -1944,21 +1944,21 @@ static void DesktopViewDraw()
 		// into the MAIN screen's twod, and calls animator.step()/testMouse() which mutate the tree
 		// mid-draw (menu.zs:278-289); PDAMenu3.drawer() hardcodes Screen.GetWidth/setClipRect/DrawTexture
 		// (pda_menu.zs:1168-1197).
-		VMValue params[] = { DesktopRootView };
-		VMCall(FuncDesktopDraw, params, 1, nullptr, 0);
-		VMCall(FuncDesktopDrawSubviews, params, 1, nullptr, 0);
+		VMValue params[] = { StandbyRootView };
+		VMCall(FuncStandbyDraw, params, 1, nullptr, 0);
+		VMCall(FuncStandbyDrawSubviews, params, 1, nullptr, 0);
 	}
 	catch (const std::exception &e)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxDesktopView: drawing %s aborted (%s), desktop view disabled\n",
-			DesktopClassName, e.what());
-		DesktopBroken = true;
+		Printf(TEXTCOLOR_YELLOW "AuxStandbyCodex: drawing %s aborted (%s), second-screen view disabled\n",
+			StandbyClassName, e.what());
+		StandbyBroken = true;
 		// Fall through to the clip reset: an abort part way through drawSubviews leaves whatever clip
 		// rect the last setClip installed.
 	}
 
-	if (DesktopCanvas != nullptr)
-		DesktopCanvas->Drawer.ClearClipRect();
+	if (StandbyCanvas != nullptr)
+		StandbyCanvas->Drawer.ClearClipRect();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1970,68 +1970,68 @@ static void DesktopViewDraw()
 // draw to find out. Update is cheap on the overwhelmingly common no-change path: two latched bools,
 // a null test and one integer compare against the codex generation.
 //
-// The mode arrives as an argument rather than being read from aux_canvas_zscript here, because
+// The mode arrives as an argument rather than being read from aux_codex_mode here, because
 // i_auxpanel.cpp's I_AuxPanelFrame is the single place canvas ownership is decided and a second
 // reader of that cvar is a second place for the two to disagree. Mode 3 is the only value that means
 // anything to this file; anything else is answered as "no content", which the caller turns into a
 // dropped frame and Selaco's startup splash.
 
-bool I_AuxCodexViewUpdate(int mode, bool *outNeedsRedraw)
+bool I_AuxStandbyCodexUpdate(int mode, bool *outNeedsRedraw)
 {
 	if (outNeedsRedraw != nullptr)
 		*outNeedsRedraw = false;
 
-	return mode == 3 && DesktopViewUpdate(outNeedsRedraw);
+	return mode == AuxMode_Standby && StandbyViewUpdate(outNeedsRedraw);
 }
 
-void I_AuxCodexViewDraw(int mode)
+void I_AuxStandbyCodexDraw(int mode)
 {
-	if (mode == 3)
-		DesktopViewDraw();
+	if (mode == AuxMode_Standby)
+		StandbyViewDraw();
 }
 
 // Forget every resolve this file latched, for the restart teardown. See I_AuxForgetScriptState in
 // i_auxvmreflect.cpp for why it exists and when it runs.
 //
-// NOT DesktopViewDiscard, and that is the whole reason this function is separate from it: Discard calls
+// NOT StandbyViewDiscard, and that is the whole reason this function is separate from it: Discard calls
 // menu->Destroy(), which dispatches PDAMenu3's scripted onDestroy (pda_menu.zs:973) and through it
 // I_SetMusicVolume. Both are illegal at teardown - the sound system is already down and the classes are
 // about to be deleted - so the menu is simply unrooted here and left to the collection inside
 // PClass::StaticShutdown, which runs with bVMOperational already false and therefore calls no script at all.
 //
 // THE THREE MARKED POINTERS COME FIRST because they are the crash: the marker function registered in
-// BuildDesktopView stays in GC's marker array for the life of the process (there is no RemoveMarkerFunc),
+// BuildStandbyView stays in GC's marker array for the life of the process (there is no RemoveMarkerFunc),
 // so anything still here is walked by the first collection after the restart, by which time its PClass has
 // been deleted. The rest is the remainder the audit found - every one-shot resolve, so that the next init
 // re-resolves against the freshly parsed script instead of reusing a freed PField's offset.
-void I_AuxCodexViewForgetScriptState()
+void I_AuxStandbyCodexForgetScriptState()
 {
-	DesktopMenu = nullptr;
-	DesktopRootView = nullptr;
-	DesktopPendingApp = nullptr;
+	StandbyMenu = nullptr;
+	StandbyRootView = nullptr;
+	StandbyPendingApp = nullptr;
 
-	// DesktopAbsent and DesktopBroken are cleared here although DesktopViewDiscard deliberately leaves them
+	// StandbyAbsent and StandbyBroken are cleared here although StandbyViewDiscard deliberately leaves them
 	// latched, because the two cases are not the same one. Discard keeps a verdict about script that is still
 	// loaded; a restart can load an entirely different wad set, so the old verdict is about a game that is no
 	// longer running. The cost of being wrong is one re-attempt and one repeated yellow line.
-	DesktopAbsent = false;
-	DesktopBroken = false;
+	StandbyAbsent = false;
+	StandbyBroken = false;
 
 	// The canvas is a DObject owned by the AUXCANVAS FCanvasTexture, and D_Cleanup's TexMan.DeleteAll()
 	// destroys the texture, which unlinks the FCanvas from AllCanvases - its only GC root - and nulls it.
-	DesktopCanvas = nullptr;
-	FuncDesktopDraw = nullptr;
-	FuncDesktopDrawSubviews = nullptr;
-	DesktopGeneration = 0;
+	StandbyCanvas = nullptr;
+	FuncStandbyDraw = nullptr;
+	FuncStandbyDrawSubviews = nullptr;
+	StandbyGeneration = 0;
 
-	// The app-select group, which BuildDesktopView does NOT reassign: it resolves once for the process and
+	// The app-select group, which BuildStandbyView does NOT reassign: it resolves once for the process and
 	// is gated by AppSelectResolved, so without this the first post-restart selection reads tab offsets out
 	// of freed PFields and calls freed VMFunctions.
 	AppSelectResolved = false;
 	AppSelectBroken = false;
 	AppWindowClass = nullptr;
 	AppTabClass = nullptr;
-	FldDesktopView = nullptr;
+	FldStandbyView = nullptr;
 	FldViewParentMenu = nullptr;
 	FldTabDisabled = nullptr;
 	FuncNumSubviews = nullptr;
@@ -2046,33 +2046,33 @@ void I_AuxCodexViewForgetScriptState()
 	SetSelectedRegs = 0;
 	AppMenuClass = nullptr;
 	AppViewClass = nullptr;
-	for (unsigned i = 0; i < countof(DashboardApps); i++)
+	for (unsigned i = 0; i < countof(StandbyApps); i++)
 	{
 		AppClasses[i] = nullptr;
 		AppVInit[i] = nullptr;
 		AppVInitRegs[i] = 0;
 		AppTabFields[i] = nullptr;
 	}
-	DesktopAppWantedIndex = -1;
-	DesktopAppShownIndex = -1;
+	StandbyAppWantedIndex = -1;
+	StandbyAppShownIndex = -1;
 
-	// The wide-box relayout group. FuncDesktopCalcScale doubles as the group's "resolved" flag, which is
-	// what DesktopRetune tests before calling through the rest of them.
-	FuncDesktopCalcScale = nullptr;
-	FuncDesktopMenuLayout = nullptr;
-	FuncDesktopViewLayout = nullptr;
-	FldDesktopUIScaling = nullptr;
-	FldDesktopLastUIScale = nullptr;
-	DesktopCalcScaleRegs = 0;
-	DesktopViewLayoutRegs = 0;
-	DesktopPdaClass = nullptr;
-	DesktopViewClass = nullptr;
-	DesktopLayoutZoom = 1.0;
+	// The wide-box relayout group. FuncStandbyCalcScale doubles as the group's "resolved" flag, which is
+	// what StandbyRetune tests before calling through the rest of them.
+	FuncStandbyCalcScale = nullptr;
+	FuncStandbyMenuLayout = nullptr;
+	FuncStandbyViewLayout = nullptr;
+	FldStandbyUIScaling = nullptr;
+	FldStandbyLastUIScale = nullptr;
+	StandbyCalcScaleRegs = 0;
+	StandbyViewLayoutRegs = 0;
+	StandbyPdaClass = nullptr;
+	StandbyViewClass = nullptr;
+	StandbyLayoutZoom = 1.0;
 
 	// The stat probe, which walks Stats.trackers through raw field offsets - the one place here where a
 	// stale PField is a read of arbitrary object bytes rather than a missed call. StatsHashValid is cleared
 	// so the first post-restart sample is taken as a new baseline instead of being reported as a change,
-	// which would otherwise route straight back into DesktopViewDiscard.
+	// which would otherwise route straight back into StandbyViewDiscard.
 	StatsProbeBroken = false;
 	StatsProbeResolved = false;
 	StatsActorClass = nullptr;
@@ -2083,6 +2083,6 @@ void I_AuxCodexViewForgetScriptState()
 	StatsTrackerCount = 0;
 	StatsHashValue = 0;
 	StatsHashValid = false;
-	DesktopLastRebuildMs = 0.0;
-	DesktopPendingChanges = 0;
+	StandbyLastRebuildMs = 0.0;
+	StandbyPendingChanges = 0;
 }

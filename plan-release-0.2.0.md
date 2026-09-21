@@ -190,7 +190,7 @@ keep the two honesty items, which are there deliberately:
 On the AYN Thor, the bottom screen now shows Selaco's codex while you play —
 datalogs, objectives, milestones, statistics and the manual. It is the game's
 own PDA rather than a reproduction: open your codex and the lower panel goes
-live and gamepad-driven, close it and it becomes a read-only dashboard that
+live and gamepad-driven, close it and it becomes the standby codex, which
 keeps your last tab and refreshes when you find a secret.
 
 Size is adjustable in **Options → Handhelds**, along with turning the panel

@@ -43,8 +43,8 @@ The Thor is a clamshell with two screens facing you, so the bottom one shows Sel
 manual — while you play on the top screen.
 
 It is the game's own PDA, not a copy of it: the engine draws the real thing onto the lower
-panel. Open your PDA with the codex button and the bottom screen becomes live and
-gamepad-driven; close it and it goes back to a read-only dashboard that keeps the tab you
+panel. Open your PDA with the codex button and the bottom screen becomes the live codex,
+gamepad-driven; close it and it goes back to the standby codex, which keeps the tab you
 were last on and refreshes when you find a secret or hit a milestone.
 
 Two settings in **Options → Handhelds**:

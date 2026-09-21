@@ -47,8 +47,8 @@
 ** layout transitions and then drains every outstanding fence - ~30 ms in a real level.
 **
 ** Four entry points, all called from i_auxpanel.cpp: I_AuxCanvasClear, I_AuxCanvasDrawTestPattern,
-** I_AuxCanvasRenderPending and I_AuxCanvasReadback. The test pattern is a diagnostic (aux_canvas_zscript
-** 0) rather than the only content: real content comes from i_auxcodexview.cpp.
+** I_AuxCanvasRenderPending and I_AuxCanvasReadback. The test pattern is a diagnostic (aux_codex_mode
+** 0) rather than the only content: real content comes from i_auxstandbycodex.cpp.
 */
 
 #include <memory>
@@ -70,12 +70,12 @@
 
 #include "i_auxvmreflect.h"   // GetTextureCanvas, declared once for the aux translation units
 
-// Gate for who owns this canvas. 0 = the C++ test pattern below; 3 = the whole PDAMenu3 desktop, all
-// six tabs, drawn by VM reflection; 4 = "Wii U mode", where the player's OWN PDA is moved to this
-// canvas by redirecting the engine's M_Drawer into it while the menu is open; 5 = both, resolved per
-// frame - 3 while the PDA is shut, 4 while it is open. See i_auxcodexview.cpp for mode 3, and MODE 4 in
-// i_auxmenuview.cpp, plus the mode
-// dispatch in i_auxpanel.cpp.
+// Gate for who owns this canvas: see EAuxCanvasMode (i_auxvmreflect.h) for the values. 0 is the C++
+// test pattern below; 3 is the standby codex, the whole PDAMenu3 desktop, all six tabs, drawn by VM
+// reflection; 4 is the live codex, where the player's OWN PDA is moved to this canvas by redirecting
+// the engine's M_Drawer into it while the menu is open; 5 is both, resolved per frame - 3 while the
+// PDA is shut, 4 while it is open. See i_auxstandbycodex.cpp for mode 3, and MODE 4 in
+// i_auxlivecodex.cpp, plus the mode dispatch in i_auxpanel.cpp.
 //
 // 1 and 2 ARE GONE and the numbering is deliberately left with holes in it, so notes and muscle memory
 // that name a mode still name the same one. 1 was a ZScript test pattern and 2 was Selaco's
@@ -92,8 +92,8 @@
 //
 // DEFAULT 5, because this stopped being a diagnostic switch and became the feature switch. It was 0,
 // which meant a fresh install put the blue/green/red test pattern on the second screen and the player
-// had no way to reach the dashboard - the shipped autoexec.cfg sets nothing, and flags 0 means a
-// console `aux_canvas_zscript 5` does not survive a restart. Modes 0, 3 and 4 are now the diagnostics
+// had no way to reach the standby codex - the shipped autoexec.cfg sets nothing, and flags 0 means a
+// console `aux_codex_mode 5` does not survive a restart. Modes 0, 3 and 4 are now the diagnostics
 // you select deliberately, and 5 is what you get by not choosing.
 //
 // Flags stay 0 rather than becoming CVAR_ARCHIVE, and that is deliberate on two counts. Archiving it
@@ -104,7 +104,7 @@
 //
 // aux_panel (CVAR_ARCHIVE | CVAR_GLOBALCONFIG, i_auxpanel.cpp) remains the genuinely user-facing
 // setting: whether the second screen is used at all. This one picks what it shows.
-CVAR(Int, aux_canvas_zscript, 5, 0)
+CVAR(Int, aux_codex_mode, 5, 0)
 
 // Latched on the first failure and never retried.
 //
@@ -196,9 +196,9 @@ static FCanvas *AuxCanvasResolve()
 // Required before any owner draws something that does not cover every pixel. RenderTextureView does
 // not clear the attachment, and canvas->Drawer.Clear() in the AllCanvases loop clears the COMMAND
 // LIST rather than the texture - so the texture keeps whatever the last owner left there. That
-// showed up on device as the C++ test pattern's blue/green/red/white edges framing the PDA desktop:
-// the pattern had been drawn at the title screen, the desktop drew over it once the level loaded,
-// and everything the desktop did not cover was still the pattern.
+// showed up on device as the C++ test pattern's blue/green/red/white edges framing the standby codex:
+// the pattern had been drawn at the title screen, the standby codex drew over it once the level loaded,
+// and everything the standby codex did not cover was still the pattern.
 void I_AuxCanvasClear()
 {
 	FCanvas *canvas = AuxCanvasResolve();

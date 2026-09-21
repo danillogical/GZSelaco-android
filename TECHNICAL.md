@@ -907,12 +907,12 @@ the thing that replaced it. `i_auxcodex.cpp` now keeps only the one piece still 
 `I_AuxCodexGeneration()`, which the code below still needs as a rebuild trigger.
 
 What replaced it draws Selaco's **actual** PDA desktop, rendered by the game's own presentation code
-rather than reproduced by ours, selected per frame by `aux_canvas_zscript`
-(`CVAR(Int, aux_canvas_zscript, 5, 0)`, `i_auxcanvas.cpp:107` — 5 is the shipped default, replacing
+rather than reproduced by ours, selected per frame by `aux_codex_mode`
+(`CVAR(Int, aux_codex_mode, 5, 0)`, `i_auxcanvas.cpp:107` — 5 is the shipped default, replacing
 what used to be the diagnostic test pattern). Mode 5 resolves, once per frame, to whichever of two
 owners should hold the canvas (`i_auxpanel.cpp:479-490`):
 
-- **mode 3, the read-only dashboard.** We construct our own `PDAMenu3` by VM reflection, write a few
+- **mode 3, the standby codex.** We construct our own `PDAMenu3` by VM reflection, write a few
   fields, and call its `draw`/`drawSubviews` through the VM. Visible during gameplay, edge-triggered
   on a content change rather than redrawn every frame.
 - **mode 4, the live codex.** When the player opens their real PDA, the global `twod` pointer is
@@ -1151,7 +1151,7 @@ because MENUDEF lumps parse in load order and `gzdoom.pk3` loads before `Selaco.
 | item | cvar | range | default |
 |---|---|---|---|
 | Second Screen | `aux_panel` | on/off | on |
-| Second Screen Size | `aux_dashboard_zoom` | 1.00–2.00 | 1.75 |
+| Second Screen Size | `aux_codex_size` | 1.00–2.00 | 1.75 |
 
 The Options entry for that page is relabelled "Handhelds" by writing the menu item's own `mText`
 directly (`i_auxpanel.cpp:651-658`) rather than overriding `$MENU_STEAMDECK`, because
@@ -1178,19 +1178,19 @@ each was rejected, once per dry spell. **The single-screen path has never actual
 device without a second display was available to test on — so this reporting, and the "no display
 qualifies" fallback above, are compile-verified only.
 
-### `aux_dashboard_zoom` and `calcScale`'s three limits
+### `aux_codex_size` and `calcScale`'s three limits
 
-`aux_dashboard_zoom` (`CVAR(Float, ..., 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)`,
-`i_auxcodexview.cpp:889`) divides the baseline height handed to `PDAMenu3.calcScale`, so a larger
+`aux_codex_size` (`CVAR(Float, ..., 1.75, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)`,
+`i_auxstandbycodex.cpp:889`) divides the baseline height handed to `PDAMenu3.calcScale`, so a larger
 zoom gives a smaller logical box and bigger content, in both mode 3 and mode 4. `calcScale` is:
 
 ```
 newScale = uscale * CLAMP(canvasHeight / baseline.y, 0.599, 2.0)
 ```
 
-(`pda_menu.zs:791-797`, replicated at `i_auxcodexview.cpp:1014-1017` for logging only, never for
+(`pda_menu.zs:791-797`, replicated at `i_auxstandbycodex.cpp:1014-1017` for logging only, never for
 layout). Its three limits are non-obvious and cost real device time to map, because none of them
-sits where the naive "0.5 to 2.0" input range would suggest (`i_auxcodexview.cpp:850-861`):
+sits where the naive "0.5 to 2.0" input range would suggest (`i_auxstandbycodex.cpp:850-861`):
 
 | zoom range | what happens | why |
 |---|---|---|
@@ -1229,7 +1229,7 @@ The resolve is cached on the tab's `PClass*`, not a plain "already tried" bool
 (`i_auxvmreflect.cpp:491-497`), so a script recompile — which builds new `PField`/`PClass` objects and
 frees the old ones — re-resolves instead of writing through a freed offset. It fails soft like every
 other reflection point here: an unresolved field or method leaves Selaco's own 42px padding and prints
-one line, without latching the whole dashboard or menu broken. Mode 3's `layoutChange` fallback path
+one line, without latching the whole standby codex or menu broken. Mode 3's `layoutChange` fallback path
 does not call the relayout this is folded into, so it gets no padding fix; it only runs if the
 wide-box symbols fail to resolve in the first place.
 
@@ -1237,7 +1237,7 @@ wide-box symbols fail to resolve in the first place.
 > clean — `restoreAtInstall` count 0, no ini, no extracted config. The log line to look for is
 > `AuxDevicePicker: first launch - offering 5 devices`, which is the real branch and not the
 > `aux_devicepicker` console override. Selecting AYN Thor applied 37 cvars with 0 problems and
-> persisted `aux_device=ayn_thor`, `aux_panel=true`, `aux_dashboard_zoom=1.75`, `g_tos=2`.
+> persisted `aux_device=ayn_thor`, `aux_panel=true`, `aux_codex_size=1.75`, `g_tos=2`.
 >
 > Getting a genuinely clean install is harder than it looks and an earlier attempt produced a false
 > negative — see CLAUDE.md on `adb uninstall` and auto-backup. The picker correctly declined to show

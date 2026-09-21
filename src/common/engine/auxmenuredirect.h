@@ -3,8 +3,8 @@
 /*
 ** auxmenuredirect.h
 **
-** "WII U MODE" - let the engine run the game's own menu completely normally, and change only WHERE
-** it draws.
+** THE LIVE CODEX (mode 4) - let the engine run the game's own menu completely normally, and change
+** only WHERE it draws.
 **
 ** On a dual-screen handheld (the AYN Thor) Selaco's PDA/codex belongs on the lower panel, with the
 ** game still visible on the upper one. Everything needed for that already exists: the menu becomes
@@ -26,7 +26,7 @@
 ** convention in this fork is that a four-line guard in a shared file survives a merge from upstream
 ** where a forked function does not. Off Android this class has an empty body and compiles to nothing.
 **
-** The implementation lives in common/platform/posix/android/i_auxmenuview.cpp, which owns mode 4; the
+** The implementation lives in common/platform/posix/android/i_auxlivecodex.cpp, which owns mode 4; the
 ** reflection helpers it uses are shared with mode 3 through i_auxvmreflect.h.
 */
 
@@ -36,7 +36,7 @@ class FCanvas;
 
 #ifdef __ANDROID__
 
-// Active only while aux_canvas_zscript is 4, the second-screen panel is live, and Selaco's PDAMenu3
+// Active only while aux_codex_mode is 4, the second-screen panel is live, and Selaco's PDAMenu3
 // is the current menu. In every other case the constructor does nothing at all and M_Drawer draws to
 // the main screen exactly as it always did - which is also the correct fallback for a non-Selaco IWAD,
 // for a device with one screen, and for any failure inside the mode.

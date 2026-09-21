@@ -44,7 +44,7 @@ Keys are matched case-insensitively (`max_fps` and `MAX_FPS` are the same key).
 | `visibility` | visibility left alone | `Clarity`, `Spectacle`, `SpectacleDeck` | Applies one of Selaco's visibility presets. |
 | `steamdeck` | **`1` — it runs** | `0`/`1`, `true`/`false`, `yes`/`no`, `on`/`off` | Runs Selaco's own `SetSteamdeckPresets()` — the handheld UI/HUD block (bigger menus and subtitles, aim assist on). |
 | `second_screen` | `aux_panel` left alone | as `steamdeck` | Sets `aux_panel`, the AYN Thor's second screen. |
-| `screen_size` | `aux_dashboard_zoom` left alone | a number, useful range `0.5`–`2.0` | Sets `aux_dashboard_zoom`, how large the second screen's contents are drawn. |
+| `screen_size` | `aux_codex_size` left alone | a number, useful range `0.5`–`2.0` | Sets `aux_codex_size`, how large the second screen's contents are drawn. |
 | `max_fps` | `vid_maxfps` left alone | a number; `0` means no cap, otherwise 20–1000 | Sets `vid_maxfps`. |
 
 ### Leaving a key out changes nothing

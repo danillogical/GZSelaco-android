@@ -61,23 +61,23 @@
 **                                           touched on the UI thread, so Java posts it to the main
 **                                           Looper. See AuxPanelEnableChanged.
 **
-** WHO OWNS THE CANVAS is decided here, in I_AuxPanelFrame, from aux_canvas_zscript. Exactly one
+** WHO OWNS THE CANVAS is decided here, in I_AuxPanelFrame, from aux_codex_mode. Exactly one
 ** drawer runs per interval, because all of them write the same texture: 0 draws the C++ test pattern
-** (i_auxcanvas.cpp) and 3 the whole PDAMenu3 desktop through VM reflection (i_auxcodexview.cpp),
+** (i_auxcanvas.cpp) and 3 the whole PDAMenu3 desktop through VM reflection (i_auxstandbycodex.cpp),
 ** falling back to no content at all on any game where its class does not exist. The numbering has
 ** holes in it: 1 and 2 were removed and are deliberately not reused - see the mode dispatch below.
 **
-** MODE 4 IS THE ODD ONE OUT and the only one that draws from somewhere else. It is "Wii U mode": when
+** MODE 4 IS THE ODD ONE OUT and the only one that draws from somewhere else. It is the live codex: when
 ** the player opens the PDA for real, the engine's own M_Drawer is redirected into the canvas from
 ** DrawOverlays (d_main.cpp) by pointing `twod` at it, so the menu the engine is already ticking and
 ** feeding input to lands on the second screen while the game stays on the first. That happens LATER in
 ** the frame than this function, so mode 4 has no phase 1 here - only the publish decision and the
 ** shared phase 2. Its content is live rather than static, so it is paced rather than edge-triggered.
-** See MODE 4 in i_auxmenuview.cpp.
+** See MODE 4 in i_auxlivecodex.cpp.
 **
 ** MODE 5 IS THE SHIPPING COMBINATION, and it is a dispatch rather than an implementation: it resolves
-** per frame to 3 while the PDA is shut and 4 while it is open, so the panel carries the read-only
-** dashboard during gameplay and the live PDA when the player opens it. Both edges fall out of the
+** per frame to 3 while the PDA is shut and 4 while it is open, so the panel carries the standby codex
+** during gameplay and the live codex when the player opens it. Both edges fall out of the
 ** existing mode-change trigger - see the comment at the resolve in I_AuxPanelFrame - which is why mode 5
 ** adds no edge detection and no state of its own.
 **
@@ -283,7 +283,7 @@ static void AuxPanelEnableChanged(bool on)
 }
 
 // Drop the last codex frame on level exit, best-effort, so the panel falls through to Selaco's
-// startup splash (or black, if that has not loaded) instead of freezing on whatever the dashboard
+// startup splash (or black, if that has not loaded) instead of freezing on whatever the standby codex
 // last drew. Called from a plain local flag in I_AuxPanelFrame, not the AuxLastMode/AuxWasLive
 // machinery used elsewhere in this file - being out of sync for a frame or two here is cosmetic,
 // not a correctness bug, so it does not earn that machinery's weight.
@@ -405,8 +405,8 @@ static void AuxCanvasReadbackPhase(JNIEnv *env)
 		const double ms = I_msTimeF() - t0;
 
 		// Rate-limited rather than unconditional. This is still the only place the stall shows up, but
-		// mode 4 publishes every AuxMenuPublishInterval frames - roughly 15 a second - so logging each
-		// one put 15 lines a second of I/O on the game thread and buried the AuxDesktopView/AuxMenuView
+		// mode 4 publishes every AuxLivePublishInterval frames - roughly 15 a second - so logging each
+		// one put 15 lines a second of I/O on the game thread and buried the AuxStandbyCodex/AuxLiveCodex
 		// lines that failures actually surface through.
 		//
 		// An expensive readback is always logged, because an outlier is the interesting case and the
@@ -473,11 +473,11 @@ void I_AuxPanelFrame()
 	// the CVar decl lives in the vreg section that --gc-sections is documented to collect on this
 	// target (CMakeLists.txt:245-250).
 	// ------------------------------------------------------------------------------------------
-	EXTERN_CVAR(Int, aux_canvas_zscript)
-	const int cvarMode = aux_canvas_zscript;
+	EXTERN_CVAR(Int, aux_codex_mode)
+	const int cvarMode = aux_codex_mode;
 
-	// MODE 5 - the combined mode, and the one that actually meets the requirement: the read-only dashboard
-	// on the panel during gameplay, replaced by the live PDA while the player has it open. It is not a
+	// MODE 5 - the combined mode, and the one that actually meets the requirement: the standby codex
+	// on the panel during gameplay, replaced by the live codex while the player has it open. It is not a
 	// third implementation - it RESOLVES, once per frame, to whichever of the two existing owners should
 	// hold the canvas right now, so modes 3 and 4 keep their own code, their own latches and their own
 	// individual cvar values for attributing a failure to one piece.
@@ -485,10 +485,10 @@ void I_AuxPanelFrame()
 	// Exactly one owner per frame is what the whole file's design rests on, and resolving here rather than
 	// letting both run is what preserves it.
 	int mode = cvarMode;
-	if (cvarMode == 5)
+	if (cvarMode == AuxMode_Auto)
 	{
-		extern bool I_AuxMenuViewIsPdaOpen();
-		mode = I_AuxMenuViewIsPdaOpen() ? 4 : 3;
+		extern bool I_AuxLiveCodexIsPdaOpen();
+		mode = I_AuxLiveCodexIsPdaOpen() ? 4 : 3;
 	}
 
 	// MODES 1 AND 2 WERE REMOVED and their numbers are deliberately not reused, so a config or a habit
@@ -496,13 +496,13 @@ void I_AuxPanelFrame()
 	// no-content branch below, which drops the frame and lets Java show Selaco's startup splash - and a
 	// blank panel with no explanation is exactly the mystery this line exists to prevent. Said once,
 	// because it would otherwise repeat every frame for the rest of the session.
-	if (mode == 1 || mode == 2)
+	if (mode == 1 || mode == 2)  // retired, see EAuxCanvasMode
 	{
 		static bool AuxRemovedModeWarned = false;
 		if (!AuxRemovedModeWarned)
 		{
 			AuxRemovedModeWarned = true;
-			Printf(TEXTCOLOR_YELLOW "AuxPanel: aux_canvas_zscript %d was removed - mode 3 draws the whole PDA "
+			Printf(TEXTCOLOR_YELLOW "AuxPanel: aux_codex_mode %d was removed - mode 3 draws the whole PDA "
 				"desktop, mode 5 is the default. The panel will show nothing.\n", mode);
 		}
 	}
@@ -511,31 +511,31 @@ void I_AuxPanelFrame()
 	// edge detection of its own - and the falling edge is the one that matters.
 	//
 	// FALLING (PDA closes, 4 -> 3): the mode-change trigger below hands mode 3 a draw request, so the
-	// dashboard is cleared and redrawn onto the panel immediately. Mode 4's own close-edge behaviour - a
+	// standby codex is cleared and redrawn onto the panel immediately. Mode 4's own close-edge behaviour - a
 	// black clear, because on its own it has nothing to fall back to - is simply never reached, because
-	// I_AuxMenuViewFrame is not called on a frame that resolves to 3. So in mode 5 the panel returns to the
-	// dashboard rather than going black, and the Java-side sPixels fallback is not needed at all.
+	// I_AuxLiveCodexFrame is not called on a frame that resolves to 3. So in mode 5 the panel returns to the
+	// standby codex rather than going black, and the Java-side sPixels fallback is not needed at all.
 	//
 	// RISING (PDA opens, 3 -> 4): mode 4's branch zeroes AuxCanvasDrawRequests, so a mode-3 draw request
-	// that had been queued but not yet issued is dropped rather than drawing the dashboard over the PDA. A
+	// that had been queued but not yet issued is dropped rather than drawing the standby codex over the PDA. A
 	// mode-3 readback already in flight is still completed and pushed by the shared phase 2, which is
-	// correct - it publishes the last dashboard frame - and mode 4 then takes over.
-	if (mode == 4)
+	// correct - it publishes the last standby codex frame - and mode 4 then takes over.
+	if (mode == AuxMode_Live)
 	{
-		// MODE 4 ("Wii U mode") has no phase 1. Its draw is not issued from here at all: the engine draws
+		// MODE 4, the live codex, has no phase 1. Its draw is not issued from here at all: the engine draws
 		// Selaco's real PDA into the canvas from DrawOverlays, LATER in this same frame (d_main.cpp:907 vs
 		// :1102), through the twod swap in FAuxMenuRedirect. So this branch only lets the mode arm the guard
-		// and pace its publishing, then runs the shared readback. See MODE 4 in i_auxmenuview.cpp.
+		// and pace its publishing, then runs the shared readback. See MODE 4 in i_auxlivecodex.cpp.
 		//
 		// The readback goes FIRST, before the publish decision, and the order is what sets the achievable
-		// cadence. I_AuxMenuViewFrame refuses to publish while a readback is still outstanding, so asking
+		// cadence. I_AuxLiveCodexFrame refuses to publish while a readback is still outstanding, so asking
 		// it before clearing this frame's outstanding one costs a whole extra frame per cycle - the
 		// intended 2-frame period becomes 3. Reading back first means the frame that completes a cycle can
 		// also start the next one.
 		AuxCanvasReadbackPhase(env);
 
-		extern void I_AuxMenuViewFrame();
-		I_AuxMenuViewFrame();
+		extern void I_AuxLiveCodexFrame();
+		I_AuxLiveCodexFrame();
 
 		// Phase-1 bookkeeping, kept consistent for whichever mode comes next. Switching AWAY from 4 must
 		// still read as a mode change, and no mode-4 frame may leave a draw request behind for a phase
@@ -552,17 +552,17 @@ void I_AuxPanelFrame()
 	// draw, because it is also what performs the deferred build and the rebuild on an unlock change.
 	bool codexAvailable = false;
 	bool codexChanged = false;
-	if (mode == 3)
+	if (mode == AuxMode_Standby)
 	{
-		extern bool I_AuxCodexViewUpdate(int mode, bool *outNeedsRedraw);
-		codexAvailable = I_AuxCodexViewUpdate(mode, &codexChanged);
+		extern bool I_AuxStandbyCodexUpdate(int mode, bool *outNeedsRedraw);
+		codexAvailable = I_AuxStandbyCodexUpdate(mode, &codexChanged);
 	}
 
 	// Everything that can make the canvas stale. Nothing else may set this: a redraw costs a ~30 ms
 	// readback, so a trigger that fires spuriously is a dropped frame.
 	if (mode != AuxLastMode)  AuxCanvasDrawRequests = 1;   // switching owner changes the image
 	if (!AuxWasLive)          AuxCanvasDrawRequests = 1;   // panel just appeared, Java has nothing
-	if (codexChanged)         AuxCanvasDrawRequests = 1;   // built or rebuilt the dashboard
+	if (codexChanged)         AuxCanvasDrawRequests = 1;   // built or rebuilt the standby codex
 	AuxLastMode = mode;
 	AuxWasLive = true;
 
@@ -588,7 +588,7 @@ void I_AuxPanelFrame()
 	{
 		AuxCanvasDrawRequests--;
 
-		if (mode == 3 && codexAvailable)
+		if (mode == AuxMode_Standby && codexAvailable)
 		{
 			// Clear first. The desktop does not cover all 1240x1080 - it leaves margins where its logical
 			// box does not reach the panel edges - and the canvas texture is never cleared for us, so
@@ -596,10 +596,10 @@ void I_AuxPanelFrame()
 			extern void I_AuxCanvasClear();
 			I_AuxCanvasClear();
 
-			extern void I_AuxCodexViewDraw(int mode);
-			I_AuxCodexViewDraw(mode);
+			extern void I_AuxStandbyCodexDraw(int mode);
+			I_AuxStandbyCodexDraw(mode);
 		}
-		else if (mode == 0)
+		else if (mode == AuxMode_TestPattern)
 		{
 			// Mode 0 is the diagnostic test pattern, and it is now the ONLY way to see it: nothing falls
 			// back to it any more.
@@ -796,32 +796,32 @@ static void AuxAddSecondScreenToggle()
 	desc->mItems.Push(item);
 }
 
-// The second-screen size slider (aux_dashboard_zoom, i_auxcodexview.cpp) with its menu label, console cvar
+// The second-screen size slider (aux_codex_size, i_auxstandbycodex.cpp) with its menu label, console cvar
 // name and slider range. The console clamp stays wider than this for a reason given at the declaration; the
 // slider is deliberately the narrower, useful band.
 //
 // A struct and a loop for one entry because this list has held three, and adding one back should not mean
 // rewriting the insertion.
-struct AuxDashboardSlider
+struct AuxCodexSlider
 {
 	const char *label;
 	const char *cvarName;
 	double min, max, step;
 	int fracDigits;
 };
-static const AuxDashboardSlider AuxDashboardSliders[] = {
+static const AuxCodexSlider AuxCodexSliders[] = {
 	// Below 1.0 shrinks the panel, the opposite of the goal, so the slider starts at 1.0 rather than the
 	// cvar's own 0.5 floor. fracDigits is the DECIMAL COUNT the item hands DrawSlider's
 	// String.format("%%.%df", ...) (optionmenuitems.zs:751), not a boolean - two of them so 0.05 steps are
 	// distinguishable (1.05, not a rounded 1).
-	{ "Second Screen Size", "aux_dashboard_zoom", 1.0, 2.0, 0.05, 2 },
+	{ "Second Screen Size", "aux_codex_size", 1.0, 2.0, 0.05, 2 },
 };
 
 // The second-screen size slider, on the handheld page, directly below the toggle above.
 //
 // A SEPARATE FUNCTION FROM THE TOGGLE, and called separately, so that one failing to resolve still leaves
-// the other on the page. aux_dashboard_zoom stays settable from the console whatever happens here.
-static void AuxAddDashboardSliders()
+// the other on the page. aux_codex_size stays settable from the console whatever happens here.
+static void AuxAddCodexSliders()
 {
 	DOptionMenuDescriptor *desc = AuxHandheldDescriptor();
 	if (desc == nullptr)
@@ -843,7 +843,7 @@ static void AuxAddDashboardSliders()
 	// gets there first: the slider must still be headed when the toggle's own class did not resolve.
 	AuxAddSecondScreenHeading(desc);
 
-	for (const AuxDashboardSlider &slider : AuxDashboardSliders)
+	for (const AuxCodexSlider &slider : AuxCodexSliders)
 	{
 		// VMCallWithDefaults, not VMCall, so Init's optional command/graycheck/graycheckVal keep the
 		// values the declaration gives them - exactly how the MENUDEF parser builds this same item.
@@ -932,7 +932,7 @@ static void AuxRenameHandheldEntry()
 void I_AuxPanelInitMenu()
 {
 	AuxAddSecondScreenToggle();
-	AuxAddDashboardSliders();
+	AuxAddCodexSliders();
 	AuxRenameHandheldEntry();
 }
 
