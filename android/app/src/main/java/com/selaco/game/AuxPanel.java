@@ -58,8 +58,14 @@ public final class AuxPanel implements DisplayManager.DisplayListener {
      * on the other thread - a torn frame, not a crash, but the device-verification step for this
      * transport reads a screencap to judge orientation and channel order, and a tear at that exact
      * moment would be indistinguishable from a real transport bug. Writing into the buffer that is
-     * NOT currently published and then publishing it through the existing volatile store removes
-     * that ambiguity for a fixed extra ~5.3 MB.
+     * NOT currently published and then publishing it through the existing volatile store narrows
+     * that window for a fixed extra ~5.3 MB.
+     *
+     * Narrows, not closes: two slots survive exactly ONE push. onDraw snapshots sPixels and nothing
+     * records which Bitmap it is still reading, so the SECOND subsequent push wraps back onto that
+     * slot. It needs one onDraw to outlast two publishes - far longer than drawing a 1240x1080 bitmap
+     * takes - and the cost is a torn frame, so it is left as is rather than adding a third slot or
+     * taking sPixelsLock on the UI thread's draw path.
      */
     static void pushPixels(ByteBuffer buffer, int w, int h) {
         synchronized (sPixelsLock) {

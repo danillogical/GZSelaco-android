@@ -248,7 +248,14 @@ FString M_GetSavegamesPath()
 		resolved = true;
 		cached = AndroidPublicPath("savegames/");
 		if (cached.IsEmpty())
+		{
+			// Said out loud, because the fallback is the one location an uninstall or "clear storage"
+			// destroys. Silently, the player and the log both see a working save system right up until
+			// the saves are gone.
 			cached = AndroidInternalPath() + "savegames/";
+			Printf(TEXTCOLOR_YELLOW "Savegames: no writable public folder, using app-internal storage "
+				"(%s) - these saves are DELETED by an uninstall or Clear Storage\n", cached.GetChars());
+		}
 	}
 	return cached;
 }

@@ -1014,6 +1014,22 @@ theirs — reference one and the build fails with an undefined-class error, not 
 lumps parse in the same load order (`menudef.cpp:1529`), which is the identical constraint behind the
 device picker's settings-page injection (below).
 
+**That constraint binds our *basewad*, not every possible lump of ours — and the difference matters,
+because this premise is what justifies the whole reflection layer.** `AddModFiles`
+(`src/d_main.cpp:2224`) appends every `.pk3` under `progdir/Mods` to `allwads`, and it is called from
+`D_InitGame` (`:3476`) — which `D_DoomMain_Internal` reaches *after* `FindIWAD` (`:4099`) has already
+pushed the basewad and the IWAD. `InitMultipleFiles` (`:3480`) then processes that vector in order, so
+a pk3 shipped into `progdir/Mods` compiles its `ZSCRIPT` **after** `Selaco.ipk3` and **can** name
+`PDAMenu3`.
+
+So reflection is a deliberate choice rather than the only option, and the reason it is still the right
+one is the fail-soft rule rather than load order: a ZScript lump naming `PDAMenu3` is a **compile-time**
+dependency, and a ZScript compile failure is fatal. Ship that pk3 and every non-Selaco IWAD — and every
+future Selaco build that renames the class — dies at startup instead of losing one optional feature and
+printing one yellow line. Reflection moves that failure from "the game will not start" to "the panel is
+off", which is the trade this port exists to make. It also keeps the feature inside the binary, with
+nothing extra to install and nothing `-nomods` can silently disable.
+
 **A pk3 loaded via `iwadinfo.txt`'s `Load` entries was tried and does not work**, for a reason specific
 to this game rather than to the mechanism in general. `FIWadManager::CheckIWADInfo`
 (`src/d_iwad.cpp:395-424`) parses the candidate IWAD's own `IWADINFO` lump and, if an entry with the

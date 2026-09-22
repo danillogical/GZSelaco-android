@@ -1374,20 +1374,30 @@ static bool BuildStandbyView()
 	static const EArgKind ViewLayoutArgs[] = { Arg_Vector2, Arg_Float, Arg_Bool };
 
 	int calcScaleRegs = 0, menuLayoutRegs = 0, viewLayoutRegs = 0;
+
+	// This group is OPTIONAL, so it takes the note that says so. The default ends in "second-screen
+	// view disabled", which is not what a miss here costs - the fallback line below spells out the
+	// real consequence, and the two printed together contradict each other.
+	static const char *const RelayoutNote =
+		"falling back to layoutChange - the tab bar will clip and aux_codex_size will do nothing";
+
 	// calcScale(int, int, Vector2) is FIVE registers, not four - a Vector2 is one declared argument and
 	// two registers (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxStandbyCodex", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxStandbyCodex", CalcScaleArgs, 3,
+		&calcScaleRegs, nullptr, RelayoutNote);
 	// PDAMenu3.layout() - pda_menu.zs:771, non-virtual, self only. All it does is refresh
 	// background.freeze, which is moot while background.hidden is true, but it is what layoutChange
 	// calls and there may be more in it later.
 	VMFunction *funcMenuLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", "AuxStandbyCodex", nullptr, 0, &menuLayoutRegs) : nullptr;
+		? ResolveMethod(cls, "layout", "AuxStandbyCodex", nullptr, 0, &menuLayoutRegs, nullptr,
+			RelayoutNote) : nullptr;
 	// mainView.layout(), with the DEFAULTS layoutChange passes: parentScale (0,0) is the sentinel that
 	// makes UIView.layout derive cScale from the view's own scale chain (view.zs:763) instead of taking
 	// ours, and parentAlpha -1 does the same for alpha (:764). Passing (1,1)/1.0 instead would overwrite
 	// the 0.6458 scale calcScale just installed.
 	VMFunction *funcViewLayout = funcMenuLayout != nullptr
-		? ResolveMethod(viewCls, "layout", "AuxStandbyCodex", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+		? ResolveMethod(viewCls, "layout", "AuxStandbyCodex", ViewLayoutArgs, 3, &viewLayoutRegs,
+			nullptr, RelayoutNote) : nullptr;
 	// PDAMenu3.calcScale reads ui_scaling unconditionally (pda_menu.zs:787) - unlike UIMenu.calcScale
 	// it does not honour ignoreUIScaling (menu.zs:125) - and Selaco's handheld profile sets that cvar
 	// to 1.2 (SetSteamdeckPresets, forced on for Android at d_main.cpp:3513). A baseline cannot absorb
@@ -1396,7 +1406,7 @@ static bool BuildStandbyView()
 	// (d_main.cpp:1757) and writing it would push a DEM_UINFCHANGED into the demo/net stream - the very
 	// class of player-state write FProjectionScope exists to stop.
 	PField *fldUIScaling = funcViewLayout != nullptr
-		? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls) : nullptr;
+		? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls, "AuxStandbyCodex", RelayoutNote) : nullptr;
 	if (fldUIScaling == nullptr)
 	{
 		funcCalcScale = nullptr;

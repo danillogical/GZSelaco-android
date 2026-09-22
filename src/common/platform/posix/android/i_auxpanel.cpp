@@ -234,6 +234,16 @@ static bool AuxResolve(JNIEnv *env)
 	AuxClass = (jclass)env->NewGlobalRef(local);
 	env->DeleteLocalRef(local);
 
+	// Checked because the next line dereferences it. A null global ref means the VM is out of memory,
+	// and GetStaticMethodID faults inside ART on a null jclass rather than raising a Java exception -
+	// so without this the one failure in this function that is NOT a clean disable is a SIGSEGV.
+	if (AuxClass == nullptr)
+	{
+		Printf(TEXTCOLOR_YELLOW "AuxPanel: NewGlobalRef failed, second-screen panel disabled\n");
+		AuxBroken = true;
+		return false;
+	}
+
 	AuxPushPixels = env->GetStaticMethodID(AuxClass, "pushPixels", "(Ljava/nio/ByteBuffer;II)V");
 	if (env->ExceptionCheck() || AuxPushPixels == nullptr)
 	{
@@ -325,6 +335,10 @@ static void I_AuxPanelClearPixels()
 	env->CallStaticVoidMethod(AuxClass, AuxClearPixels);
 	if (env->ExceptionCheck())
 	{
+		// Described before clearing, as the setPanelEnabled path does: this latches AuxBroken for the
+		// rest of the process, so discarding the Java stack trace leaves the log saying the panel is
+		// off without saying why.
+		env->ExceptionDescribe();
 		env->ExceptionClear();
 		Printf(TEXTCOLOR_YELLOW "AuxPanel: clearPixels threw, second-screen panel disabled\n");
 		AuxBroken = true;

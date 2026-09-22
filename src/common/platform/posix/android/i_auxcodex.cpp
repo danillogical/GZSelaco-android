@@ -121,7 +121,11 @@ static bool ReadUnlockChecksum(uint64_t &checksum, int &state)
 	PClassActor *cls = PClass::FindActor(itemName);
 	if (cls == nullptr) { state = 0; return false; }
 
-	if (!playeringame[consoleplayer] || players[consoleplayer].mo == nullptr)
+	// consoleplayer is bounded here, not assumed: it is assigned straight from a demo byte with no
+	// range check (g_game.cpp:3039), and this runs per frame before BeginFrame where, as below, there
+	// is no gamestate guard. Both pawn probes in i_auxstandbycodex.cpp already bound it the same way.
+	if (consoleplayer < 0 || consoleplayer >= MAXPLAYERS
+		|| !playeringame[consoleplayer] || players[consoleplayer].mo == nullptr)
 	{
 		// Normal at the title screen and during startup: the frame hook runs before BeginFrame with
 		// no gamestate guard.
@@ -202,7 +206,7 @@ static void Probe()
 	if (state == 3)
 	{
 		if (LastState != 3)
-			Printf("AuxCodex: bridge=FAILED (unlocks field missing or not Map<Name,Int>)\n");
+			Printf(TEXTCOLOR_YELLOW "AuxCodex: bridge=FAILED (unlocks field missing or not Map<Name,Int>)\n");
 		LastState = 3;
 		ProbeBroken = true;
 		return;

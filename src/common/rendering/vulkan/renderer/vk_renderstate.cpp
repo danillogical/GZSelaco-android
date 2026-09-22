@@ -476,8 +476,17 @@ void VkRenderState::ApplyHWBufferSet()
 		auto layout = passManager->GetPipelineLayout(mPipelineKey.NumTextureLayers);
 		if (!hwSet || !fixedSet || !layout || !mCommandBuffer)
 		{
-			Printf(PRINT_HIGH | PRINT_NONOTIFY, "VKNULL hwset=%d fixedset=%d layout=%d cmdbuf=%d\n",
-				hwSet ? 1 : 0, fixedSet ? 1 : 0, layout ? 1 : 0, mCommandBuffer ? 1 : 0);
+			// Said ONCE per process. The return below skips the mLast*Offset writes at the end of this
+			// block, so the enclosing guard stays true and this branch is re-entered on every following
+			// draw call - unlatched, that is thousands of console lines a frame on a device where
+			// console I/O is itself frame time, which would kill the frame this skip exists to keep.
+			static bool reportedNull = false;
+			if (!reportedNull)
+			{
+				reportedNull = true;
+				Printf(PRINT_HIGH | PRINT_NONOTIFY, "VKNULL hwset=%d fixedset=%d layout=%d cmdbuf=%d\n",
+					hwSet ? 1 : 0, fixedSet ? 1 : 0, layout ? 1 : 0, mCommandBuffer ? 1 : 0);
+			}
 			return;
 		}
 

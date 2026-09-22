@@ -372,9 +372,9 @@ static void CrashHandler(int sig, siginfo_t *info, void *ucontext)
 				wstr(fd, "\n");
 			}
 
-			// Registers first and flushed immediately. Everything below this point either can fail
-			// to produce anything (the unwinder) or can hang (dladdr), so the fault location is
-			// committed to disk before either is attempted.
+			// Registers first and flushed immediately. Everything below this point can fail to produce
+			// anything, and BOTH the unwinder and dladdr can hang, so the fault location is committed
+			// to disk before either is attempted.
 			WriteFaultRegisters(fd, ucontext);
 			fsync(fd);
 
@@ -400,8 +400,14 @@ static void CrashHandler(int sig, siginfo_t *info, void *ucontext)
 			}
 			fsync(fd);
 
-			// LAST, because dladdr can deadlock on the loader mutex - see the file header. If the
-			// log ends here with no modules section, the crash was inside dlopen.
+			// LAST, because dladdr can deadlock on the loader mutex - see the file header.
+			//
+			// A MISSING MODULES SECTION DOES NOT PROVE THE CRASH WAS INSIDE dlopen, which this comment
+			// used to claim. _Unwind_Backtrace above finds its unwind sections through dl_iterate_phdr,
+			// which takes the same loader mutex, so a crash inside dlopen - reachable here, since the
+			// port dlopens a replacement Vulkan driver - hangs at the BACKTRACE and the log stops after
+			// the registers instead. Read a log that ends before "backtrace:" as the loader-mutex case;
+			// one that ends after it has merely lost the symbolication.
 			//
 			// Module plus OFFSET is what matters: it is what llvm-symbolizer needs to turn this into
 			// a file and line, using the unstripped .so from android/deps/prefix or the build tree.
@@ -433,10 +439,11 @@ static void CrashHandler(int sig, siginfo_t *info, void *ucontext)
 			fsync(fd);
 			close(fd);
 
-			// Only claim success if the file was actually opened, and name the real path - a literal
-			// "$PROGDIR" here told the reader nothing, and progdir is not even where it goes.
-			__android_log_write(ANDROID_LOG_ERROR, "selaco-ea", "crash log written to:");
-			__android_log_write(ANDROID_LOG_ERROR, "selaco-ea", crashLogPath);
+			// NOTHING IS LOGGED TO LOGCAT FROM HERE. __android_log_write is not async-signal-safe -
+			// liblog takes an internal lock and can allocate on the logd socket path - so a SIGABRT
+			// raised from inside malloc or from liblog itself would hang here, after the log is safely
+			// on disk but BEFORE the raise(sig) below that preserves the tombstone. It bought nothing
+			// either way: the path is already logged at install time.
 		}
 	}
 
@@ -555,7 +562,13 @@ void I_InstallCrashLog()
 	if (!crashLogReady)
 		crashLogReady = TryCrashLogPath(progdir.GetChars());
 	if (!crashLogReady)
+	{
+		// Said out loud, because this disables the diagnostic that exists to explain silent failures.
+		// Returning quietly here means a later crash produces no log and nothing anywhere says why.
+		__android_log_write(ANDROID_LOG_WARN, "selaco-ea",
+			"no writable crash-log directory; crash logging disabled");
 		return;
+	}
 
 	// SA_ONSTACK is meaningless without this: the kernel silently ignores the flag when no alternate
 	// stack is registered, and the handler then runs on the faulting thread's stack. That loses the
