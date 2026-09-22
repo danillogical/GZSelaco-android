@@ -77,15 +77,22 @@ APK would make it name `HEAD~1` and the gate could never pass.
 **Do not rebuild it unless a check below fails.**
 
 ```
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release.apk
 ```
+
+**This is the `release` buildType, not `debug`.** Both are signed with the same
+debug key (`signingConfig signingConfigs.debug`), so that is not the
+difference — the difference is that `release` is not `debuggable`, so
+`adb shell run-as com.selaco.game` does not work against it and the app's
+private data cannot be read on device. Build it with `assembleRelease`; a
+`debug` APK is a different artifact and must not be what ships.
 
 No size or digest is recorded here: a rebuild changes both, and this file is
 read after commits have landed that the APK on disk may predate. The check
 that *is* stable is that the binary names the commit you are about to tag:
 
 ```bash
-APK=android/app/build/outputs/apk/debug/app-debug.apk
+APK=android/app/build/outputs/apk/release/app-release.apk
 DISK=$(stat -f %z android/app/src/main/jniLibs/arm64-v8a/libSelaco.so)
 APKSZ=$(unzip -l "$APK" | awk '/lib\/arm64-v8a\/libSelaco.so/{print $1}')
 [ "$DISK" = "$APKSZ" ] && echo "SO MATCH OK" || echo "STALE APK - do not release"
@@ -114,7 +121,7 @@ of the clone. Rebuild:
 ./android/package-apk.sh            # exits 1 ON SUCCESS - see CLAUDE.md
 cd android && java -Xmx4g \
   -classpath /tmp/gradle-8.13/lib/gradle-launcher-8.13.jar \
-  org.gradle.launcher.GradleMain --no-daemon assembleDebug
+  org.gradle.launcher.GradleMain --no-daemon assembleRelease
 ```
 
 Then re-run the gate above. Every exit code in that chain lies:
@@ -214,6 +221,7 @@ retuning a handheld is a text file, not a code change. See
 
 - The fps counter is off by default
 - Fixed a crash on engine restart caused by stale script references
+- Fixed the second screen coming back blank after the device sleeps
 
 ## Known limitations
 
@@ -263,7 +271,7 @@ Both digests must match.
 - **macOS.** There is no pre-built macOS release and the README says so.
   Do not build or attach one.
 - **Production signing.** The `release` buildType in
-  `android/app/build.gradle` uses `signingConfigs.debug`, so
-  `assembleRelease` would not produce a differently-signed artifact either.
-  Changing that needs a real keystore and is a separate decision.
+  `android/app/build.gradle` uses `signingConfigs.debug`, so the artifact this
+  plan ships is debug-SIGNED despite being the release buildType. Changing that
+  needs a real keystore and is a separate decision.
 - Rewriting history, retagging `v0.1.0`, or touching any other branch.
