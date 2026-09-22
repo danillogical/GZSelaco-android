@@ -97,12 +97,22 @@ after the install finishes — the ini, the extracted `autoexec.cfg`, everything
 `Success` and nothing warns you. A "clean" install done this way came up with a device already
 recorded and a stale config, which read as two separate bugs in new code and cost an hour. The tell
 is in logcat: `BackupManagerService: restoreAtInstall pkg=com.selaco.game`, followed by
-`restoreFinished`. **Grep for that count and require 0** rather than trusting the install. To
-actually get a fresh install: `adb shell bmgr enable false`, uninstall, install, then
-`adb shell pm clear com.selaco.game`, and **put backup back with `bmgr enable true`** — it is the
-only protection the saves have. Saves themselves live in `/sdcard/Selaco/savegames/`, which is not
-app-specific storage and survives all of this; the ini is internal and only reachable through
-`run-as com.selaco.game` on a debug build.
+`restoreFinished`. To actually get a fresh install: `adb shell bmgr enable false`, uninstall,
+install, then `adb shell pm clear com.selaco.game`, and **put backup back with `bmgr enable
+true`** — it is the only protection the saves have. Saves themselves live in
+`/sdcard/Selaco/savegames/`, which is not app-specific storage and survives all of this; the ini is
+internal and only reachable through `run-as com.selaco.game` on a debug build.
+
+**But do not gate on that line's count being 0 — it fires even when nothing is restored, and
+`bmgr enable false` does not suppress it.** A clean install done exactly as above still logged one
+`restoreAtInstall`, which reads as the trap having struck when it had not. The field that answers the
+question is on the same line: **`restoreSet=0` means there was nothing to restore**, and a non-zero
+set is the case to worry about. The authoritative check is neither — it is that the data directory is
+empty, which is one command and cannot be misread:
+
+```bash
+adb shell run-as com.selaco.game ls -A /data/data/com.selaco.game/   # must print nothing
+```
 
 **A shipped `autoexec.cfg` change never reaches an existing install.** `extractAssets` writes the
 config once and then skips it forever if the file exists (`SelacoActivity.java`, the `isConfig`
