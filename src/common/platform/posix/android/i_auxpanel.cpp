@@ -162,6 +162,24 @@ static int AuxLastMode = -1;        // -1 so the first live frame always counts 
 static bool AuxWasLive = false;
 static int AuxForceFrameCount = 0;
 
+// HOW MANY PANELS HAVE COME UP, which is the only way the game thread can learn about one that came
+// and went while it was not looking.
+//
+// AuxWasLive alone cannot see it. It is cleared on a frame that observes AuxLive false, and on a
+// device sleep no such frame runs: SDL pauses the activity, AppActive goes false and D_Display
+// returns (d_main.cpp:955) ABOVE the call to I_AuxPanelFrame at :1102. Java meanwhile tears the
+// Presentation down and builds a new one, both inside that window - measured at 373 ms of panel
+// down-time inside a 1.15 s pause on the Thor. So the game thread sees AuxLive true before the
+// sleep and true after it, concludes nothing changed, and queues no redraw - while the new
+// Presentation has no pixels at all, because releasePresentation clears them deliberately
+// (AuxPanel.java:418-424). The panel then sits on Selaco's startup splash for the rest of the level.
+//
+// A COUNT AND NOT A FLAG, so the edge cannot be missed no matter how many frames are skipped or how
+// many times the panel cycles inside one pause. Bumped on the UI thread and read on the game thread,
+// hence atomic; AuxWasLive itself stays a plain bool owned by the game thread, which is what lets
+// this feed the existing machinery rather than duplicate it.
+static std::atomic<unsigned> AuxPanelUpCount{ 0 };
+
 // Readback logging, rate-limited - see AuxCanvasReadbackPhase. An outlier is always worth a line
 // because the cost is the whole reason the number is logged; a routine one at most once a second,
 // which is enough to confirm the path is alive without burying the other diagnostics.
@@ -187,7 +205,13 @@ Java_com_selaco_game_AuxPanel_nativeAuxEnable(JNIEnv *env, jclass cls, jboolean 
 {
 	const bool live = (on == JNI_TRUE);
 	if (live)
+	{
 		AuxEverLive.store(true, std::memory_order_relaxed);
+
+		// Exactly one bump per panel, because updateDisplay returns early when a panel is already up on
+		// the right display (AuxPanel.java:321-323) - so this counts new Presentations, not calls.
+		AuxPanelUpCount.fetch_add(1, std::memory_order_relaxed);
+	}
 	AuxLive.store(live, std::memory_order_relaxed);
 }
 
@@ -453,6 +477,26 @@ void I_AuxPanelFrame()
 		// to push again even if nothing else changed.
 		AuxWasLive = false;
 		return;
+	}
+
+	// The same edge, for the panel that came and went while this function was not being called at all.
+	// See AuxPanelUpCount: on a device sleep the whole teardown and rebuild happens inside the pause,
+	// so the branch above never runs and AuxWasLive stays true. Answered by feeding that same flag
+	// rather than a second redraw trigger, so there is still exactly one thing downstream to reason
+	// about. Costs one relaxed load per frame.
+	//
+	// Mode 4 is not covered by this and does not need to be: it redraws and republishes on its own
+	// cadence every frame the player has the codex open, so a panel rebuilt underneath it heals within
+	// a cycle. It is the standby codex, which publishes only on a change, that would otherwise never
+	// push again.
+	{
+		static unsigned AuxSeenPanelUpCount = 0;
+		const unsigned ups = AuxPanelUpCount.load(std::memory_order_relaxed);
+		if (ups != AuxSeenPanelUpCount)
+		{
+			AuxSeenPanelUpCount = ups;
+			AuxWasLive = false;
+		}
 	}
 
 	JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
