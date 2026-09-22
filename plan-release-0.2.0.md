@@ -158,7 +158,7 @@ correct; if it is rejected, stop and report rather than forcing.
 ## 4. Tag
 
 `v0.1.0` tagged the commit that bumped the version. The 0.2.0 bump
-(`18f00d3b2`) is ~19 commits back now, so tag **HEAD** — it is the commit the
+(`18f00d3b2`) is many commits back now, so tag **HEAD** — it is the commit the
 artifact was built from, which matters more than matching where the bump
 landed.
 
@@ -243,8 +243,10 @@ gh release view v0.2.0 --repo danillogical/GZSelaco-android \
 ```
 
 Check: asset named `Selaco-android-0.2.0.apk`, `isDraft: false`,
-`isPrerelease: false`, and a plausible size (~19.8 MB; v0.1.0 was 12.8 MB,
-so a large jump is expected, not a red flag).
+`isPrerelease: false`, and a plausible size — **about 12 MB**, close to
+v0.1.0's 12.8 MB. Do not expect a jump: an earlier draft of this plan said
+~19.8 MB, which was the `debug` APK. A release APK near 19 MB means a debug
+build was assembled by mistake.
 
 Then download the published asset and confirm it is the artifact you built,
 rather than trusting the upload:
