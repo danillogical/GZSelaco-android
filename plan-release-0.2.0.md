@@ -17,7 +17,7 @@ hard to undo, so the gates below are not optional.
 | branch | `android-macos-ports` |
 | remote | **`fork`** → `https://github.com/danillogical/GZSelaco-android.git` |
 | HEAD | confirm with `git log --oneline -1`; the APK must name it (section 2) |
-| ahead of `fork/android-macos-ports` | 21 commits at time of writing, 0 behind |
+| ahead of `fork/android-macos-ports` | `git rev-list --count fork/android-macos-ports..HEAD`, 0 behind |
 | version | `versionName '0.2.0'`, `versionCode 200` |
 | previous release | tag `v0.1.0`, asset `Selaco-android-0.1.0.apk` |
 
@@ -69,18 +69,20 @@ code, not an identifier — ignore it.
 
 ## 2. Verify the artifact — it is already built
 
-**The APK is built and fully gated. Do not rebuild it unless a check below
-fails.**
+**The APK is gitignored** (`.gitignore:74`, `/android/app/build/`), so it is on
+disk only and is never part of a commit. That is what makes the gate below
+possible: build at `HEAD`, and the binary names `HEAD` exactly. Committing the
+APK would make it name `HEAD~1` and the gate could never pass.
+
+**Do not rebuild it unless a check below fails.**
 
 ```
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-No size or digest is recorded here on purpose: this file is itself committed,
-so any edit to it changes `HEAD`, which changes the hash embedded in the
-binary, which changes the digest — a number written here could never be
-right about the build it describes. The check that *is* stable is that the
-binary names the commit you are about to tag:
+No size or digest is recorded here: a rebuild changes both, and this file is
+read after commits have landed that the APK on disk may predate. The check
+that *is* stable is that the binary names the commit you are about to tag:
 
 ```bash
 APK=android/app/build/outputs/apk/debug/app-debug.apk
