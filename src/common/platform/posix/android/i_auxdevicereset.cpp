@@ -794,15 +794,19 @@ void AuxDeviceResetInitMenu()
 	// line can move.
 	PClass *tooltipCls = PClass::FindClass(AuxTooltipCommandClassName);
 	PField *fldFunc = tooltipCls != nullptr
-		? ResolveField(tooltipCls, AuxTooltipFuncFieldName, Field_String, nullptr) : nullptr;
+		? ResolveField(tooltipCls, AuxTooltipFuncFieldName, Field_String, nullptr, AuxSubsystem, AuxDisabledNote)
+		: nullptr;
 	if (fldFunc == nullptr)
 	{
-		// Through the shared resolver rather than AuxPromptField because mFunc is a String and Field_String
-		// is a kind it already knows. Its own failure line ends in "second-screen view disabled", which is not
-		// true here, so this one follows it and says what is actually lost - the same pairing
-		// AuxRenameHandheldEntry uses in i_auxpanel.cpp.
-		Printf(TEXTCOLOR_YELLOW "%s: no %s.%s to identify their button by, %s\n", AuxSubsystem,
-			AuxTooltipCommandClassName, AuxTooltipFuncFieldName, AuxDisabledNote);
+		// Only the missing-class case is said here. ResolveField is given this file's own subsystem and note,
+		// so when it is the one that fails it already prints "AuxDeviceReset: <class>.mFunc is not a field, the
+		// reset button is not added" - it used to take the default and blame the standby codex, which is why a
+		// second line correcting it stood here.
+		if (tooltipCls == nullptr)
+		{
+			Printf(TEXTCOLOR_YELLOW "%s: no %s to identify their button by, %s\n", AuxSubsystem,
+				AuxTooltipCommandClassName, AuxDisabledNote);
+		}
 		return;
 	}
 

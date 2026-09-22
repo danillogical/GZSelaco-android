@@ -26,6 +26,11 @@
 ** convention in this fork is that a four-line guard in a shared file survives a merge from upstream
 ** where a forked function does not. Off Android this class has an empty body and compiles to nothing.
 **
+** AND ONLY ONE MENU CAN EVER DRAW THROUGH IT. M_Drawer's other branch is transition.Draw(), which draws
+** the outgoing and incoming menus in a single pass - both of which would land on our canvas. It cannot
+** run here: StartTransition requires canAnimate() on BOTH menus, and PDAMenu3 never sets
+** AnimatedTransition, so the redirect and a transition are mutually exclusive rather than merely unlikely.
+**
 ** The implementation lives in common/platform/posix/android/i_auxlivecodex.cpp, which owns mode 4; the
 ** reflection helpers it uses are shared with mode 3 through i_auxvmreflect.h.
 */

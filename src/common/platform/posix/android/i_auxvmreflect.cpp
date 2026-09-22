@@ -511,9 +511,15 @@ static int SetTextPaddingRegs = 0;
 // Split out so the caller below reads as resolve-then-apply; it records nothing but this file's own cache.
 static void ResolveTabPadding(DObject *menu, PClass *menuCls, PClass *viewCls)
 {
+	// Named for the tab strip and not for either codex, because both modes narrow their tabs through here:
+	// the default "AuxStandbyCodex" would be wrong half the time, and no caller is a better answer than the
+	// feature itself. The wording matches the failure line further down so a log reads as one story.
+	static const char *const Subsystem = "AuxTabStrip";
+	static const char *const Note = "the tab strip keeps Selaco's own padding";
+
 	for (unsigned i = 0; i < countof(TabFieldNames); i++)
 	{
-		TabPaddingFields[i] = ResolveField(menuCls, TabFieldNames[i], Field_ViewPtr, viewCls);
+		TabPaddingFields[i] = ResolveField(menuCls, TabFieldNames[i], Field_ViewPtr, viewCls, Subsystem, Note);
 		if (TabPaddingFields[i] == nullptr)
 			return;
 	}
@@ -536,7 +542,8 @@ static void ResolveTabPadding(DObject *menu, PClass *menuCls, PClass *viewCls)
 	// fills omitted ones in, so the callee still declares and reads five.
 	static const EArgKind PaddingArgs[] = { Arg_Float, Arg_Float, Arg_Float, Arg_Float };
 	PClass *tabCls = firstTab->GetClass();
-	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", "AuxStandbyCodex", PaddingArgs, 4, &SetTextPaddingRegs);
+	VMFunction *func = ResolveMethod(tabCls, "setTextPadding", Subsystem, PaddingArgs, 4, &SetTextPaddingRegs,
+		nullptr, Note);
 	if (func == nullptr)
 		return;
 

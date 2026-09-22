@@ -43,9 +43,18 @@
 ** WHY STATE AND NOT A PIXEL SNAPSHOT, so that this is not "simplified" back into one. Keeping the live
 ** codex's final frame instead of redrawing was tried and reverted: a frozen frame cannot survive the
 ** stat rebuild that any secret or unlock triggers (i_auxstandbycodex.cpp's rebuild trigger), cannot
-** survive an aux_codex_size change, and can capture a mid-transition.Draw() double exposure. A scroll
-** FRACTION survives all three because it is data - it is re-applied to whatever tree exists now, at
-** whatever zoom, after whatever rebuild.
+** survive an aux_codex_size change, and catches whatever the desktop's own animation happened to be
+** doing - which on device it did, freezing a half-slid window. A scroll FRACTION survives all three
+** because it is data - it is re-applied to whatever tree exists now, at whatever zoom, after whatever
+** rebuild.
+**
+** THAT LAST REASON IS THE DESKTOP'S OWN TWEENING AND NOT THE ENGINE'S MenuTransition, which this
+** comment used to blame. MenuTransition::Draw does draw two menus in one pass (menu.cpp), and with
+** `twod` redirected both would land on our canvas - but StartTransition refuses unless BOTH menus
+** canAnimate(), i.e. both have AnimatedTransition set, and PDAMenu3 never does: Menu.Init clears it
+** (menu.zs:190), PDAMenu3 does not set it, and every menu in Selaco's zscript that touches the flag
+** sets it to false. So no transition can be running while the redirect is active, and there is nothing
+** here to guard against.
 **
 ** THE THREE PIECES, all of them presentation-independent on purpose:
 **

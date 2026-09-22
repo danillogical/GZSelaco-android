@@ -888,11 +888,18 @@ static void AuxRenameHandheldEntry()
 
 	PClass *textCls = PClass::FindClass(AuxTextItemClassName);
 	PField *fldText = textCls != nullptr
-		? AuxView::ResolveField(textCls, AuxTextItemFieldName, AuxView::Field_String, nullptr) : nullptr;
+		? AuxView::ResolveField(textCls, AuxTextItemFieldName, AuxView::Field_String, nullptr,
+			"AuxPanel", "the Options entry keeps its name") : nullptr;
 	if (fldText == nullptr)
 	{
-		Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s.%s, the %s entry keeps its name\n",
-			AuxTextItemClassName, AuxTextItemFieldName, AuxHandheldMenuName);
+		// Only the missing-class case is said here; ResolveField now carries this file's subsystem and the
+		// consequence that is actually true of it, so a field that exists but is the wrong type already
+		// prints as AuxPanel rather than as the standby codex losing its view.
+		if (textCls == nullptr)
+		{
+			Printf(TEXTCOLOR_YELLOW "AuxPanel: no %s, the %s entry keeps its name\n",
+				AuxTextItemClassName, AuxHandheldMenuName);
+		}
 		return;
 	}
 

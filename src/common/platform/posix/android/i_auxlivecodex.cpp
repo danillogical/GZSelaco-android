@@ -244,19 +244,30 @@ static bool LiveResolve()
 	static const EArgKind CalcScaleArgs[] = { Arg_Int, Arg_Int, Arg_Vector2 };
 	static const EArgKind ViewLayoutArgs[] = { Arg_Vector2, Arg_Float, Arg_Bool };
 
+	// Mode 4 is not the standby codex and must not report as one. The note is the consequence this group
+	// actually has - every symbol below is required, so a miss sets LiveBroken and the live codex stops
+	// existing - and it is the same wording the two Printfs in this function already use.
+	static const char *const Subsystem = "AuxLiveCodex";
+	static const char *const Note = "second-screen PDA disabled";
+
 	int calcScaleRegs = 0, liveLayoutRegs = 0, viewLayoutRegs = 0;
 	// calcScale(int, int, Vector2) is FIVE registers for three declared arguments - a Vector2 is two
 	// (types.cpp:365). ResolveMethod proves that against the callee's own NumArgs.
-	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", "AuxStandbyCodex", CalcScaleArgs, 3, &calcScaleRegs);
+	VMFunction *funcCalcScale = ResolveMethod(cls, "calcScale", Subsystem, CalcScaleArgs, 3, &calcScaleRegs,
+		nullptr, Note);
 	VMFunction *funcLiveLayout = funcCalcScale != nullptr
-		? ResolveMethod(cls, "layout", "AuxStandbyCodex", nullptr, 0, &liveLayoutRegs) : nullptr;
+		? ResolveMethod(cls, "layout", Subsystem, nullptr, 0, &liveLayoutRegs, nullptr, Note) : nullptr;
 	VMFunction *funcViewLayout = funcLiveLayout != nullptr
-		? ResolveMethod(viewCls, "layout", "AuxStandbyCodex", ViewLayoutArgs, 3, &viewLayoutRegs) : nullptr;
+		? ResolveMethod(viewCls, "layout", Subsystem, ViewLayoutArgs, 3, &viewLayoutRegs, nullptr, Note) : nullptr;
 
-	PField *fldMainView = funcViewLayout != nullptr ? ResolveField(cls, "mainView", Field_ViewPtr, viewCls) : nullptr;
-	PField *fldUIScaling = fldMainView != nullptr ? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls) : nullptr;
-	PField *fldIgnore = fldUIScaling != nullptr ? ResolveField(cls, "ignoreUIScaling", Field_Bool, viewCls) : nullptr;
-	PField *fldDrawCanvas = fldIgnore != nullptr ? ResolveField(cls, "drawCanvas", Field_CanvasPtr, viewCls) : nullptr;
+	PField *fldMainView = funcViewLayout != nullptr
+		? ResolveField(cls, "mainView", Field_ViewPtr, viewCls, Subsystem, Note) : nullptr;
+	PField *fldUIScaling = fldMainView != nullptr
+		? ResolveField(cls, "ui_scaling", Field_CVarPtr, viewCls, Subsystem, Note) : nullptr;
+	PField *fldIgnore = fldUIScaling != nullptr
+		? ResolveField(cls, "ignoreUIScaling", Field_Bool, viewCls, Subsystem, Note) : nullptr;
+	PField *fldDrawCanvas = fldIgnore != nullptr
+		? ResolveField(cls, "drawCanvas", Field_CanvasPtr, viewCls, Subsystem, Note) : nullptr;
 
 	// THE COUPLING, and the one OPTIONAL group here. currentAppWindow (pda_menu.zs:49) is the only handle mode
 	// 4 has on what the player is actually looking at, so it is what everything the view-state manager samples
@@ -267,7 +278,8 @@ static bool LiveResolve()
 	// wrong trade.
 	PClass *appWindowCls = PClass::FindClass(AppWindowClassName);
 	PField *fldCurrentApp = appWindowCls != nullptr && appWindowCls->IsDescendantOf(viewCls)
-		? ResolveField(cls, "currentAppWindow", Field_ViewPtr, appWindowCls) : nullptr;
+		? ResolveField(cls, "currentAppWindow", Field_ViewPtr, appWindowCls, Subsystem,
+			"the panel falls back to aux_standby_app and opens documents at the top") : nullptr;
 
 	const bool ok = fldDrawCanvas != nullptr;
 

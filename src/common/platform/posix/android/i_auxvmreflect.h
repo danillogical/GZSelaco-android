@@ -211,8 +211,14 @@ enum EArgKind
 // call site because none of them passes more than one script object.
 //
 // subsystem prefixes every failure line and disabledNote ends it, so a caller that is not the standby
-// codex neither announces itself as one nor tells the player the second-screen view is off. Both mode files
-// pass "AuxStandbyCodex" and take the default note, which is the text these lines have always had.
+// codex neither announces itself as one nor tells the player the second-screen view is off.
+//
+// EVERY CALLER PASSES BOTH UNLESS IT REALLY IS THE STANDBY CODEX, and the standby codex is the only
+// reason the default exists. Taking the default elsewhere does not fail, it MISREPORTS: the live codex,
+// the tab strip, the panel and the reset button each used to print "AuxStandbyCodex: ... second-screen
+// view disabled" for a symbol the standby codex never asks for and a consequence that was not the one
+// they suffer - which sends anyone reading a device log to the wrong file. Match the name and the
+// consequence the caller's own Printfs already use rather than inventing a third wording.
 VMFunction *ResolveMethod(PClass *cls, const char *funcname, const char *subsystem,
 	const EArgKind *argkinds, unsigned nargs, int *outRegs, PClass *argClass = nullptr,
 	const char *disabledNote = "second-screen view disabled");
