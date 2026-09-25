@@ -567,16 +567,16 @@ looked fullbright and partly cyan-tinted for the whole wipe. That was found on G
 melts straight into the level.
 
 **Selaco never executes it.** `wipetype` ships as `0` (`wipe_None`) via the game's own
-`CVARINFO.defaults`, and `d_main.cpp:1225` skips straight to `End2DAndUpdate()` when
+`CVARINFO.defaults`, and `d_main.cpp:1256` skips straight to `End2DAndUpdate()` when
 `wipe_type == wipe_None`. No level transition will reach `PerformWipe`, so playing the game is
 not a test of this fix — a full playthrough proves nothing either way. The path is reachable only
-from a cutscene that calls `System_SetTransition` (`d_main.cpp:3238`), which forces a type
+from a cutscene that calls `System_SetTransition` (`d_main.cpp:3267`), which forces a type
 independently of `wipetype`, or from a player who sets the cvar by hand.
 
 To actually exercise it, edit `wipetype=1` into `selaco-ea.ini` **with the game stopped** (a clean
 exit rewrites the ini from memory and would undo the edit; `am force-stop` skips that, which is
 what makes the edit stick). Do not try to do it from the console — printable characters need SDL
-text input and are unreachable over adb. Note `d_main.cpp:1014` wipes on *any* gamestate change,
+text input and are unreachable over adb. Note `d_main.cpp:1024` wipes on *any* gamestate change,
 so loading a save from the title screen is enough; a level exit is not required. Restore the cvar
 afterwards, or a clean exit archives melt as the player's permanent setting.
 
@@ -905,7 +905,7 @@ render and present per frame. Do not reopen that approach without reading those 
 
 **`FLAG_NOT_FOCUSABLE` is mandatory, for a reason specific to this engine.** If the panel takes focus,
 `SDL_WINDOWEVENT_FOCUS_LOST` sets `AppActive = false` (`sdlglvideo.cpp:1129-1131`) and `D_Display`
-then returns early (`d_main.cpp:945-948`) — freezing **both** screens while the process runs perfectly.
+then returns early (`d_main.cpp:955-958`) — freezing **both** screens while the process runs perfectly.
 `FLAG_NOT_TOUCHABLE` is a *separate* bit and is not set, so touch still works. `FLAG_KEEP_SCREEN_ON`
 must be on the Presentation's own window or the panel sleeps, and a sleeping panel screencaps pure
 black, which reads as a broken renderer.
