@@ -557,8 +557,14 @@ If you touch this again: `Copy()` has **three** callers and one of them is in
 
 `PerformWipe` (`common/2d/wipe.cpp`) loops `Begin/Run/End/screen->Update()` **without**
 `BeginFrame`, so `Update()` would rotate nothing and reuse a slot still executing.
-`VulkanRenderDevice` carries an `mFrameBegun` flag for it (`vk_renderdevice.cpp:1100`, set at
-`:1559`): when `Update()` runs unpaired, it does a full wait instead of an advance.
+`VulkanRenderDevice` carries an `mFrameBegun` flag for it (set at `vk_renderdevice.cpp:1567`), and
+an unpaired `Update()` waits twice. The wait before `Draw2D` (`:1079`) stops it rewriting the per-draw
+uniforms under the previous submit. The wait after its own submit (`:1108`) replaces the advance and
+keeps the delete lists bounded. The second alone was not enough: it covers an iteration that follows
+another unbegun one, but the first `PerformWipe` iteration follows a real frame. Without the first
+wait, the 3D draws of the frame being revealed read 2D values for lighting and fog, so the world
+looked fullbright and partly cyan-tinted for the whole wipe. That was found on GZDoom, where a load
+melts straight into the level.
 
 **Selaco never executes it.** `wipetype` ships as `0` (`wipe_None`) via the game's own
 `CVARINFO.defaults`, and `d_main.cpp:1225` skips straight to `End2DAndUpdate()` when
@@ -576,6 +582,16 @@ afterwards, or a clean exit archives melt as the player's permanent setting.
 
 Verified on device this way: the "Now Loading" melt rendered and a full level run followed with no
 hang, no crash and no `DEVICE_LOST`.
+
+**Selaco cannot show the lighting race, so a clean melt here proves nothing about it.** Both
+wipes reachable over adb reveal a 2D screen with no 3D world in it. A load from the title melts
+into the black "Loading..." screen and the level then appears as a hard cut. A load from inside a
+level (F9 opens Load Game) is Selaco's own fade to black and back, and the engine wipe it forces
+(`g_level.cpp:1415`) runs over black. Selaco's scripts never call `SetTransition`. The mean
+green-over-red frame count used on GZDoom is also useless here: Selaco's palette trips it on
+nearly every frame, including the title menu. The one thing the fix visibly changed under sync
+validation was `VUID-vkAcquireNextImageKHR-semaphore-01779` on the first in-level load: 2 of 2
+launches before the fix, 0 of 2 after it, with 0 sync hazards either way.
 
 ---
 

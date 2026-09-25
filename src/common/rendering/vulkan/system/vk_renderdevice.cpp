@@ -1071,6 +1071,14 @@ void VulkanRenderDevice::Update()
 	twoD.Reset();
 	Flush3D.Reset();
 
+	// An Update with no BeginFrame before it rotated no frame slot, so Draw2D below would write the per-draw
+	// uniforms from offset 0 while the previous submit may still be reading them. The wait after the submit
+	// further down only covers the case where that previous submit was itself unbegun; the first PerformWipe
+	// iteration follows a real frame, and without this it overwrote the lighting and fog of the frame the wipe
+	// reveals.
+	if (!mFrameBegun)
+		mCommands->WaitForCommands(false);
+
 	Flush3D.Clock();
 
 	GetPostprocess()->SetActiveRenderTarget();
