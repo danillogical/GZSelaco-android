@@ -45,12 +45,7 @@ controls are not implemented, so a device with no physical buttons cannot play.
 
 ![Selaco on the AYN Thor: the game on the top screen, the codex on the bottom](docs/images/thor-dual-screen.jpg)
 
-The Thor is a clamshell with two screens facing you, so the bottom one shows Selaco's
-**codex** — the PDA desktop, with your datalogs, objectives, milestones, statistics and the
-manual — while you play on the top screen.
-
-It is the game's own PDA, not a copy of it: the engine draws the real thing onto the lower
-panel. Open your PDA with the codex button and the bottom screen becomes the live codex,
+Open your PDA with the codex button and the bottom screen becomes the live codex,
 gamepad-driven; close it and it goes back to the standby codex, which keeps the tab you
 were last on and refreshes when you find a secret or hit a milestone.
 
