@@ -16,7 +16,8 @@ hard to undo, so the gates below are not optional.
 |---|---|
 | branch | `android-macos-ports` |
 | remote | **`fork`** → `https://github.com/danillogical/GZSelaco-android.git` |
-| HEAD | confirm with `git log --oneline -1`; the APK must name it (section 2) |
+| artifact | built at **`e5d719f85`**, sha256 `41463351bd934662b554c659fea65f53bbfb048513103e70f142bd4f18df2a9e` — the exact file tested on the Thor |
+| after the artifact | docs-only commits (Obtainium button, screenshot, this plan); no code |
 | ahead of `fork/android-macos-ports` | `git rev-list --count fork/android-macos-ports..HEAD`, 0 behind |
 | version | `versionName '0.2.0'`, `versionCode 200` |
 | previous release | tag `v0.1.0`, asset `Selaco-android-0.1.0.apk` |
@@ -46,11 +47,12 @@ explicitly so a command cannot resolve against the wrong host.
 git status --short                 # must be empty
 git rev-parse --abbrev-ref HEAD    # android-macos-ports
 git log --oneline -1
+git diff --stat e5d719f85 HEAD     # docs only: README.md, docs/images/, this file
 ```
 
-Stop if the tree is dirty. A release built from an uncommitted tree is the
-thing the `gitinfo.h` fix below exists to make visible, and shipping one
-defeats it.
+Stop if the tree is dirty, or if anything outside those paths changed since
+`e5d719f85`. A code change there means the tested artifact no longer matches
+the source being released.
 
 Scan what is about to become public for the personal identifiers this repo
 must never contain. They are listed in the user's own CLAUDE.md rather than
@@ -67,78 +69,37 @@ code, not an identifier — ignore it.
 
 ---
 
-## 2. Verify the artifact — it is already built
-
-**The APK is gitignored** (`.gitignore:74`, `/android/app/build/`), so it is on
-disk only and is never part of a commit. That is what makes the gate below
-possible: build at `HEAD`, and the binary names `HEAD` exactly. Committing the
-APK would make it name `HEAD~1` and the gate could never pass.
-
-**Do not rebuild it unless a check below fails.**
+## 2. Verify the artifact — it is already built, and it is the one that was tested
 
 ```
 android/app/build/outputs/apk/release/app-release.apk
 ```
 
-**This is the `release` buildType, not `debug`.** Both are signed with the same
-debug key (`signingConfig signingConfigs.debug`), so that is not the
-difference — the difference is that `release` is not `debuggable`, so
-`adb shell run-as com.selaco.game` does not work against it and the app's
-private data cannot be read on device. Build it with `assembleRelease`; a
-`debug` APK is a different artifact and must not be what ships.
+**Do not rebuild it.** This exact file was installed on the Thor and played.
+A rebuild at a later commit would produce the same code with a different
+embedded version string, and it would be a file nobody has run. It is
+gitignored (`/android/app/build/`), so it exists only on this machine.
 
-No size or digest is recorded here: a rebuild changes both, and this file is
-read after commits have landed that the APK on disk may predate. The check
-that *is* stable is that the binary names the commit you are about to tag:
+It is the `release` buildType, not `debug`. Both are signed with the same
+debug key (`signingConfig signingConfigs.debug`). The difference is that
+`release` is not `debuggable`, so `adb shell run-as` does not work against it.
+A `debug` APK is a different artifact and must not be what ships.
 
 ```bash
 APK=android/app/build/outputs/apk/release/app-release.apk
-DISK=$(stat -f %z android/app/src/main/jniLibs/arm64-v8a/libSelaco.so)
-APKSZ=$(unzip -l "$APK" | awk '/lib\/arm64-v8a\/libSelaco.so/{print $1}')
-[ "$DISK" = "$APKSZ" ] && echo "SO MATCH OK" || echo "STALE APK - do not release"
+shasum -a 256 "$APK"   # must be 41463351bd934662b554c659fea65f53bbfb048513103e70f142bd4f18df2a9e
 
 unzip -p "$APK" lib/arm64-v8a/libSelaco.so > /tmp/so
-strings /tmp/so | grep -c "$(git rev-parse HEAD)"          # must be 1
-strings /tmp/so | grep -oE 'v0\.1\.0-[0-9]+-g[0-9a-f]+(-m)?' | head -1
-unzip -l "$APK" | grep -c 'assets/profiles/'               # must be 5
-unzip -p "$APK" assets/autoexec.cfg | grep -c '^vid_fps 0'  # must be 1
+strings /tmp/so | grep -c e5d719f853ce61ba1c1cca60e0387a9182f8f789   # must be 1
+strings /tmp/so | grep -oE 'v0\.1\.0-[0-9]+-g[0-9a-f]+(-m)?' | head -1 # v0.1.0-33-ge5d719f85, no -m
+unzip -l "$APK" | grep -c 'assets/profiles/'                         # must be 5
+unzip -p "$APK" assets/autoexec.cfg | grep -c '^vid_fps 0'            # must be 1
+unzip -l "$APK" | grep -c libVkLayer                                  # must be 0
 ```
 
-- **hash count must be 1.** If it is 0 the APK predates `HEAD` — most likely
-  because a commit landed after it was built. Rebuild. If it stays 0 after a
-  rebuild, `gitinfo.cpp.o` is stale: `touch src/common/utility/gitinfo.cpp`
-  and build again. That was fixed in `cf0a7fc04`, so a recurrence means the
-  fix regressed.
-- **the git description must NOT end in `-m`.** `-m` means `git describe` saw
-  a dirty tree, so the binary was not built from a committed state.
-
-**If the file is missing**, you are on a different machine —
-`android/app/build/` is gitignored, so the APK is on disk only and is not part
-of the clone. Rebuild:
-
-```bash
-./android/build-android.sh
-./android/package-apk.sh            # exits 1 ON SUCCESS - see CLAUDE.md
-cd android && java -Xmx4g \
-  -classpath /tmp/gradle-8.13/lib/gradle-launcher-8.13.jar \
-  org.gradle.launcher.GradleMain --no-daemon assembleRelease
-```
-
-Then re-run the gate above. Every exit code in that chain lies:
-`package-apk.sh` exits **1** on success, Gradle reports `BUILD SUCCESSFUL`
-against a tree it did not rebuild, and `adb install` reports `Success` for a
-stale APK — which is why the gate compares sizes and the embedded hash rather
-than trusting any of them.
-
-**If Gradle is missing**, `/tmp` has been cleaned — it takes the jars and
-leaves the directory tree, so the install looks present but `lib/` is empty.
-Re-fetch (`gradle.org` is allowlisted for this project):
-
-```bash
-cd /tmp && rm -rf gradle-8.13 && \
-  curl -fsSL -o g.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip && \
-  unzip -q g.zip && rm g.zip
-```
+**If the digest does not match or the file is missing, stop and ask.** Do not
+rebuild to make the gate pass: that replaces the tested artifact with an
+untested one, which is a decision for the user.
 
 ---
 
@@ -157,13 +118,13 @@ correct; if it is rejected, stop and report rather than forcing.
 
 ## 4. Tag
 
-`v0.1.0` tagged the commit that bumped the version. The 0.2.0 bump
-(`18f00d3b2`) is many commits back now, so tag **HEAD** — it is the commit the
-artifact was built from, which matters more than matching where the bump
-landed.
+Tag **`e5d719f85`**, the commit the artifact was built from, not HEAD. The
+commits after it are README-only and still go public with the branch push.
+GitHub shows the README from `android-macos-ports`, the default branch, so the
+Obtainium button and screenshot appear whichever commit carries the tag.
 
 ```bash
-git tag -a v0.2.0 -m "v0.2.0 - the second screen"
+git tag -a v0.2.0 e5d719f85 -m "v0.2.0 - the second screen"
 git push fork v0.2.0
 ```
 
@@ -222,6 +183,7 @@ retuning a handheld is a text file, not a code change. See
 - The fps counter is off by default
 - Fixed a crash on engine restart caused by stale script references
 - Fixed the second screen coming back blank after the device sleeps
+- Install and update through Obtainium: see the button in the README
 
 ## Known limitations
 
@@ -243,12 +205,11 @@ gh release view v0.2.0 --repo danillogical/GZSelaco-android \
 ```
 
 Check: asset named `Selaco-android-0.2.0.apk`, `isDraft: false`,
-`isPrerelease: false`, and a plausible size — **about 12 MB**, close to
-v0.1.0's 12.8 MB. Do not expect a jump: an earlier draft of this plan said
-~19.8 MB, which was the `debug` APK. A release APK near 19 MB means a debug
-build was assembled by mistake.
+`isPrerelease: false` (the README's Obtainium button tracks stable releases
+only), and a size of 12826734 bytes. A size near 19 MB means a debug APK was
+uploaded by mistake.
 
-Then download the published asset and confirm it is the artifact you built,
+Then download the published asset and confirm it is the tested artifact,
 rather than trusting the upload:
 
 ```bash
@@ -257,7 +218,7 @@ gh release download v0.2.0 --repo danillogical/GZSelaco-android \
 shasum -a 256 /tmp/verify/Selaco-android-0.2.0.apk /tmp/Selaco-android-0.2.0.apk
 ```
 
-Both digests must match.
+Both digests must match, and must equal the one in section 2.
 
 ---
 
@@ -265,7 +226,7 @@ Both digests must match.
 
 - The push is rejected, or the remote has commits you do not have
 - `v0.2.0` already exists on the remote
-- Any gate in section 2 fails and the cause is not obvious
+- Any gate in section 2 fails. Do not rebuild to fix it
 - Anything suggests pushing to upstream GZDoom rather than the fork
 
 ## Explicitly out of scope
