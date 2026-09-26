@@ -43,6 +43,8 @@ controls are not implemented, so a device with no physical buttons cannot play.
 
 ## The second screen (AYN Thor)
 
+![Selaco on the AYN Thor: the game on the top screen, the codex on the bottom](docs/images/thor-dual-screen.jpg)
+
 The Thor is a clamshell with two screens facing you, so the bottom one shows Selaco's
 **codex** — the PDA desktop, with your datalogs, objectives, milestones, statistics and the
 manual — while you play on the top screen.
