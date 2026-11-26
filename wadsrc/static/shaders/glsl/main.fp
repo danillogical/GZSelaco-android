@@ -755,7 +755,7 @@ vec4 getLightColor(Material material, float fogdist, float fogfactor)
 	//
 	if (vLightmap.z >= 0.0)
 	{
-		color.rgb += texture(LightMap, vLightmap).rgb;
+		color.rgb += desaturate(texture(LightMap, vLightmap)).rgb;
 	}
 
 	//
@@ -837,6 +837,7 @@ void main()
 	if (frag.a <= uAlphaThreshold) discard;
 #endif
 
+#ifndef DIRECT_COPY
 	if (uFogEnabled != -3)	// check for special 2D 'fog' mode.
 	{
 		float fogdist = 0.0;
@@ -886,13 +887,14 @@ void main()
 			frag = frag * ProcessLight(material, vColor);
 		frag.rgb = frag.rgb + uFogColor.rgb;
 	}
+#endif
+
 	FragColor = frag;
 
 #ifdef DITHERTRANS
 	int index = (int(pixelpos.x) % 8) * 8 + int(pixelpos.y) % 8;
-	// GLSL requires the float[64](...) constructor form here; a brace-enclosed
-	// initializer is a C-ism that stricter compilers (and MoltenVK) reject.
-	const float DITHER_THRESHOLDS[64] = float[64](
+	const float DITHER_THRESHOLDS[64] =
+	float[64](
 		1.0 / 65.0, 33.0 / 65.0, 9.0 / 65.0, 41.0 / 65.0, 3.0 / 65.0, 35.0 / 65.0, 11.0 / 65.0, 43.0 / 65.0,
 		49.0 / 65.0, 17.0 / 65.0, 57.0 / 65.0, 25.0 / 65.0, 51.0 / 65.0, 19.0 / 65.0, 59.0 / 65.0, 27.0 / 65.0,
 		13.0 / 65.0, 45.0 / 65.0, 5.0 / 65.0, 37.0 / 65.0, 15.0 / 65.0, 47.0 / 65.0, 7.0 / 65.0, 39.0 / 65.0,

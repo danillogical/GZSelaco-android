@@ -938,6 +938,7 @@ set (PCH_SOURCES
 	playsim/a_decals.cpp
 	playsim/a_dynlight.cpp
 	playsim/a_flashfader.cpp
+	playsim/a_lightgroup.cpp
 	playsim/a_morph.cpp
 	playsim/a_specialspot.cpp
 	playsim/p_secnodes.cpp
@@ -1038,6 +1039,7 @@ set (PCH_SOURCES
 	common/audio/sound/i_sound.cpp
 	common/audio/sound/oalsound.cpp
 	common/audio/sound/s_environment.cpp
+	common/audio/sound/s_audiofx.cpp
 	common/audio/sound/s_sound.cpp
 	common/audio/sound/s_loader.cpp
 	common/audio/sound/s_reverbedit.cpp

@@ -14,6 +14,7 @@
 class VulkanRenderDevice;
 class VkRenderPassSetup;
 class VkTextureImage;
+class VkTextureImageView;
 
 class VkRenderState : public FRenderState
 {
@@ -51,6 +52,7 @@ public:
 
 	void BeginFrame();
 	void SetRenderTarget(VkTextureImage *image, VulkanImageView *depthStencilView, int width, int height, VkFormat Format, VkSampleCountFlagBits samples);
+	void SetRenderTarget(VkTextureImageView* imageView, VulkanImageView* depthStencilView, int width, int height, VkFormat Format, VkSampleCountFlagBits samples);
 	void Bind(int bindingpoint, uint32_t offset);
 	void EndRenderPass();
 	void EndFrame();
@@ -119,8 +121,9 @@ protected:
 
 	struct RenderTarget
 	{
-		VkTextureImage *Image = nullptr;
+		VulkanImageView *ImageView = nullptr;
 		VulkanImageView *DepthStencil = nullptr;
+		std::map<VkRenderPassKey, std::unique_ptr<VulkanFramebuffer>>* FrameBuffers = nullptr;
 		int Width = 0;
 		int Height = 0;
 		VkFormat Format = VK_FORMAT_R16G16B16A16_SFLOAT;
