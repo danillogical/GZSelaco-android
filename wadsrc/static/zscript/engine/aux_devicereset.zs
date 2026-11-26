@@ -28,7 +28,7 @@
 
 class AuxDeviceResetPrompt
 {
-	// Called by PromptMenu.handleControl through onClosed (prompt.zs:300-301); `button` is the
+	// Called by PromptMenu.handleControl through onClosed (prompt.zs:253-254); `button` is the
 	// controlID of the button that was activated, which is its index in the prompt's own list.
 	//
 	// IT REPORTS THE BUTTON AND DECIDES NOTHING. Which index means "confirm" is chosen by the C++

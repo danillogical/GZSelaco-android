@@ -3880,8 +3880,8 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<std::string>& allw
 	// possible after M_Init, which is what parses every MENUDEF lump - ours loads before they exist.
 	extern void I_AuxPanelInitMenu();
 	I_AuxPanelInitMenu();
-	// Decide whether this is a first launch and, if it is, arm the device picker and suppress
-	// Selaco's own first-run dialogs. Must be before the first world tick, which is when their
+	// Arm the device picker on a first launch, or re-apply the recorded device when Selaco bumps its
+	// first-run IDs; either way Selaco's own first-run dialogs are suppressed. Must be before the first world tick, which is when their
 	// TOSEventHandler would open them; needs MENUDEF parsed for the same reason as the line above.
 	extern void I_AuxDevicePickerInit();
 	I_AuxDevicePickerInit();

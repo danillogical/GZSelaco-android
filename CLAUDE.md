@@ -150,17 +150,17 @@ Also note **DeckLow is heavier than Low**: of the 13 cvars that differ, DeckLow 
 more expensive value in all 13.
 
 **Do not bypass the first-run dialog by hand — and `g_tos 1` does not even do that.**
-`IntroHandler.needsTOS()` compares against `TOS_ID`, which is `2`, so `g_tos 1` leaves the
+`IntroHandler.needsTOS()` compares against `TOS_ID`, which is `4` as of Chapter 2 (it was `2`), so `g_tos 1` leaves the
 dialog pending; `TOS_ID` is also a `PSymbolConstNumeric` that `RemoveUnusedSymbols()` strips
 before any console command could read it, so there is no cvar value that skips the dialog —
-only Selaco's own `clearNeedsTOS()` clears it, and a device ini shows `g_tos=2` written by
-that call, never a `1`. What actually caused the three bugs once attributed to `g_tos 1`
+only Selaco's own `clearNeedsTOS()` clears it, and a device ini shows `g_tos=4` written by
+that call, never a `1`. Chapter 2 also added a third flag, `g_qualitySetting`, cleared only by `clearNeedsQuality()`. What actually caused the three bugs once attributed to `g_tos 1`
 (walking instead of running, 20x view bob, a stale gamepad layout with no weapon-wheel
 binding) was `SetSteamdeckPresets()` and the preset block never running, by whatever means
 the dialog got skipped. Only bypass the dialog through something that redoes that work
 itself and enforces the ordering — which is what the device picker in
 [TECHNICAL.md](TECHNICAL.md#the-device-picker) does now, deliberately, in place of Selaco's
-two dialogs. Do not reintroduce a hand-rolled `g_tos`/`aux_device` write that skips it
+first-run dialogs. Do not reintroduce a hand-rolled `g_tos`/`aux_device` write that skips it
 without also calling `SetSteamdeckPresets()` and applying a real preset.
 
 **Do not `adb logcat -c` in a measurement loop.** It destroyed the evidence for a crash
