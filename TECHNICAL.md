@@ -81,7 +81,7 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 **Vulkan only.** There is no OpenGL ES fallback in these builds. Vulkan 1.1+ required.
 
-**`multiDrawIndirect` requirement removed** (`vulkanbuilders.cpp:1835`) — and the original
+**`multiDrawIndirect` requirement removed** (`vulkanbuilders.cpp:1843`) — and the original
 justification for this was **wrong**, which is worth recording. The claim was that Adreno
 reports it false and Vulkan would find zero devices on the Thor. Measured via
 `adb shell cmd gpu vkjson`, the Adreno 740 supports `multiDrawIndirect`,
@@ -374,7 +374,7 @@ graphics family.
 **`i_benchmark`** (`common/engine/i_benchmark.cpp`) — frame-time percentiles to logcat. Uses
 `PRINT_HIGH | PRINT_NONOTIFY` so it does not draw its own output and skew what it measures.
 Samples engine stats **every frame**, because `GetStats()` rolls the stat's ring buffer as a
-side effect (`vmframe.cpp:767`) and calling it once per report made "VM time in last 10 tics"
+side effect (`vmframe.cpp:885`) and calling it once per report made "VM time in last 10 tics"
 accumulate a whole window.
 
 ---
@@ -422,7 +422,7 @@ driven by the frame slot:
 worked, but the failure modes are asymmetric: a region overrun is a *legal* write into another
 in-flight frame's data, so neither the driver nor the validation layers can see it and it surfaces
 only as a one-frame flicker — the hardest symptom to attribute. An overrun of a separate buffer is
-out of bounds and can be caught. Costs **98.7 MiB** more at depth 2, nearly all of it
+out of bounds and can be caught. Costs **98.72 MiB** more at depth 2, nearly all of it
 `FFlatVertexBuffer` at 61.04 MiB per copy, which is a good trade for making a class of silent
 corruption inexpressible.
 
@@ -432,12 +432,12 @@ Persistent allocations exactly, which is what makes it trustworthy:
 | buffer | per copy | added at depth 2 |
 |---|---|---|
 | `FFlatVertexBuffer` vertex (2,000,000 × 32 B) | 61.04 MiB | +61.04 |
-| Stream UBO (300 × 65,280 B) | 18.68 MiB | +18.68 |
+| Stream UBO (300 × 65,504 B) | 18.74 MiB | +18.74 |
 | Matrix UBO (50,000 × 192 B) | 9.16 MiB | +9.16 |
 | `FLightBuffer` (80,000 × 64 B) | 4.88 MiB | +4.88 |
 | `BoneBuffer` (80,000 × 64 B) | 4.88 MiB | +4.88 |
 | `HWViewpointBuffer` (100 × 256 B) | 0.02 MiB | +0.02 |
-| | **101.7 MiB** | **+98.66 MiB** |
+| | **98.72 MiB** | **+98.72 MiB** |
 
 Earlier figures of "~71 MB" and "~93 MB" were both wrong: 71 counted only the four engine buffers
 and predates the two `VkStreamBuffer`s being pipelined.
@@ -557,9 +557,9 @@ If you touch this again: `Copy()` has **three** callers and one of them is in
 
 `PerformWipe` (`common/2d/wipe.cpp`) loops `Begin/Run/End/screen->Update()` **without**
 `BeginFrame`, so `Update()` would rotate nothing and reuse a slot still executing.
-`VulkanRenderDevice` carries an `mFrameBegun` flag for it (set at `vk_renderdevice.cpp:1567`), and
-an unpaired `Update()` waits twice. The wait before `Draw2D` (`:1079`) stops it rewriting the per-draw
-uniforms under the previous submit. The wait after its own submit (`:1108`) replaces the advance and
+`VulkanRenderDevice` carries an `mFrameBegun` flag for it (set at `vk_renderdevice.cpp:1680`), and
+an unpaired `Update()` waits twice. The wait before `Draw2D` (`:1098`) stops it rewriting the per-draw
+uniforms under the previous submit. The wait after its own submit (`:1127`) replaces the advance and
 keeps the delete lists bounded. The second alone was not enough: it covers an iteration that follows
 another unbegun one, but the first `PerformWipe` iteration follows a real frame. Without the first
 wait, the 3D draws of the frame being revealed read 2D values for lighting and fog, so the world
@@ -567,16 +567,16 @@ looked fullbright and partly cyan-tinted for the whole wipe. That was found on G
 melts straight into the level.
 
 **Selaco never executes it.** `wipetype` ships as `0` (`wipe_None`) via the game's own
-`CVARINFO.defaults`, and `d_main.cpp:1256` skips straight to `End2DAndUpdate()` when
+`CVARINFO.defaults`, and `d_main.cpp:1261` skips straight to `End2DAndUpdate()` when
 `wipe_type == wipe_None`. No level transition will reach `PerformWipe`, so playing the game is
 not a test of this fix — a full playthrough proves nothing either way. The path is reachable only
-from a cutscene that calls `System_SetTransition` (`d_main.cpp:3267`), which forces a type
+from a cutscene that calls `System_SetTransition` (`d_main.cpp:3350`), which forces a type
 independently of `wipetype`, or from a player who sets the cvar by hand.
 
 To actually exercise it, edit `wipetype=1` into `selaco-ea.ini` **with the game stopped** (a clean
 exit rewrites the ini from memory and would undo the edit; `am force-stop` skips that, which is
 what makes the edit stick). Do not try to do it from the console — printable characters need SDL
-text input and are unreachable over adb. Note `d_main.cpp:1024` wipes on *any* gamestate change,
+text input and are unreachable over adb. Note `d_main.cpp:1029` wipes on *any* gamestate change,
 so loading a save from the title screen is enough; a level exit is not required. Restore the cvar
 afterwards, or a clean exit archives melt as the player's permanent setting.
 
@@ -587,7 +587,7 @@ hang, no crash and no `DEVICE_LOST`.
 wipes reachable over adb reveal a 2D screen with no 3D world in it. A load from the title melts
 into the black "Loading..." screen and the level then appears as a hard cut. A load from inside a
 level (F9 opens Load Game) is Selaco's own fade to black and back, and the engine wipe it forces
-(`g_level.cpp:1415`) runs over black. Selaco's scripts never call `SetTransition`. The mean
+(`g_level.cpp:1417`) runs over black. Selaco's scripts never call `SetTransition`. The mean
 green-over-red frame count used on GZDoom is also useless here: Selaco's palette trips it on
 nearly every frame, including the title menu. The one thing the fix visibly changed under sync
 validation was `VUID-vkAcquireNextImageKHR-semaphore-01779` on the first in-level load: 2 of 2
@@ -617,7 +617,7 @@ Those three account for **6.3 of the 6.4 ms** gap between DeckLow and Low, so th
 differing cvars are noise at this viewpoint.
 
 **SSAO is effectively a binary cost on a tiler.** 2→1 saves almost nothing because any non-zero
-`gl_ssao` puts the whole scene into a 3-draw-buffer G-buffer pass (`hw_entrypoint.cpp:146`) —
+`gl_ssao` puts the whole scene into a 3-draw-buffer G-buffer pass (`hw_entrypoint.cpp:147`) —
 every fragment writes SceneColor RGBA16F + SceneFog RGBA8 + SceneNormal A2R10G10B10, and on a
 tiler the store lands at tile resolve where no draw-list timestamp can see it. That invisibility
 is why an earlier note wrongly recorded SSAO as nearly free.
@@ -905,7 +905,7 @@ render and present per frame. Do not reopen that approach without reading those 
 
 **`FLAG_NOT_FOCUSABLE` is mandatory, for a reason specific to this engine.** If the panel takes focus,
 `SDL_WINDOWEVENT_FOCUS_LOST` sets `AppActive = false` (`sdlglvideo.cpp:1129-1131`) and `D_Display`
-then returns early (`d_main.cpp:955-958`) — freezing **both** screens while the process runs perfectly.
+then returns early (`d_main.cpp:960-963`) — freezing **both** screens while the process runs perfectly.
 `FLAG_NOT_TOUCHABLE` is a *separate* bit and is not set, so touch still works. `FLAG_KEEP_SCREEN_ON`
 must be on the Presentation's own window or the panel sleeps, and a sleeping panel screencaps pure
 black, which reads as a broken renderer.
@@ -969,7 +969,7 @@ Selaco's codex content is **not** code: `/MANUAL.json`, a 42,172-byte lump, read
 
 C++ can read that map directly, and it is an established in-tree pattern rather than a layout hack:
 `ZSMap` derives publicly from `TMap` (`scripting/core/maps.h:19`) and is placement-constructed into
-the field's storage (`types.cpp:2513`), and `vmnatives.cpp:63` already declares
+the field's storage (`types.cpp:2517`), and `vmnatives.cpp:65` already declares
 `static ZSMap<FName, DObject*> AllServices;` in C++ and hands the same bytes to ZScript as
 `Map<Name, Service>`. Field lookup follows `maploader.cpp:1256`. So no ZScript of ours ships, there is
 no pk3 competing with Selaco's, and a non-Selaco load degrades to a blank panel because every lookup
@@ -1020,7 +1020,7 @@ The most reusable finding in this fork, and the reason the device picker, the pr
 second-screen settings page are all C++ reflecting on the VM rather than ZScript: **a lump of ours
 cannot name a class of Selaco's.**
 
-`ParseScripts()` (`src/scripting/thingdef.cpp:419-436`) finds every `ZSCRIPT` lump in load order and
+`ParseScripts()` (`src/scripting/thingdef.cpp:420-437`) finds every `ZSCRIPT` lump in load order and
 compiles each one as its own `ZCCDoomCompiler`, one lump at a time — a later lump can reference an
 earlier one's classes, never the reverse. `gzdoom.pk3` is the basewad, and `D_DoomMain` adds it before
 the IWAD unconditionally (`src/d_iwad.cpp:809-811`, `:827`: "`zdoom.pk3` must always be the first file
@@ -1032,9 +1032,9 @@ device picker's settings-page injection (below).
 
 **That constraint binds our *basewad*, not every possible lump of ours — and the difference matters,
 because this premise is what justifies the whole reflection layer.** `AddModFiles`
-(`src/d_main.cpp:2224`) appends every `.pk3` under `progdir/Mods` to `allwads`, and it is called from
-`D_InitGame` (`:3476`) — which `D_DoomMain_Internal` reaches *after* `FindIWAD` (`:4099`) has already
-pushed the basewad and the IWAD. `InitMultipleFiles` (`:3480`) then processes that vector in order, so
+(`src/d_main.cpp:2230`) appends every `.pk3` under `progdir/Mods` to `allwads`, and it is called from
+`D_InitGame` (`:3604`) — which `D_DoomMain_Internal` reaches *after* `FindIWAD` (`:4231`) has already
+pushed the basewad and the IWAD. `InitMultipleFiles` (`:3608`) then processes that vector in order, so
 a pk3 shipped into `progdir/Mods` compiles its `ZSCRIPT` **after** `Selaco.ipk3` and **can** name
 `PDAMenu3`.
 

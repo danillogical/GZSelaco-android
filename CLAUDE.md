@@ -16,10 +16,12 @@ comment *why*, not what.
 ```bash
 ./android/build-android.sh && ./android/package-apk.sh
 cd android && java -Xmx4g \
-  -classpath /tmp/gradle-8.13/lib/gradle-launcher-8.13.jar \
+  -classpath ~/.gradle/wrapper/dists/gradle-8.13-bin/5xuhj0ry160q40clulazy9h7d/gradle-8.13/lib/gradle-launcher-8.13.jar \
   org.gradle.launcher.GradleMain --no-daemon assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+`/tmp` gets cleared, so the wrapper-cache copy above is the durable one.
 
 **Gradle must be invoked as `java` directly** — a shell wrapper fails with
 `java.net.SocketException: Operation not permitted`. Use Gradle **8.x**; AGP 8.x rejects 9.
@@ -167,7 +169,7 @@ uncleared buffer.
 
 **Do not assume `setdefault` is broken.** Selaco ships a `CVARINFO.defaults` lump (~65
 entries) that changes stock GZDoom defaults, and this engine implements it
-(`d_main.cpp:1804`). `cL_run = true` and `movebob = 0.0126` are in there — never set those
+(`d_main.cpp:1815`). `cL_run = true` and `movebob = 0.0126` are in there — never set those
 by hand. The engine's raw `movebob` default of 0.25 is ~20x Selaco's own maximum.
 
 **`nosave` does not mean "not saved".** In CVARINFO it maps to `CVAR_CONFIG_ONLY`, which per

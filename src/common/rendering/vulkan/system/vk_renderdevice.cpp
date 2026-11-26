@@ -1024,7 +1024,7 @@ void VulkanRenderDevice::InitializeState()
 	// from Clear(), which runs too late and too often - hence the mExternalPipeline suppression in each
 	// buffer class.
 	//
-	// Costs one extra copy of each: ~98.7 MiB at depth 2, nearly all of it FFlatVertexBuffer at 61 MiB
+	// Costs one extra copy of each: ~98.72 MiB at depth 2, nearly all of it FFlatVertexBuffer at 61 MiB
 	// per copy (BUFFER_SIZE 2,000,000 x 32-byte FFlatVertex, provisioned ~20x above the observed peak -
 	// see the vertexpeak CCMD).
 	const int pipelineDepth = VkCommandBufferManager::framesInFlight;

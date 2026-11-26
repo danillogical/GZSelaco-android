@@ -19,7 +19,7 @@ updates it when a new one comes out. Or do step 1 by hand; the rest is the same 
 
 1. Download `Selaco-android-<version>.apk` from [Releases](../../releases) and install it.
 2. Find `Selaco.ipk3` in your Steam folder:
-   `steamapps/common/Selaco/Selaco.ipk3` (~1.2 GB)
+   `steamapps/common/Selaco/Selaco.ipk3` (~3.3 GB)
 3. Copy it to **`Internal storage/Selaco/`** on your device — the folder your file manager
    shows as "Internal storage", i.e. `/sdcard/Selaco/`. USB, an SD card or a download on the
    device all work.
