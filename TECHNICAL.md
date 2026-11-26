@@ -52,7 +52,7 @@ Not done: code signing/notarization for distribution, and a universal binary.
 ./android/build-android.sh            # host code-gen tools, then the engine
 ./android/package-apk.sh              # stage libs + assets (stops before gradle)
 cd android && java -Xmx4g \
-  -classpath /tmp/gradle-8.13/lib/gradle-launcher-8.13.jar \
+  -classpath ~/.gradle/wrapper/dists/gradle-8.13-bin/5xuhj0ry160q40clulazy9h7d/gradle-8.13/lib/gradle-launcher-8.13.jar \
   org.gradle.launcher.GradleMain --no-daemon assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -120,7 +120,7 @@ adrenotools hooks (see below).
 The app's own dir (`/sdcard/Android/data/com.selaco.game/files`, mode 770, group
 `ext_data_rw`) is **unreachable by the user** — the Files app and MTP have both refused to
 enter `Android/data` since Android 11. It is an adb-only path, and it is deleted on
-uninstall along with any 1.2 GB game file in it.
+uninstall along with any 3.3 GB game file in it.
 
 So the game also searches public folders, which needs `MANAGE_EXTERNAL_STORAGE`:
 
@@ -426,8 +426,9 @@ out of bounds and can be caught. Costs **98.72 MiB** more at depth 2, nearly all
 `FFlatVertexBuffer` at 61.04 MiB per copy, which is a good trade for making a class of silent
 corruption inexpressible.
 
-The breakdown, derived rather than estimated — and it reproduces `vkbufmem`'s measured 197.3 MiB of
-Persistent allocations exactly, which is what makes it trustworthy:
+The breakdown, derived rather than estimated — and it reproduced `vkbufmem`'s measured 197.3 MiB of
+Persistent allocations exactly when `StreamData` was 256 B, which is what makes it trustworthy;
+the Stream UBO row below is recomputed for the 368 B `StreamData` upstream has since adopted:
 
 | buffer | per copy | added at depth 2 |
 |---|---|---|
