@@ -4313,7 +4313,10 @@ int GameMain()
 	M_SaveDefaultsFinal();
 	DeleteStartupScreen();
 	C_UninitCVars(); // must come last so that nothing will access the CVARs anymore after deletion.
+#ifndef NO_ZWIDGET
+	// NO_ZWIDGET builds (Android) do not compile widgetresourcedata.cpp, matching the guard on InitWidgetResources.
 	CloseWidgetResources();
+#endif
 	delete Args;
 	Args = nullptr;
 	return ret;
