@@ -1113,8 +1113,12 @@ and a stale gamepad layout with no weapon-wheel binding.
 
 ### The device picker
 
-Replaces Selaco's two first-run dialogs with one, driven by the profiles above, so adding a handheld
-or retuning an existing one is a data change rather than a C++ change.
+Replaces Selaco's first-run dialogs (QualityMenu then VisibilityMenu on the Chapter 2 data) with one,
+driven by the profiles above, so adding a handheld or retuning an existing one is a data change rather
+than a C++ change. Those dialogs are gated by three flags, `g_tos`, `g_promptSpectacle` and
+`g_qualitySetting` (`intro_handler.zs:39-72`); the picker clears all three through Selaco's own
+`clearNeeds*` statics and resolves them all-or-none (`i_auxdevicepicker.cpp:251`), and the reset button
+puts all three back to 0 (`:371`).
 
 **Why suppressing their dialogs is safe, given [CLAUDE.md](CLAUDE.md#do-not-do-these) says not to
 bypass them:** the three bugs that note records were never caused by the dialogs being skipped — they
@@ -1123,16 +1127,16 @@ The picker does that work itself, and the ordering is *enforced* rather than tru
 
 - A device choice is never recorded before its profile has applied.
 - A profile that asked for `SetSteamdeckPresets()` and did not get it is refused
-  (`i_auxdevicepicker.cpp:748`: `if (result.steamdeckWanted && !result.steamdeckApplied)`).
-- `aux_device` (`CVAR_ARCHIVE | CVAR_GLOBALCONFIG`, `i_auxdevicepicker.cpp:146`) takes a **reserved
+  (`i_auxdevicepicker.cpp:672`: `if (result.steamdeckWanted && !result.steamdeckApplied)`).
+- `aux_device` (`CVAR_ARCHIVE | CVAR_GLOBALCONFIG`, `i_auxdevicepicker.cpp:160`) takes a **reserved
   value meaning "a picker is owed"**, written in the same operation that suppresses Selaco's dialogs —
   so no launch can end with neither dialog shown nor a picker armed.
 
 **Shown from a per-frame poll, not once at startup**, because `IntroHandler.UITick` forces `IntroMenu`
-over any menu that is not `IntroMenu` or `StartupMenu` for the whole intro — `introTicks` is 498 on a
-first run (`intro_handler.zs:88`, `494 + 4`), and the force runs at `intro_handler.zs:326-327` from
-`UITick` (`:212`). Opening the picker once at that moment would just be closed by the same tick. The
-poll instead waits for the state intro leaves behind, `i_auxdevicepicker.cpp:653-715`.
+over any menu that is not `IntroMenu` or `StartupMenu` at the start of the title screen — the force runs
+at `intro_handler.zs:331-333` from `UITick` (`:213`) — and `IntroMenu` stays up until its movie ends
+(`intro_menu.zs:124-127`). Opening the picker once at that moment would just be closed by the same tick.
+The poll instead waits for the state intro leaves behind, `i_auxdevicepicker.cpp:618`.
 
 **This is also why B cannot dismiss it, and it is a re-open rather than a blocked input**: B closes
 the stock menu, and the poll — running in `D_Display` before anything is drawn — puts the picker
@@ -1140,20 +1144,36 @@ straight back, `M_SetMenu(..., makesound=false)` so the reopen costs one silent 
 state is never actually seen.
 
 **The real driver of Selaco's own dialog is `tos_menu.zs`'s `WorldTick` at `ticks == 0`**
-(`tos_menu.zs:19,28`), not the `IntroHandler` accessors that look like the entry point — those only
+(`tos_menu.zs:18,30-35`), not the `IntroHandler` accessors that look like the entry point — those only
 decide what menu is *on screen*, not whether the TOS actor ticks its own open.
+
+**A recorded device is re-applied when Selaco bumps its first-run IDs.** Their IDs only go up
+(`TOS_ID` went 2 to 4 and `QUALITY_ID` appeared in Chapter 2), so an install that already answered the
+picker can find `startupCheck()` true again. When that happens with a real profile recorded (not the
+declined `-`), `I_AuxDevicePickerInit` re-applies it through `AuxApplyDevice`
+(`i_auxdevicepicker.cpp:659`, the same sequence `aux_setdevice` uses: apply, refuse on a missing
+`SetSteamdeckPresets`, record, clear the flags, `M_SaveDefaults`). A failed re-apply keeps the device and
+leaves Selaco's dialogs to run. A declined install is untouched and gets Selaco's dialogs.
+
+It runs at startup rather than from the poll because the poll is too late: it waits for no menu at all,
+and `TOSEventHandler.WorldTick` opens `QualityMenu` on the first world tick of `TITLEMAP`. Init is also
+where every input the applier needs is already live — ini and autoexec loaded and cvar callbacks enabled
+(`d_main.cpp:3502`, `:3673`, `:3732`), MENUDEF parsed by `M_Init` (`:3877`), latched cvars set directly
+because `gamestate` is still `GS_STARTUP` (`d_main.cpp:4282`) — and it lands before `D_StartTitle`
+(`:4079`) loads `TITLEMAP`, so `IntroHandler.UITick`'s `needsTOS()` Steam Deck block
+(`intro_handler.zs:215-224`) and `WorldTick` both see the flags already cleared.
 
 Fixes from review, compile-verified only — see the note at the end of this section: a paused title
 screen left with no menu when the picker failed to open; four latches that survived `DeinitMenus` or
-`PClass::StaticShutdown` across an engine restart (`i_auxdevicepicker.cpp:193-194`), one of which
+`PClass::StaticShutdown` across an engine restart (`i_auxdevicepicker.cpp:207-208`), one of which
 re-added the second-screen menu items with no heading; five paths in the mode-3 build that left a
 half-built `PDAMenu3` rooted for the process; `CreateNew` called without an abstract-class check, which
-`I_Errors` rather than returning null (`i_auxdevicepicker.cpp:464-466`).
+`I_Errors` rather than returning null (`i_auxdevicepicker.cpp:484-486`).
 
 ### "Reset Device Choice"
 
 The Handhelds page's "Choose Optimal Settings" button is **replaced**, not left alongside a second
-button, by "Reset Device Choice" (`i_auxdevicereset.cpp:156,186,861`). Their original button only ran
+button, by "Reset Device Choice" (`i_auxdevicereset.cpp:156,186,866`). Their original button only ran
 `SetSteamdeckPresets()` and touched no preset — once a device profile exists, keeping it would have
 been a way to half-override the player's own choice with a stock action that no longer matches what
 picking a device actually does.
@@ -1167,7 +1187,7 @@ everything else here, worked around because the field's declared type happens to
 at all.
 
 **Recording a choice now writes the ini immediately**, via `M_SaveDefaults(nullptr)`
-(`i_auxdevicereset.cpp:691-695`, and the picker's own write). `aux_device` is `CVAR_ARCHIVE`, and
+(`i_auxdevicereset.cpp:696-700`, and the picker's own write). `aux_device` is `CVAR_ARCHIVE`, and
 nothing else calls `M_SaveDefaults` for it — a player who chose a device and then swiped the app away
 (`am force-stop`, SIGKILL) never reached a clean exit, so the choice never reached disk and the picker
 reopened on every subsequent launch. **Measured on device**, and initially misread as an artefact of

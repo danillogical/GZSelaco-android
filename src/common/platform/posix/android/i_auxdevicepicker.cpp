@@ -1,7 +1,7 @@
 /*
 ** i_auxdevicepicker.cpp
 ** The first-launch device picker: one menu of handhelds, built from the profiles that were actually
-** shipped, shown once, and standing in for Selaco's own two first-run dialogs.
+** shipped, shown once, and standing in for Selaco's own first-run dialogs.
 **
 **---------------------------------------------------------------------------
 ** Copyright 2026 Selaco Android port contributors
@@ -42,17 +42,18 @@
 **
 ** So the ordering is the safety argument, and it is enforced in two ways rather than trusted:
 **
-**   1. AuxDeviceChoiceSet is never called before AuxProfileApply has returned, and the selection
-**      command refuses to record a choice when the profile asked for SetSteamdeckPresets and did not
-**      get it (AuxProfileResult::steamdeckWanted without steamdeckApplied).
+**   1. AuxDeviceChoiceSet is never called before AuxProfileApply has returned, and AuxApplyDevice
+**      refuses to record a choice when the profile asked for SetSteamdeckPresets and did not get it
+**      (AuxProfileResult::steamdeckWanted without steamdeckApplied).
 **   2. The suppression itself is one function, AuxSuppressFirstRun, reachable from exactly two places:
-**      arming the picker and recording a selection. Its inverse, AuxRestoreFirstRun, is reachable from
-**      every path that gives up. See THE ONE STATE THAT CANNOT BE LOST below for why arming has to
-**      suppress, and what stops that from being a hole.
+**      arming the picker and AuxApplyDevice, which records a selection or re-applies a recorded device
+**      only after its profile applied. Its inverse, AuxRestoreFirstRun, is reachable from every path
+**      that gives up. See THE ONE STATE THAT CANNOT BE LOST below for why arming has to suppress, and
+**      what stops that from being a hole.
 **
 ** THE ONE STATE THAT CANNOT BE LOST: "a picker is owed".
 **
-** Selaco opens its dialogs from TOSEventHandler.WorldTick at ticks == 0 (tos/tos_menu.zs:29-33), which
+** Selaco opens its dialogs from TOSEventHandler.WorldTick at ticks == 0 (tos/tos_menu.zs:30-35), which
 ** is the FIRST world tick of TITLEMAP - long before the player could have picked anything. So their
 ** dialogs have to be suppressed while arming, not while recording, and that means there is a window in
 ** which they are suppressed and no profile has been applied. If that window could survive a launch it
@@ -66,11 +67,11 @@
 **
 ** WHY THE MENU IS SHOWN FROM A PER-FRAME POLL AND NOT ONCE FROM D_DoomMain.
 **
-** IntroHandler.UITick (intro_handler.zs:326) forces IntroMenu over any menu that is not IntroMenu or
-** StartupMenu for the whole title-screen intro - 498 ticks, about fourteen seconds. A plain option menu
-** opened from D_DoomMain is therefore replaced a moment later and never comes back. Selaco's own
-** dialogs are immune because they derive from StartupMenu, which this fork cannot name at compile time
-** and would not want to inherit anyway.
+** IntroHandler.UITick (intro_handler.zs:331-333) forces IntroMenu over any menu that is not IntroMenu or
+** StartupMenu at the start of the title screen, and IntroMenu stays up until its movie ends
+** (intro_menu.zs:124-127). A plain option menu opened from D_DoomMain is therefore replaced a moment
+** later and never comes back. Selaco's own dialogs are immune because they derive from StartupMenu,
+** which this fork cannot name at compile time and would not want to inherit anyway.
 **
 ** So the picker waits for the state IntroHandler itself leaves behind: TITLEMAP up, no menu at all,
 ** console up - which is the "press any key" screen, after the intro blocker has closed itself. That is
@@ -78,13 +79,26 @@
 ** is a poll rather than a one-shot it also re-opens the picker if the player backs out of it. A player
 ** who has not chosen keeps being asked, which is what makes the suppression above honest.
 **
-** NOTHING SELACO-SPECIFIC IS NAMED AT COMPILE TIME. IntroHandler's three static helpers are resolved
+** NOTHING SELACO-SPECIFIC IS NAMED AT COMPILE TIME. IntroHandler's four static helpers are resolved
 ** and fully type-checked through i_auxvmreflect.h, so a missing, renamed or differently-built ipk3
 ** degrades to "the picker does not arm and Selaco's dialogs run" instead of refusing to start. In
 ** particular NOTE THAT `g_tos 1` IS NOT ENOUGH ON THE SHIPPED GAME: needsTOS() compares against
-** IntroHandler.TOS_ID, which is 2, and that constant is removed from the symbol table by
-** RemoveUnusedSymbols (d_main.cpp:3750) before any console command could read it. Calling their own
-** clearNeedsTOS() writes whatever their current ID is and keeps doing so after they bump it.
+** IntroHandler.TOS_ID, which is 4 on the current game data, and that constant is removed from the symbol
+** table by RemoveUnusedSymbols (d_main.cpp:3893) before any console command could read it. Calling their
+** own clearNeedsTOS() writes whatever their current ID is and keeps doing so after they bump it.
+**
+** A RECORDED DEVICE IS RE-APPLIED WHEN SELACO BUMPS ITS FIRST-RUN IDS.
+**
+** Their IDs only go up (intro_handler.zs:39-41), so an update can make startupCheck() true again on an
+** install that already answered the picker. Leaving that alone runs their dialogs over a configured device;
+** clearing the flags alone would be the hand bypass CLAUDE.md forbids. So the recorded profile is applied
+** again through the same AuxApplyDevice the picker uses, and the flags are cleared only if that succeeded.
+**
+** That happens in I_AuxDevicePickerInit rather than in the title-screen poll, because the poll is too late:
+** it waits for no menu at all, while TOSEventHandler.WorldTick opens QualityMenu on the first world tick of
+** TITLEMAP. Init is also a safe place for it - the ini, the autoexec and every cvar callback are already
+** live (d_main.cpp:3502, :3673, :3732), MENUDEF is parsed (M_Init), and latched cvars are set directly
+** rather than latched because gamestate is still GS_STARTUP.
 */
 
 #include <string.h>
@@ -119,7 +133,7 @@ using namespace AuxView;
 // Unique to this revision and printed by both console commands, so a change can be proved to be IN the
 // packaged library - `strings libSelaco.so | grep AUXDEVICEPICKER_BUILD` - before anything is read into
 // device behaviour. Every exit code in the Android packaging chain reports success either way.
-static const char *const AuxDevicePickerBuild = "AUXDEVICEPICKER_BUILD_20260918_M7A_R1";
+static const char *const AuxDevicePickerBuild = "AUXDEVICEPICKER_BUILD_20261126_CH2_R1";
 
 // ----------------------------------------------------------------------------------------------
 // THE CHOICE.
@@ -174,12 +188,12 @@ void AuxDeviceChoiceSet(const char *profileStem)
 }
 
 // ----------------------------------------------------------------------------------------------
-// THE BRIDGE TO SELACO'S FIRST-RUN STATE, which is three of their own static methods and nothing else.
+// THE BRIDGE TO SELACO'S FIRST-RUN STATE, which is four of their own static methods and nothing else.
 //
-// Their two cvars are never written by name from here. g_tos is compared against IntroHandler.TOS_ID
-// rather than against 1 (intro_handler.zs:62-65), and that constant is gone from the symbol table by
-// the time any of this could read it (RemoveUnusedSymbols, d_main.cpp:3750), so a hardcoded 1 would
-// leave needsTOS() true and both dialogs would appear on top of the picker. Their clearNeeds* writes
+// Their three cvars are never written by name from here. g_tos is compared against IntroHandler.TOS_ID
+// rather than against 1 (intro_handler.zs:47-49), and that constant is gone from the symbol table by
+// the time any of this could read it (RemoveUnusedSymbols, d_main.cpp:3893), so a hardcoded 1 would
+// leave needsTOS() true and their dialogs would appear on top of the picker. Their clearNeeds* writes
 // the right value by construction, now and after they bump the ID.
 //
 // The one exception is the restore path, which has no Selaco equivalent - see AuxRestoreFirstRun.
@@ -190,13 +204,14 @@ static const char *const AuxSubsystem = "AuxDevicePicker";
 
 // Resolved once per IntroHandler class and cached. KEYED ON THE CLASS rather than on a bare "already
 // tried" flag, the same way i_auxdevicereset.cpp keys its own bridge: a `restart` tears the script state
-// down (PClass::StaticShutdown, d_main.cpp:4260) and D_InitGame runs I_AuxDevicePickerInit again, so a
-// bare latch would leave these three pointing at freed VMFunctions and AuxSuppressFirstRun would VMCall
+// down (PClass::StaticShutdown, d_main.cpp:4405) and D_InitGame runs I_AuxDevicePickerInit again, so a
+// bare latch would leave these four pointing at freed VMFunctions and AuxSuppressFirstRun would VMCall
 // one. Caching also means the arm step can PROVE the suppression will work before it commits to
 // replacing anything of Selaco's.
 static VMFunction *AuxFuncStartupCheck = nullptr;
 static VMFunction *AuxFuncClearTOS = nullptr;
 static VMFunction *AuxFuncClearVisibility = nullptr;
+static VMFunction *AuxFuncClearQuality = nullptr;
 static PClass *AuxBridgeClass = nullptr;
 static bool AuxBridgeAttempted = false;
 static bool AuxBridgeResolved = false;
@@ -232,7 +247,7 @@ static bool AuxReturnMatches(VMFunction *func, const char *funcname, bool wantIn
 // Idempotent, and latches its failure PER CLASS: a game with no IntroHandler is not going to grow one,
 // and this is called from a per-frame path as well as from startup. The class is re-read on every call so
 // that a script recompile - which builds a new IntroHandler and frees the old one - is noticed instead of
-// being answered from three dangling pointers. See the declarations above.
+// being answered from four dangling pointers. See the declarations above.
 static bool AuxResolveBridge()
 {
 	// noCreate is implicit in FindClass, and a non-Selaco iwad has no IntroHandler and therefore no
@@ -251,6 +266,7 @@ static bool AuxResolveBridge()
 	AuxFuncStartupCheck = nullptr;
 	AuxFuncClearTOS = nullptr;
 	AuxFuncClearVisibility = nullptr;
+	AuxFuncClearQuality = nullptr;
 
 	if (cls == nullptr)
 	{
@@ -263,15 +279,17 @@ static bool AuxResolveBridge()
 	VMFunction *startupCheck = ResolveStaticMethod(cls, "startupCheck", AuxSubsystem, &regs);
 	VMFunction *clearTOS = ResolveStaticMethod(cls, "clearNeedsTOS", AuxSubsystem, &regs);
 	VMFunction *clearVisibility = ResolveStaticMethod(cls, "clearNeedsVisibility", AuxSubsystem, &regs);
+	VMFunction *clearQuality = ResolveStaticMethod(cls, "clearNeedsQuality", AuxSubsystem, &regs);
 
-	// All three or none. The picker must not arm on a build where it can ask whether a first run is
-	// pending but cannot then stop the dialogs, because that is both dialogs on top of the picker.
-	if (startupCheck == nullptr || clearTOS == nullptr || clearVisibility == nullptr)
+	// All or none. The picker must not arm on a build where it can ask whether a first run is pending
+	// but cannot then stop every dialog startupCheck() counts, because that puts one on top of the picker.
+	if (startupCheck == nullptr || clearTOS == nullptr || clearVisibility == nullptr || clearQuality == nullptr)
 		return false;
 
 	if (!AuxReturnMatches(startupCheck, "startupCheck", true)
 		|| !AuxReturnMatches(clearTOS, "clearNeedsTOS", false)
-		|| !AuxReturnMatches(clearVisibility, "clearNeedsVisibility", false))
+		|| !AuxReturnMatches(clearVisibility, "clearNeedsVisibility", false)
+		|| !AuxReturnMatches(clearQuality, "clearNeedsQuality", false))
 	{
 		return false;
 	}
@@ -279,6 +297,7 @@ static bool AuxResolveBridge()
 	AuxFuncStartupCheck = startupCheck;
 	AuxFuncClearTOS = clearTOS;
 	AuxFuncClearVisibility = clearVisibility;
+	AuxFuncClearQuality = clearQuality;
 	AuxBridgeResolved = true;
 	return true;
 }
@@ -312,11 +331,11 @@ static bool AuxSelacoFirstRunPending(bool &out)
 	return true;
 }
 
-// Suppress both of Selaco's first-run dialogs, by calling the two functions their own menus call when
-// the player finishes with them.
+// Suppress Selaco's first-run dialogs, by calling the three functions their own menus call when the
+// player finishes with them (quality_menu.zs:419, visibility_menu.zs:289-292).
 //
 // THE ONLY PLACE THIS HAPPENS. Two callers: arming the picker, which has already proved every symbol,
-// every profile and the descriptor, and recording a selection, which has already applied the profile.
+// every profile and the descriptor, and AuxApplyDevice, which has already applied the profile.
 static bool AuxSuppressFirstRun()
 {
 	if (!AuxResolveBridge())
@@ -327,6 +346,7 @@ static bool AuxSuppressFirstRun()
 		VMValue params[1] = {};
 		VMCall(AuxFuncClearTOS, params, 0, nullptr, 0);
 		VMCall(AuxFuncClearVisibility, params, 0, nullptr, 0);
+		VMCall(AuxFuncClearQuality, params, 0, nullptr, 0);
 	}
 	catch (const std::exception &e)
 	{
@@ -340,7 +360,7 @@ static bool AuxSuppressFirstRun()
 
 // Hand the dialogs back, which is the one thing that has to be done by cvar name.
 //
-// Selaco has no inverse of clearNeedsTOS - their IDs only ever go up (intro_handler.zs:55-56, "increase
+// Selaco has no inverse of their clearNeeds* - their IDs only ever go up (intro_handler.zs:39-41, "increase
 // this every time we want to force a TOS"), so there is nothing to call. Zero is used rather than a
 // remembered previous value because zero is the only value that is below every ID they will ever pick,
 // which is exactly what "pending again" has to mean.
@@ -350,7 +370,7 @@ static bool AuxSuppressFirstRun()
 // the state is not ours to reset.
 static bool AuxRestoreFirstRun()
 {
-	static const char *const names[] = { "g_tos", "g_promptSpectacle" };
+	static const char *const names[] = { "g_tos", "g_promptSpectacle", "g_qualitySetting" };
 
 	bool ok = true;
 	for (const char *name : names)
@@ -624,6 +644,94 @@ void I_AuxDevicePickerFrame()
 }
 
 // ----------------------------------------------------------------------------------------------
+// APPLYING A DEVICE: the one sequence that records a choice and clears Selaco's flags.
+// ----------------------------------------------------------------------------------------------
+
+enum EAuxApplyOutcome
+{
+	AuxApply_NotApplied,      // AuxProfileApply refused; nothing was written
+	AuxApply_NoSteamdeck,     // applied, but SetSteamdeckPresets was wanted and did not run; not recorded
+	AuxApply_Recorded,        // applied, recorded, Selaco's flags cleared (if possible) and the ini written
+};
+
+// Shared by aux_setdevice and the re-apply at startup so both enforce the same order; each caller says
+// what a failure means for it. `suppressed` reports whether Selaco's flags were actually cleared.
+static EAuxApplyOutcome AuxApplyDevice(const char *stem, AuxProfileResult &result, bool &suppressed)
+{
+	suppressed = false;
+
+	// THE PROFILE FIRST, ALWAYS. Nothing below this point runs if it did not apply, so there is no path
+	// on which a device is recorded, or Selaco's dialogs suppressed, without the work their dialogs
+	// would have done having happened first.
+	if (!AuxProfileApply(stem, result))
+		return AuxApply_NotApplied;
+
+	// The one partial success that must not be recorded. SetSteamdeckPresets is the reason suppressing
+	// their dialog is safe at all (CLAUDE.md's three bugs), so a profile that asked for it and did not
+	// get it is not a device this port can claim to have configured.
+	if (result.steamdeckWanted && !result.steamdeckApplied)
+		return AuxApply_NoSteamdeck;
+
+	AuxDeviceChoiceSet(stem);
+	AuxPickerArmed = false;
+	AuxPickerForced = false;
+
+	suppressed = AuxSuppressFirstRun();
+	if (!suppressed)
+	{
+		// The profile is applied and recorded, so this is only a cosmetic duplicate: the player answers
+		// Selaco's dialogs on top of a device that is already configured.
+		Printf(TEXTCOLOR_YELLOW "%s: Selaco's own first-run dialogs could not be cleared, they will still appear\n",
+			AuxSubsystem);
+	}
+
+	// PERSISTED HERE, NOT LEFT TO THE QUIT. aux_device is CVAR_ARCHIVE|CVAR_GLOBALCONFIG and Selaco's g_tos,
+	// g_promptSpectacle and g_qualitySetting are CVARINFO cvars, so all four reach the ini only when
+	// something archives them - and on Android the normal way out of the game is the task switcher, which
+	// kills the process without ever running D_DoomMain's shutdown. Without this the recorded device is lost
+	// on every such launch and the first-run picker comes back; this is the same failure AuxDoReset
+	// (i_auxdevicereset.cpp) already calls M_SaveDefaults for, measured on device.
+	//
+	// AFTER the suppression above rather than before it, so the recorded choice and the cleared first-run
+	// flags land in the SAME write. Saving between the two would persist a configured device while leaving
+	// Selaco's flags pending, i.e. their own dialogs on top of an install the picker has already answered for.
+	// Failure is only worth a line: every fact is in memory either way and the shutdown retries.
+	if (!M_SaveDefaults(nullptr))
+	{
+		Printf(TEXTCOLOR_YELLOW "%s: writing the config failed, the device choice may not survive a kill\n",
+			AuxSubsystem);
+	}
+
+	return AuxApply_Recorded;
+}
+
+// A recorded device on an install where Selaco's first run is pending again, because they bumped an ID.
+// See A RECORDED DEVICE IS RE-APPLIED at the top of this file for why this runs at startup.
+static void AuxReapplyRecordedDevice()
+{
+	// A copy, because AuxApplyDevice reassigns aux_device and AuxDeviceChoice() points into it.
+	const FString stem = AuxDeviceChoice();
+
+	Printf("%s: build=%s (applier %s)\n", AuxSubsystem, AuxDevicePickerBuild, AuxProfileBuildId());
+
+	AuxProfileResult result;
+	bool suppressed = false;
+	const EAuxApplyOutcome outcome = AuxApplyDevice(stem.GetChars(), result, suppressed);
+	if (outcome != AuxApply_Recorded)
+	{
+		// The choice is still the recorded stem and nothing of Selaco's was cleared, so their dialogs run.
+		Printf(TEXTCOLOR_YELLOW "%s: device=\"%s\" could not be re-applied (%s) - kept, Selaco's first-run "
+			"dialogs will run\n", AuxSubsystem, stem.GetChars(),
+			outcome == AuxApply_NotApplied ? "profile not applied" : "SetSteamdeckPresets did not run");
+		return;
+	}
+
+	Printf("%s: device=\"%s\" (%s) re-applied for Selaco's updated first run - %d cvars written, %d problems, "
+		"Selaco's first-run dialogs %s\n", AuxSubsystem, result.display.GetChars(), stem.GetChars(),
+		result.cvarsWritten, result.problems, suppressed ? "cleared" : "left alone");
+}
+
+// ----------------------------------------------------------------------------------------------
 // DECIDING, once, from D_DoomMain after M_Init.
 //
 // After M_Init because that is what parses every MENUDEF lump, and the picker borrows its look from one
@@ -638,15 +746,26 @@ void I_AuxDevicePickerInit()
 	// already recorded - which is the only launch on which anyone would want it.
 	AuxDeviceResetInitMenu();
 
-	// A DEVICE IS ALREADY RECORDED, or this install declined one: return having written nothing, touched
-	// nothing of Selaco's and printed nothing but a line naming the device. This is the whole of what an
-	// existing install sees.
+	// A DEVICE IS ALREADY RECORDED, or this install declined one. A declined install is left entirely to
+	// Selaco. A recorded device is left alone unless Selaco's first run is pending again, in which case the
+	// profile is re-applied so their dialogs are not shown over it.
 	if (AuxDeviceChoiceIsSet())
 	{
 		if (strcmp(AuxDeviceChoice(), AuxDeviceDeclined) == 0)
+		{
 			Printf("%s: no device profile on this install, picker not shown\n", AuxSubsystem);
-		else
-			Printf("%s: device=\"%s\", picker not shown\n", AuxSubsystem, AuxDeviceChoice());
+			return;
+		}
+
+		// Cannot-ask is treated as not-pending: the bridge has said why, and nothing of theirs is touched.
+		bool pending = false;
+		if (AuxSelacoFirstRunPending(pending) && pending)
+		{
+			AuxReapplyRecordedDevice();
+			return;
+		}
+
+		Printf("%s: device=\"%s\", picker not shown\n", AuxSubsystem, AuxDeviceChoice());
 		return;
 	}
 
@@ -689,7 +808,7 @@ void I_AuxDevicePickerInit()
 			AuxSubsystem);
 
 		// A previous launch suppressed them for a picker that this launch cannot show, so the
-		// suppression is undone rather than left to hide both dialogs. This is the case the reserved
+		// suppression is undone rather than left to hide their dialogs. This is the case the reserved
 		// "owed" value exists for.
 		if (owed)
 			AuxDeviceChoiceClear();
@@ -719,7 +838,7 @@ void I_AuxDevicePickerInit()
 // THE TWO CONSOLE COMMANDS.
 // ----------------------------------------------------------------------------------------------
 
-// What every menu entry runs, and the only place a device is recorded.
+// What every menu entry runs. Recording itself is AuxApplyDevice, shared with the startup re-apply.
 CCMD(aux_setdevice)
 {
 	Printf("%s: build=%s\n", AuxSubsystem, AuxDevicePickerBuild);
@@ -732,22 +851,17 @@ CCMD(aux_setdevice)
 
 	const char *stem = argv[1];
 
-	// THE PROFILE FIRST, ALWAYS. Nothing below this point runs if it did not apply, so there is no path
-	// on which a device is recorded, or Selaco's dialogs suppressed, without the work their dialogs
-	// would have done having happened first.
 	AuxProfileResult result;
-	if (!AuxProfileApply(stem, result))
+	bool suppressed = false;
+	switch (AuxApplyDevice(stem, result, suppressed))
 	{
+	case AuxApply_NotApplied:
 		Printf(TEXTCOLOR_YELLOW "%s: '%s' was not applied - the device choice is unchanged\n",
 			AuxSubsystem, stem);
 		return;
-	}
 
-	// The one partial success that must not be recorded. SetSteamdeckPresets is the reason suppressing
-	// their dialog is safe at all (CLAUDE.md's three bugs), so a profile that asked for it and did not
-	// get it is not a device this port can claim to have configured.
-	if (result.steamdeckWanted && !result.steamdeckApplied)
-	{
+	case AuxApply_NoSteamdeck:
+		// A picker owed on this profile's behalf hands Selaco's dialogs back rather than leaving them hidden.
 		Printf(TEXTCOLOR_YELLOW "%s: '%s' could not call SetSteamdeckPresets - not recorded, Selaco's dialogs kept\n",
 			AuxSubsystem, stem);
 		if (AuxDeviceChoiceIsOwed())
@@ -755,36 +869,9 @@ CCMD(aux_setdevice)
 		AuxPickerArmed = false;
 		AuxPickerForced = false;
 		return;
-	}
 
-	AuxDeviceChoiceSet(stem);
-	AuxPickerArmed = false;
-	AuxPickerForced = false;
-
-	const bool suppressed = AuxSuppressFirstRun();
-	if (!suppressed)
-	{
-		// The profile is applied and recorded, so this is only a cosmetic duplicate: the player answers
-		// Selaco's dialogs on top of a device that is already configured.
-		Printf(TEXTCOLOR_YELLOW "%s: Selaco's own first-run dialogs could not be cleared, they will still appear\n",
-			AuxSubsystem);
-	}
-
-	// PERSISTED HERE, NOT LEFT TO THE QUIT. aux_device is CVAR_ARCHIVE|CVAR_GLOBALCONFIG and Selaco's g_tos
-	// and g_promptSpectacle are CVARINFO cvars, so all three reach the ini only when something archives
-	// them - and on Android the normal way out of the game is the task switcher, which kills the process
-	// without ever running D_DoomMain's shutdown. Without this the recorded device is lost on every such
-	// launch and the first-run picker comes back; this is the same failure AuxDoReset
-	// (i_auxdevicereset.cpp) already calls M_SaveDefaults for, measured on device.
-	//
-	// AFTER the suppression above rather than before it, so the recorded choice and the cleared first-run
-	// flags land in the SAME write. Saving between the two would persist a configured device while leaving
-	// g_tos at 0, i.e. Selaco's own dialogs on top of an install the picker has already answered for.
-	// Failure is only worth a line: all three facts are in memory either way and the shutdown retries.
-	if (!M_SaveDefaults(nullptr))
-	{
-		Printf(TEXTCOLOR_YELLOW "%s: writing the config failed, the device choice may not survive a kill\n",
-			AuxSubsystem);
+	case AuxApply_Recorded:
+		break;
 	}
 
 	Printf("%s: device=\"%s\" (%s) - %d cvars written, %d problems, Selaco's first-run dialogs %s\n",
@@ -816,13 +903,14 @@ void I_AuxDevicePickerForgetScriptState()
 {
 	// The bridge is keyed on the IntroHandler class by pointer, which the restart defeats by freeing every
 	// PClass and then re-parsing: a recycled address makes the compare match and skips the resolve, leaving
-	// the three VMCalls below aimed at freed VMFunctions.
+	// the four VMFunction pointers below aimed at freed memory.
 	AuxBridgeAttempted = false;
 	AuxBridgeResolved = false;
 	AuxBridgeClass = nullptr;
 	AuxFuncStartupCheck = nullptr;
 	AuxFuncClearTOS = nullptr;
 	AuxFuncClearVisibility = nullptr;
+	AuxFuncClearQuality = nullptr;
 
 	// AuxPickerBuilt already re-checks the live descriptor, so this is belt and braces rather than the fix;
 	// it is cleared anyway so the next build's log line counts the entries it really added.

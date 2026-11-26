@@ -54,12 +54,12 @@
 ** HOW A CONFIRMATION IS ASKED FOR WITHOUT BEING ABLE TO NAME A SELACO CLASS.
 **
 ** Selaco's PromptMenu is the styled prompt every destructive action in their game uses, and it reports
-** the button that was pressed through two fields of its own (prompt.zs:102-103):
+** the button that was pressed through two fields of its own (prompt.zs:108-109):
 **
 **     Function<ui void(Object, int)> onClosed;
 **     Object receiver;
 **
-** called as onClosed.call(receiver, ctrl.controlID) (prompt.zs:300-301). A Function<> field holds a
+** called as onClosed.call(receiver, ctrl.controlID) (prompt.zs:253-254). A Function<> field holds a
 ** PFunction the compiler had to have built from a real declaration, so the callback cannot be synthesised
 ** from C++ - and this fork's own ZScript compiles BEFORE the player's ipk3, so it cannot name PromptMenu
 ** either. What makes the bridge possible is that `Object` and `int` are CORE types: our
@@ -115,7 +115,7 @@ using namespace AuxView;
 // Unique to this revision and printed by the console command, so a change can be proved to be IN the
 // packaged library - `strings libSelaco.so | grep AUXDEVICERESET_BUILD` - before anything is read into
 // device behaviour. Every exit code in the Android packaging chain reports success either way.
-static const char *const AuxDeviceResetBuild = "AUXDEVICERESET_BUILD_20260919_M7B_R1";
+static const char *const AuxDeviceResetBuild = "AUXDEVICERESET_BUILD_20261126_CH2_R1";
 
 static const char *const AuxSubsystem = "AuxDeviceReset";
 
@@ -208,14 +208,17 @@ static const char *const AuxOnClosedFieldName = "onClosed";
 static const char *const AuxReceiverFieldName = "receiver";
 static const char *const AuxAllowBackFieldName = "allowBack";
 
+// initNew's declared default for its interface argument (prompt.zs:114), passed explicitly like the rest.
+static const char *const AuxPromptInterface = "interfaces/prompt_menu.json";
+
 // Ours, from wadsrc/static/zscript/engine/aux_devicereset.zs.
 static const char *const AuxCallbackClassName = "AuxDeviceResetPrompt";
 static const char *const AuxCallbackFuncName = "Answered";
 
-// initNew's full declared argument list (prompt.zs:107), all eleven of them:
+// initNew's full declared argument list (prompt.zs:114), all twelve of them:
 //
 //   Menu parent, string title, string txt, string btn1, string btn2, string btn3, string btn4,
-//   int destructiveIndex, int defaultSelection, String image, Vector2 imgScale
+//   int destructiveIndex, int defaultSelection, String image, Vector2 imgScale, String interface
 //
 // EVERY ONE IS PASSED EXPLICITLY, which is why this is a plain VMCall and not the VMCallWithDefaults the
 // rest of this port uses for an Init. The two arguments that matter most - destructiveIndex and
@@ -229,11 +232,12 @@ static const EArgKind AuxInitNewArgs[] =
 	Arg_Int, Arg_Int,
 	Arg_String,
 	Arg_Vector2,
+	Arg_String,
 };
 
-// Self, plus one register each for the pointer, the six strings and the two ints, plus TWO for the
+// Self, plus one register each for the pointer, the eight strings and the two ints, plus TWO for the
 // Vector2 (types.cpp:365, the reason a register count cannot be inferred from an argument count).
-static const int AuxInitNewRegs = 13;
+static const int AuxInitNewRegs = 14;
 
 // The kinds of field this file writes. NOT i_auxvmreflect.h's ResolveField: two of the three are kinds it
 // does not know - a function pointer and a bare Object - and teaching it two new kinds means editing the
@@ -486,7 +490,7 @@ static bool AuxResolveBridge()
 		return false;
 
 	// THE ONLY OPTIONAL PIECE. allowBack is what lets a controller B press or Escape dismiss the prompt
-	// (prompt.zs:378-384); without it the prompt is still perfectly answerable, it just has to be answered
+	// (prompt.zs:316-322); without it the prompt is still perfectly answerable, it just has to be answered
 	// with its own Cancel button. So this one failure is a line and not a refusal - and note which way it
 	// fails, because that matters here: a prompt that cannot be backed out of is inconvenient, whereas a
 	// prompt that could be dismissed INTO a reset would be the bug this whole file is arranged against.
@@ -586,18 +590,19 @@ static bool AuxOpenResetPrompt()
 		FString confirm = AuxResetConfirmLabel;
 		FString unusedButton;   // btn3 and btn4, which initNew skips when they are empty
 		FString noImage;
+		FString promptInterface = AuxPromptInterface;
 
 		// CANCEL FIRST, CONFIRM SECOND, and that ordering is the whole reason the indices above read the
-		// way they do: btn1 becomes controlID 0 and btn2 controlID 1 (prompt.zs:231-256).
+		// way they do: btn1 becomes controlID 0 and btn2 controlID 1 (prompt.zs:201-217).
 		// destructiveIndex 1 gives the confirm button Selaco's red styling; defaultSelection 0 puts the
 		// cursor on Cancel, so a player who presses A twice by reflex cancels.
 		//
-		// The last three arguments reproduce initNew's own declared defaults (prompt.zs:107) rather than
-		// relying on them: no image, and the scale an absent image is given anyway.
+		// The last four arguments reproduce initNew's own declared defaults (prompt.zs:114) rather than
+		// relying on them: no image, the scale an absent image is given anyway, and the stock layout.
 		VMValue params[] =
 		{
 			prompt, CurrentMenu, &title, &body, &cancel, &confirm, &unusedButton, &unusedButton,
-			AuxConfirmButton, AuxCancelButton, &noImage, 1.0, 1.0
+			AuxConfirmButton, AuxCancelButton, &noImage, 1.0, 1.0, &promptInterface
 		};
 		static_assert(countof(params) == AuxInitNewRegs, "initNew's register count and this list disagree");
 
@@ -732,7 +737,7 @@ void AuxDeviceResetFrame()
 	if (answer < 0)
 	{
 		// No answer yet. The prompt calls back on both of its buttons, but a Back press closes it silently
-		// (prompt.zs:378-384) and never calls onClosed at all, so the window is also closed by every menu
+		// (prompt.zs:316-322) and never calls onClosed at all, so the window is also closed by every menu
 		// going away - otherwise a dismissed prompt would leave it open for the rest of the session.
 		if (menuactive == MENU_Off)
 			AuxAwaitingAnswer = false;
